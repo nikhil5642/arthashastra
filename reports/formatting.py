@@ -7,12 +7,16 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-VERDICT_STYLES: dict[str, str] = {
-    "STRONG_BUY": "bold green",
-    "BUY": "green",
-    "HOLD": "yellow",
-    "AVOID": "red",
-    "RED_FLAG": "bold red",
+from scorers.base import Verdict
+
+# Verdict → Rich style mapping. Keyed by the Verdict enum so typos at
+# the call site raise a KeyError instead of falling through to "white".
+VERDICT_STYLES: dict[Verdict, str] = {
+    Verdict.STRONG_BUY: "bold green",
+    Verdict.BUY: "green",
+    Verdict.HOLD: "yellow",
+    Verdict.AVOID: "red",
+    Verdict.RED_FLAG: "bold red",
 }
 
 
@@ -23,9 +27,17 @@ def make_console(*, quiet: bool = False) -> Console:
     return Console()
 
 
-def verdict_text(verdict: str, confidence: float) -> Text:
-    style = VERDICT_STYLES.get(verdict, "white")
-    return Text(f"{verdict}  (confidence {confidence:.0%})", style=style)
+def verdict_text(verdict: Verdict | str, confidence: float) -> Text:
+    """Render a verdict with its conviction colour."""
+    # Accept raw strings at the boundary (judgment JSON, tests) and
+    # coerce back to the enum so downstream is fully typed.
+    if not isinstance(verdict, Verdict):
+        try:
+            verdict = Verdict(verdict)
+        except ValueError:
+            return Text(f"{verdict}  (confidence {confidence:.0%})", style="white")
+    style = VERDICT_STYLES[verdict]
+    return Text(f"{verdict.value}  (confidence {confidence:.0%})", style=style)
 
 
 def evidence_table(evidence: list[str]) -> Table:

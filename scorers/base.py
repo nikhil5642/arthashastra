@@ -1,32 +1,71 @@
-"""Shared scorer types: ScorerResult, StockScore, Verdict."""
+"""Shared scoring types: `Verdict`, `Pillar`, `ScorerResult`, `StockScore`.
+
+Design notes:
+  - `Verdict` and `Pillar` are `StrEnum`s. Each member IS a string (subclass
+    of `str`) so JSON serialization, dict-key usage, and equality with
+    raw string literals all keep working — but callers get IDE
+    autocomplete, typo-safety, and a single canonical list of valid
+    values. No more `if verdict == "STRONG_BYU":` typos that silently
+    evaluate to False.
+  - `StockScore.evidence` is typed as `dict[Pillar, list[str]]` but
+    accepts string keys transparently because StrEnum members are strs.
+  - `verdict_for(composite)` returns a `Verdict` (not a bare string) so
+    downstream call sites can iterate / compare against the enum.
+"""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+from enum import StrEnum
+from typing import Any
 
-Verdict = Literal["STRONG_BUY", "BUY", "HOLD", "AVOID", "RED_FLAG"]
+
+# ── Enums (StrEnum = str subclass, backwards-compat with string literals) ────
+
+
+class Verdict(StrEnum):
+    STRONG_BUY = "STRONG_BUY"
+    BUY = "BUY"
+    HOLD = "HOLD"
+    AVOID = "AVOID"
+    RED_FLAG = "RED_FLAG"
+
+
+class Pillar(StrEnum):
+    FUNDAMENTALS = "fundamentals"
+    LEADERSHIP = "leadership"
+    PROSPECTS = "prospects"
+    NEWS = "news"
+
+
+# ── Verdict banding ──────────────────────────────────────────────────────────
 
 VERDICT_BANDS: tuple[tuple[float, Verdict], ...] = (
-    (80, "STRONG_BUY"),
-    (70, "BUY"),
-    (55, "HOLD"),
-    (40, "AVOID"),
-    (0, "RED_FLAG"),
+    (80, Verdict.STRONG_BUY),
+    (70, Verdict.BUY),
+    (55, Verdict.HOLD),
+    (40, Verdict.AVOID),
+    (0, Verdict.RED_FLAG),
 )
 
 
 def verdict_for(composite: float) -> Verdict:
+    """Map a 0-100 composite score to its Verdict band."""
     for threshold, v in VERDICT_BANDS:
         if composite >= threshold:
             return v
-    return "RED_FLAG"
+    return Verdict.RED_FLAG
+
+
+# ── Scorer output types ─────────────────────────────────────────────────────
 
 
 @dataclass(slots=True)
 class ScorerResult:
-    pillar: str
+    """One pillar's output. The composite is built by blending four of these."""
+
+    pillar: Pillar
     score: float
     confidence: float
     evidence: list[str] = field(default_factory=list)
@@ -42,6 +81,8 @@ class ScorerResult:
 
 @dataclass(slots=True)
 class StockScore:
+    """Final blended score across all four pillars."""
+
     ticker: str
     leadership_score: float
     fundamentals_score: float
@@ -51,7 +92,7 @@ class StockScore:
     verdict: Verdict
     confidence: float
     data_completeness_pct: float
-    evidence: dict[str, list[str]] = field(default_factory=dict)
+    evidence: dict[Pillar, list[str]] = field(default_factory=dict)
     last_updated: str = ""
     low_confidence: bool = False
 

@@ -18,26 +18,29 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
 
+from scorers.base import Verdict
 from scorers.base import StockScore
 from screener.price_history import PriceSnapshot
+from signals.signal_bus import Severity
 
 DEFAULT_MIN_COMPOSITE = 75.0
-DEFAULT_QUALITY_VERDICTS: frozenset[str] = frozenset({"STRONG_BUY", "BUY"})
+DEFAULT_QUALITY_VERDICTS: frozenset[Verdict] = frozenset({Verdict.STRONG_BUY, Verdict.BUY})
 
-VERDICT_ORDER: tuple[str, ...] = (
-    "STRONG_BUY",
-    "BUY",
-    "HOLD",
-    "AVOID",
-    "RED_FLAG",
-)
+# Verdicts from best to worst. Driven off the `Verdict` enum's definition
+# order so there's only one canonical list of valid values project-wide.
+VERDICT_ORDER: tuple[Verdict, ...] = tuple(Verdict)
 
 
-def allowed_verdicts_from_min(min_verdict: str) -> frozenset[str]:
-    """e.g. 'HOLD' → {'STRONG_BUY', 'BUY', 'HOLD'}."""
-    if min_verdict not in VERDICT_ORDER:
-        raise ValueError(f"Unknown verdict {min_verdict!r}")
-    idx = VERDICT_ORDER.index(min_verdict)
+def allowed_verdicts_from_min(min_verdict: Verdict | str) -> frozenset[Verdict]:
+    """e.g. `Verdict.HOLD` → {STRONG_BUY, BUY, HOLD}.
+
+    Accepts either a `Verdict` enum or a raw string for CLI args.
+    """
+    try:
+        cutoff = Verdict(min_verdict)
+    except ValueError as exc:
+        raise ValueError(f"Unknown verdict {min_verdict!r}") from exc
+    idx = VERDICT_ORDER.index(cutoff)
     return frozenset(VERDICT_ORDER[: idx + 1])
 
 
@@ -52,7 +55,7 @@ class DipSignal:
     composite_score: float
     divergence_bonus: int
     reason: str
-    severity: str  # INFO | ALERT | URGENT
+    severity: Severity
     triggered_at: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -73,7 +76,7 @@ def check_dip(
     blocked_tickers: set[str] | None = None,
     prior_fundamentals_score: float | None = None,
     min_composite: float = DEFAULT_MIN_COMPOSITE,
-    allowed_verdicts: frozenset[str] | set[str] | None = None,
+    allowed_verdicts: frozenset[Verdict] | set[Verdict] | frozenset[str] | set[str] | None = None,
 ) -> DipCheck:
     reasons: list[str] = []
     # Explicit None check — an empty set is a legitimate "block all" signal.
@@ -130,11 +133,13 @@ def check_dip(
         ):
             divergence_bonus = 10
 
-    severity = "INFO"
+    severity: Severity
     if drawdown_pct >= 30 and divergence_bonus > 0:
-        severity = "URGENT"
+        severity = Severity.URGENT
     elif drawdown_pct >= 20:
-        severity = "ALERT"
+        severity = Severity.ALERT
+    else:
+        severity = Severity.INFO
 
     reason_str = (
         f"{drawdown_pct:.1f}% off 52w high; "
@@ -158,10 +163,16 @@ def check_dip(
     return DipCheck(qualifies=True, reasons=reasons, dip=dip)
 
 
+_SEVERITY_WEIGHT: dict[Severity, float] = {
+    Severity.URGENT: 1.3,
+    Severity.ALERT: 1.0,
+    Severity.INFO: 0.7,
+}
+
+
 def dip_rank_key(dip: DipSignal) -> float:
-    severity_weight = {"URGENT": 1.3, "ALERT": 1.0, "INFO": 0.7}
     return (
         dip.composite_score
-        * severity_weight.get(dip.severity, 1.0)
+        * _SEVERITY_WEIGHT.get(dip.severity, 1.0)
         * (1 + dip.divergence_bonus / 100)
     )

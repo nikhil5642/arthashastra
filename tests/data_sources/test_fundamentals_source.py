@@ -7,7 +7,6 @@ directly for pure-logic checks, or monkeypatch `_fetch_yfinance_sync` and
 
 from __future__ import annotations
 
-from data_sources import fundamentals_source
 from data_sources.fundamentals_source import (
     BalanceSheetSnapshot,
     FetchResult,
@@ -22,6 +21,10 @@ from data_sources.fundamentals_source import (
     _parse_pct,
     _screener_cagr,
     _source_tag,
+)
+from data_sources.fundamentals_source import (
+    screener_adapter,
+    yfinance_adapter,
 )
 
 
@@ -116,8 +119,8 @@ async def test_fetch_merges_mocked_sources(monkeypatch):
             "company_name": "Test Industries Limited (Consolidated)",
         }
 
-    monkeypatch.setattr(fundamentals_source, "_fetch_yfinance_sync", fake_yf_sync)
-    monkeypatch.setattr(fundamentals_source, "_fetch_screener_in", fake_screener)
+    monkeypatch.setattr(yfinance_adapter, "_fetch_yfinance_sync", fake_yf_sync)
+    monkeypatch.setattr(screener_adapter, "_fetch_screener_in", fake_screener)
 
     result = await FundamentalsSource().fetch_full("TEST")
     assert isinstance(result, FetchResult)
@@ -141,8 +144,8 @@ async def test_fetch_returns_snapshot_only_via_convenience(monkeypatch):
     async def fake_screener(ticker: str) -> dict:
         return {}
 
-    monkeypatch.setattr(fundamentals_source, "_fetch_yfinance_sync", fake_yf_sync)
-    monkeypatch.setattr(fundamentals_source, "_fetch_screener_in", fake_screener)
+    monkeypatch.setattr(yfinance_adapter, "_fetch_yfinance_sync", fake_yf_sync)
+    monkeypatch.setattr(screener_adapter, "_fetch_screener_in", fake_screener)
 
     snap = await FundamentalsSource().fetch("TEST")
     assert isinstance(snap, BalanceSheetSnapshot)
@@ -156,8 +159,8 @@ async def test_fetch_handles_yfinance_exception(monkeypatch):
     async def fake_screener(ticker: str) -> dict:
         return {"roe": 15.0, "roce": 18.0, "promoter_holding": 50.0}
 
-    monkeypatch.setattr(fundamentals_source, "_fetch_yfinance_sync", boom)
-    monkeypatch.setattr(fundamentals_source, "_fetch_screener_in", fake_screener)
+    monkeypatch.setattr(yfinance_adapter, "_fetch_yfinance_sync", boom)
+    monkeypatch.setattr(screener_adapter, "_fetch_screener_in", fake_screener)
 
     snap = await FundamentalsSource().fetch("TEST")
     assert snap.source == "screener"
@@ -172,8 +175,8 @@ async def test_fetch_handles_screener_exception(monkeypatch):
     async def boom(ticker: str) -> dict:
         raise RuntimeError("screener blocked")
 
-    monkeypatch.setattr(fundamentals_source, "_fetch_yfinance_sync", fake_yf_sync)
-    monkeypatch.setattr(fundamentals_source, "_fetch_screener_in", boom)
+    monkeypatch.setattr(yfinance_adapter, "_fetch_yfinance_sync", fake_yf_sync)
+    monkeypatch.setattr(screener_adapter, "_fetch_screener_in", boom)
 
     snap = await FundamentalsSource().fetch("TEST")
     assert snap.source == "yfinance"
@@ -187,8 +190,8 @@ async def test_fetch_empty_when_both_sources_fail(monkeypatch):
     async def boom_async(ticker: str) -> dict:
         raise RuntimeError("y")
 
-    monkeypatch.setattr(fundamentals_source, "_fetch_yfinance_sync", boom_sync)
-    monkeypatch.setattr(fundamentals_source, "_fetch_screener_in", boom_async)
+    monkeypatch.setattr(yfinance_adapter, "_fetch_yfinance_sync", boom_sync)
+    monkeypatch.setattr(screener_adapter, "_fetch_screener_in", boom_async)
 
     result = await FundamentalsSource().fetch_full("NOPE")
     assert result.snapshot.source == "empty"

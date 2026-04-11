@@ -13,13 +13,13 @@ weight in the composite than any single qualitative read.
 
 from __future__ import annotations
 
-from scorers.base import ScorerResult, StockScore, verdict_for
+from scorers.base import Pillar, ScorerResult, StockScore, verdict_for
 
-PILLAR_WEIGHTS: dict[str, float] = {
-    "fundamentals": 0.40,
-    "leadership": 0.30,
-    "prospects": 0.15,
-    "news": 0.15,
+PILLAR_WEIGHTS: dict[Pillar, float] = {
+    Pillar.FUNDAMENTALS: 0.40,
+    Pillar.LEADERSHIP: 0.30,
+    Pillar.PROSPECTS: 0.15,
+    Pillar.NEWS: 0.15,
 }
 
 NEUTRAL_PRIOR_SCORE = 50.0
@@ -34,11 +34,11 @@ def blend(
     prospects: ScorerResult,
     news: ScorerResult,
 ) -> StockScore:
-    pillars = {
-        "leadership": leadership,
-        "fundamentals": fundamentals,
-        "prospects": prospects,
-        "news": news,
+    pillars: dict[Pillar, ScorerResult] = {
+        Pillar.LEADERSHIP: leadership,
+        Pillar.FUNDAMENTALS: fundamentals,
+        Pillar.PROSPECTS: prospects,
+        Pillar.NEWS: news,
     }
 
     composite = round(
@@ -66,21 +66,26 @@ def blend(
     )
 
 
-def pending_judgment(pillar: str) -> ScorerResult:
+def pending_judgment(pillar: Pillar | str) -> ScorerResult:
     """Placeholder for a pillar that awaits Claude's judgment.
 
-    Use this when no Judgment entry exists in the judgment cache yet. The
-    composite reflects a neutral prior with zero confidence so downstream
-    consumers (pick, brief) can clearly see that a human / Claude pass is
-    needed before acting on the verdict.
+    Use this when no Judgment entry exists in the judgment cache yet.
+    The composite reflects a neutral prior with zero confidence so
+    downstream consumers (pick, brief) can clearly see that a human /
+    Claude pass is needed before acting on the verdict.
+
+    Accepts either a `Pillar` enum or a raw string label for backwards
+    compatibility with callers that still pass strings — coerces to
+    `Pillar` at the boundary so the stored value is always typed.
     """
+    pillar_enum = pillar if isinstance(pillar, Pillar) else Pillar(pillar)
     return ScorerResult(
-        pillar=pillar,
+        pillar=pillar_enum,
         score=NEUTRAL_PRIOR_SCORE,
         confidence=0.0,
         evidence=[
-            f"{pillar} pillar pending Claude judgment — run /analyse-stock "
-            f"in Claude Code to generate it."
+            f"{pillar_enum.value} pillar pending Claude judgment — "
+            f"run /analyse-stock in Claude Code to generate it."
         ],
         data_completeness_pct=PENDING_COMPLETENESS_PCT,
     )

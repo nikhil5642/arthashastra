@@ -26,7 +26,11 @@ import json
 import logging
 import sys
 
-from data_sources.fundamentals_source import is_bank_snapshot
+from fundamental_engine.analysis_context import (
+    analysis_context_panel,
+    format_age,
+    judgment_age_days,
+)
 from fundamental_engine.config import AnalystConfig
 
 log = logging.getLogger("fundamental_engine")
@@ -167,15 +171,15 @@ def _run_refresh(target: str, *, rejudge: bool = False) -> int:
             for ticker in tickers:
                 age = _judgment_age_days_for(store, ticker)
                 store.path_for(ticker).unlink(missing_ok=True)
-                age_str = _format_age(age)
+                age_str = format_age(age)
                 print(f"rejudge: cleared {ticker} judgment ({age_str})")
         else:
             bare = canonical(target)
             existing = store.get(bare)
             fp = store.path_for(bare)
             if existing is not None:
-                age = _judgment_age_days(existing.updated_at)
-                age_str = _format_age(age)
+                age = judgment_age_days(existing.updated_at)
+                age_str = format_age(age)
                 fp.unlink()
                 print(f"rejudge: cleared {bare} judgment ({age_str})")
             else:
@@ -248,7 +252,7 @@ def _run_analyse(ticker: str) -> int:
     # see exactly which state this run used — fresh deterministic vs
     # blended with a cached judgment, and how old that judgment was.
     console = make_console()
-    console.print(_analysis_context_panel(result, bare, price_rows_written))
+    console.print(analysis_context_panel(result, bare, price_rows_written))
 
     reports_dir = cfg.data_cache_dir / "reports"
     fp = render_stock_report(result.snapshot, result.score, output_dir=reports_dir)
@@ -262,10 +266,10 @@ def _run_analyse(ticker: str) -> int:
             "Code to generate and cache them."
         )
     else:
-        age = _judgment_age_days(result.judgment.updated_at)
+        age = judgment_age_days(result.judgment.updated_at)
         if age is not None and age >= 3:
             print(
-                f"\n[warn] Blended with a {_format_age(age)} Claude judgment. "
+                f"\n[warn] Blended with a {format_age(age)} Claude judgment. "
                 f"Run `fundamental_engine refresh {bare} --rejudge` "
                 f"followed by `/analyse-stock {bare}` in Claude Code for "
                 f"a fresh qualitative pass."
@@ -273,94 +277,11 @@ def _run_analyse(ticker: str) -> int:
     return 0
 
 
-def _analysis_context_panel(result, ticker: str, price_rows_written: int):
-    from rich.panel import Panel
-
-    snap = result.snapshot
-    lines: list[str] = []
-    lines.append(
-        f"Fundamentals:     live fetch  ·  source: {snap.source}  ·  "
-        f"completeness {snap.data_completeness_pct:.0f}%"
-    )
-    if price_rows_written > 0:
-        lines.append(
-            f"Price history:    refreshed  ·  {price_rows_written} daily closes "
-            f"persisted to prices.db"
-        )
-    else:
-        lines.append(
-            "Price history:    not refreshed this run "
-            "(empty yfinance history response)"
-        )
-
-    if is_bank_snapshot(snap):
-        lines.append(
-            "[cyan]Bank rubric:     profitability (ROE + ROA + NIM) + PAT "
-            "growth + franchise (fee income + CD ratio) + governance. "
-            "GNPA / CASA / CRAR are not exposed by screener — verify "
-            "asset quality and capital adequacy in the Claude leadership "
-            "pillar before trusting the verdict.[/cyan]"
-        )
-
-    if result.judgment is None:
-        lines.append(
-            "Cached judgment:  [red]none[/red]  ·  leadership / prospects / "
-            "news will be rendered as pending — this is the honest "
-            "deterministic-only baseline."
-        )
-    else:
-        age = _judgment_age_days(result.judgment.updated_at)
-        age_str = _format_age(age)
-        if age is not None and age >= 3:
-            tag = f"[yellow]{age_str} — STALE[/yellow]"
-        else:
-            tag = f"[green]{age_str}[/green]"
-        leader = result.judgment.leader_name or "—"
-        lines.append(
-            f"Cached judgment:  {tag}  ·  leader: {leader}  ·  "
-            f"last updated {result.judgment.updated_at or 'unknown'}"
-        )
-
-    return Panel(
-        "\n".join(lines),
-        title=f"Analysis context — {ticker}",
-        title_align="left",
-        border_style="dim",
-    )
-
-
-
-
-def _judgment_age_days(updated_at: str) -> int | None:
-    from datetime import datetime
-
-    if not updated_at:
-        return None
-    try:
-        # Strip any trailing timezone offset; we compare naive.
-        ts = updated_at.split("+")[0].rstrip("Z")
-        parsed = datetime.fromisoformat(ts)
-    except ValueError:
-        return None
-    delta = datetime.now() - parsed.replace(tzinfo=None)
-    return max(0, delta.days)
-
-
 def _judgment_age_days_for(store, ticker: str) -> int | None:
     judgment = store.get(ticker)
     if judgment is None:
         return None
-    return _judgment_age_days(judgment.updated_at)
-
-
-def _format_age(days: int | None) -> str:
-    if days is None:
-        return "age unknown"
-    if days == 0:
-        return "0 days old"
-    if days == 1:
-        return "1 day old"
-    return f"{days} days old"
+    return judgment_age_days(judgment.updated_at)
 
 
 def _run_pick(amount_raw: str, min_composite: float, min_verdict: str) -> int:

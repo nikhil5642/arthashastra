@@ -26,7 +26,7 @@ from data_sources.fundamentals_source import (
     FundamentalsSource,
 )
 from fundamental_engine.judgments import Judgment, JudgmentStore, PillarJudgment
-from scorers.base import ScorerResult, StockScore
+from scorers.base import Pillar, ScorerResult, StockScore
 from scorers.composite_scorer import blend, pending_judgment
 from scorers.fundamentals_scorer import score_fundamentals
 
@@ -73,13 +73,13 @@ def score_snapshot(
 
     judgment = JudgmentStore(data_cache_dir).get(snap.ticker)
     leadership_result = _result_from_pillar(
-        judgment.leadership if judgment else None, "leadership"
+        judgment.leadership if judgment else None, Pillar.LEADERSHIP
     )
     prospects_result = _result_from_pillar(
-        judgment.prospects if judgment else None, "prospects"
+        judgment.prospects if judgment else None, Pillar.PROSPECTS
     )
     news_result = _result_from_pillar(
-        judgment.news if judgment else None, "news"
+        judgment.news if judgment else None, Pillar.NEWS
     )
 
     score = blend(
@@ -123,7 +123,7 @@ def build_extended_score_dict(
 
 
 def _result_from_pillar(
-    pillar: PillarJudgment | None, name: str
+    pillar: PillarJudgment | None, name: Pillar
 ) -> ScorerResult:
     if pillar is None:
         return pending_judgment(name)
