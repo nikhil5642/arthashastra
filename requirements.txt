@@ -1,0 +1,25 @@
+# Network + serialization
+httpx[http2]>=0.27.0
+python-dotenv>=1.0.0
+orjson>=3.10.0
+
+# Market data (yfinance needs curl_cffi for rate-limit bypass in 2026)
+yfinance>=1.2.0
+curl_cffi>=0.6.0
+
+# HTML, RSS, Wikipedia
+selectolax>=0.3.21
+feedparser>=6.0.11
+wikipedia-api>=0.7.1
+
+# Rate limiting + dates
+aiolimiter>=1.1.0
+python-dateutil>=2.9
+
+# Terminal report formatting (not a dashboard)
+rich>=13.7
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pytest-timeout>=2.3.0

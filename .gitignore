@@ -1,0 +1,30 @@
+# Environment
+.env
+.env.sandbox
+.env.live
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Generated data
+data_cache/
+!data_cache/.gitkeep
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Reports (generated on demand)
+data_cache/reports/
