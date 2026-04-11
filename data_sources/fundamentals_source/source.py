@@ -20,7 +20,6 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any
 
 # Import the adapter modules (not the functions) so monkeypatching at
 # `yfinance_adapter._fetch_yfinance_sync` / `screener_adapter._fetch_screener_in`
@@ -29,6 +28,7 @@ from data_sources.fundamentals_source import screener_adapter, yfinance_adapter
 from data_sources.fundamentals_source.snapshot import (
     BalanceSheetSnapshot,
     SCORED_FIELDS,
+    SnapshotFields,
 )
 
 log = logging.getLogger(__name__)
@@ -152,21 +152,24 @@ class FundamentalsSource:
 
         yf_task = yfinance_adapter._fetch_yfinance(bare)
         screener_task = screener_adapter._fetch_screener_in(bare)
-        yf_result, screener_data = await asyncio.gather(
+        yf_result, screener_result = await asyncio.gather(
             yf_task, screener_task, return_exceptions=True
         )
 
-        yf_data: dict[str, Any]
+        yf_data: SnapshotFields
         price_history: list[PriceRow]
         if isinstance(yf_result, Exception):
             log.warning("yfinance failed for %s: %s", bare, yf_result)
-            yf_data, price_history = {}, []
+            yf_data, price_history = SnapshotFields(), []
         else:
             yf_data, price_history = yf_result
 
-        if isinstance(screener_data, Exception):
-            log.warning("screener.in failed for %s: %s", bare, screener_data)
-            screener_data = {}
+        screener_data: SnapshotFields
+        if isinstance(screener_result, Exception):
+            log.warning("screener.in failed for %s: %s", bare, screener_result)
+            screener_data = SnapshotFields()
+        else:
+            screener_data = screener_result
 
         merged = _merge(yf_data, screener_data)
         merged["ticker"] = bare
@@ -184,19 +187,25 @@ class FundamentalsSource:
 
 
 def _merge(
-    yf_data: dict[str, Any], screener_data: dict[str, Any]
-) -> dict[str, Any]:
-    """Combine yfinance + screener dicts per `_SCREENER_WINS` precedence."""
-    merged = dict(yf_data)
+    yf_data: SnapshotFields, screener_data: SnapshotFields
+) -> SnapshotFields:
+    """Combine yfinance + screener per `_SCREENER_WINS` precedence."""
+    merged: SnapshotFields = dict(yf_data)  # type: ignore[assignment]
     for key, value in screener_data.items():
         if value is None:
             continue
-        if key in _SCREENER_WINS or key not in merged or merged[key] in (None, ""):
-            merged[key] = value
+        if (
+            key in _SCREENER_WINS
+            or key not in merged
+            or merged[key] in (None, "")  # type: ignore[literal-required]
+        ):
+            merged[key] = value  # type: ignore[literal-required]
     return merged
 
 
-def _source_tag(yf_data: dict[str, Any], screener_data: dict[str, Any]) -> str:
+def _source_tag(
+    yf_data: SnapshotFields, screener_data: SnapshotFields
+) -> str:
     """Annotate `snap.source` so the reader can see which adapters fired."""
     yf_ok = bool(yf_data)
     sc_ok = bool(screener_data)
@@ -210,7 +219,7 @@ def _source_tag(yf_data: dict[str, Any], screener_data: dict[str, Any]) -> str:
 
 
 def _field_sources(
-    yf_data: dict[str, Any], screener_data: dict[str, Any]
+    yf_data: SnapshotFields, screener_data: SnapshotFields
 ) -> dict[str, str]:
     """Attribute each SCORED field to whichever adapter provided it."""
     out: dict[str, str] = {}

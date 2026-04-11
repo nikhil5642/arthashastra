@@ -9,7 +9,15 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import date
-from typing import Any
+from typing import TypedDict
+
+# Public row aliases for the nested JSON blobs the snapshot carries.
+# Both are deliberately loose — screener's peer table and documents
+# list have variable columns depending on the sector and the company's
+# listing history — so callers get a typed "this is a stringly-keyed
+# row" shape without pretending to know every possible column.
+PeerRecord = dict[str, float | str]
+DocumentRecord = dict[str, str]
 
 # ── Scored fields (feed the data_completeness_pct metric) ────────────────────
 
@@ -175,8 +183,8 @@ class BalanceSheetSnapshot:
     raw_shareholding_headers: list[str] = field(default_factory=list)
 
     # ── Peer comparison and documents (from screener) ────────────────────────
-    peers: list[dict[str, Any]] = field(default_factory=list)
-    documents: list[dict[str, str]] = field(default_factory=list)
+    peers: list[PeerRecord] = field(default_factory=list)
+    documents: list[DocumentRecord] = field(default_factory=list)
     screener_analysis_text: str = ""
 
     # ── yfinance extras (analyst bundle, metadata — best-effort) ─────────────
@@ -210,13 +218,170 @@ class BalanceSheetSnapshot:
         present = sum(1 for f in SCORED_FIELDS if getattr(self, f) is not None)
         return round(100.0 * present / len(SCORED_FIELDS), 1)
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "BalanceSheetSnapshot":
+    def from_dict(cls, data: dict[str, object]) -> "BalanceSheetSnapshot":
         allowed = set(cls.__dataclass_fields__)
-        kwargs = {k: v for k, v in data.items() if k in allowed}
+        kwargs: dict[str, object] = {
+            k: v for k, v in data.items() if k in allowed
+        }
         kwargs.setdefault("ticker", "")
         kwargs.setdefault("as_of_date", date.today().isoformat())
-        return cls(**kwargs)
+        return cls(**kwargs)  # type: ignore[arg-type]
+
+
+# ── SnapshotFields: the adapter-layer builder shape ────────────────────────
+#
+# Adapters (`yfinance_adapter`, `screener_adapter`) build up a partial view
+# of a future `BalanceSheetSnapshot` field by field, then hand it to
+# `source._merge()` which produces the final dataclass. Using a `TypedDict`
+# here instead of `dict[str, Any]` gives type-checkers the list of valid
+# keys (matching the dataclass field names), so a typo like
+# `out["debt_to_equityy"] = 0.5` is caught at edit time rather than
+# silently lost in the merge step.
+#
+# `total=False` marks every key as optional — any individual adapter call
+# only fills the subset of fields it can compute from what the remote
+# service returned. The shape is intentionally a near-mirror of
+# `BalanceSheetSnapshot`; keep the two in sync when adding a new scored
+# or profile field.
+
+
+class SnapshotFields(TypedDict, total=False):
+    """Partial, under-construction view of a `BalanceSheetSnapshot`.
+
+    See the module-level note above. This is the builder type used by
+    the yfinance and screener adapters.
+    """
+
+    ticker: str
+    as_of_date: str
+
+    # Scored: leverage / liquidity
+    debt_to_equity: float | None
+    interest_coverage: float | None
+    current_ratio: float | None
+    quick_ratio: float | None
+    net_debt_to_ebitda: float | None
+
+    # Scored: profitability
+    roe: float | None
+    roce: float | None
+    roa: float | None
+
+    # Scored: growth
+    rev_3y_cagr: float | None
+    pat_3y_cagr: float | None
+
+    # Scored: earnings quality
+    ocf_to_pat: float | None
+    fcf_to_pat: float | None
+
+    # Scored: promoter
+    promoter_holding: float | None
+    pledge_pct: float | None
+
+    # Price context
+    current_price: float | None
+    high_52w: float | None
+    low_52w: float | None
+    market_cap_cr: float | None
+    pe_ratio: float | None
+    book_value_per_share: float | None
+    dividend_yield: float | None
+
+    # Financial profile: margins
+    gross_margin: float | None
+    operating_margin: float | None
+    net_margin: float | None
+
+    # Financial profile: cost structure
+    cogs_to_revenue: float | None
+    sga_to_revenue: float | None
+    tax_rate: float | None
+
+    # Financial profile: working capital days
+    debtor_days: float | None
+    inventory_days: float | None
+    payable_days: float | None
+    cash_conversion_cycle_days: float | None
+
+    # Financial profile: asset composition
+    tangible_book_ratio: float | None
+    goodwill_to_equity: float | None
+
+    # Bank-specific metrics
+    nim: float | None
+    net_interest_income_cr: float | None
+    non_interest_income_cr: float | None
+    non_interest_income_ratio: float | None
+    deposits_cr: float | None
+    borrowings_cr: float | None
+    credit_deposit_ratio: float | None
+    is_bank: bool
+
+    # Shareholding trend
+    shareholding_dates: list[str]
+    promoter_holding_trend: list[float]
+    fii_holding_trend: list[float]
+    dii_holding_trend: list[float]
+    public_holding_trend: list[float]
+    num_shareholders_trend: list[float]
+    fii_delta_1y_pct_points: float | None
+    dii_delta_1y_pct_points: float | None
+    promoter_delta_1y_pct_points: float | None
+    num_shareholders_delta_1y_pct: float | None
+
+    # Multi-year ratio / P&L trend
+    roce_annual_trend: list[float]
+    operating_margin_annual_trend: list[float]
+    net_profit_annual_trend: list[float]
+    sales_annual_trend: list[float]
+    borrowings_annual_trend: list[float]
+    borrowings_delta_3y_pct: float | None
+
+    # Full raw screener dump
+    raw_profit_loss: dict[str, list[float | None]]
+    raw_profit_loss_headers: list[str]
+    raw_balance_sheet: dict[str, list[float | None]]
+    raw_balance_sheet_headers: list[str]
+    raw_cash_flow: dict[str, list[float | None]]
+    raw_cash_flow_headers: list[str]
+    raw_ratios: dict[str, list[float | None]]
+    raw_ratios_headers: list[str]
+    raw_quarters: dict[str, list[float | None]]
+    raw_quarters_headers: list[str]
+    raw_shareholding_quarterly: dict[str, list[float | None]]
+    raw_shareholding_headers: list[str]
+
+    # Peer comparison and documents
+    peers: list[PeerRecord]
+    documents: list[DocumentRecord]
+    screener_analysis_text: str
+
+    # yfinance extras (analyst bundle, metadata)
+    analyst_target_mean: float | None
+    analyst_target_high: float | None
+    analyst_target_low: float | None
+    analyst_recommendation_mean: float | None
+    analyst_opinion_count: int | None
+    country: str
+    website: str
+    full_time_employees: int | None
+    business_summary: str
+
+    # Quarterly trend
+    quarterly_revenue: list[float]
+    quarterly_pat: list[float]
+    quarterly_dates: list[str]
+    latest_yoy_revenue_growth: float | None
+    latest_yoy_pat_growth: float | None
+
+    # Metadata
+    company_name: str
+    sector: str
+    industry: str
+    source: str
+    field_sources: dict[str, str]

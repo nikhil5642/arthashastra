@@ -15,7 +15,6 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +55,7 @@ class TickerMatch:
     long_name: str
     score: float  # higher = better match (NSE primary > BSE > other)
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "ticker": self.ticker,
             "symbol": self.symbol,

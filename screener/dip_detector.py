@@ -16,10 +16,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Any
 
-from scorers.base import Verdict
-from scorers.base import StockScore
+from scorers.base import StockScore, Verdict
 from screener.price_history import PriceSnapshot
 from signals.signal_bus import Severity
 
@@ -58,7 +56,7 @@ class DipSignal:
     severity: Severity
     triggered_at: str
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 

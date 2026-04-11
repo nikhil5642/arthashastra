@@ -19,10 +19,24 @@ import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
-from typing import Any
+from typing import TypedDict
 from urllib.parse import quote_plus
 
 log = logging.getLogger(__name__)
+
+
+class FeedEntry(TypedDict):
+    """Shape of one raw RSS entry after `_fetch_feed_sync` normalises it.
+
+    All five fields are always populated (possibly empty-string) so
+    downstream code can read them without None-checks.
+    """
+
+    headline: str
+    body: str
+    url: str
+    published_at: str
+    source: str
 
 class NewsCategory(StrEnum):
     """Categories a material news event can fall into.
@@ -97,7 +111,7 @@ class NewsItem:
     is_material: bool = False
     material_category: str = ""
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -156,7 +170,7 @@ class NewsSource:
             ),
             return_exceptions=True,
         )
-        raw: list[dict[str, Any]] = []
+        raw: list[FeedEntry] = []
         for group in raw_groups:
             if isinstance(group, Exception):
                 log.warning("market news fetch error: %s", group)
@@ -166,7 +180,7 @@ class NewsSource:
 
     def _build_items(
         self,
-        raw: list[dict[str, Any]],
+        raw: list[FeedEntry],
         ticker: str,
         within_days: int,
     ) -> list[NewsItem]:
@@ -200,7 +214,7 @@ class NewsSource:
         return items
 
 
-def _fetch_feed_sync(url: str, source_name: str) -> list[dict[str, Any]]:
+def _fetch_feed_sync(url: str, source_name: str) -> list[FeedEntry]:
     try:
         import feedparser
     except ImportError:
@@ -213,20 +227,20 @@ def _fetch_feed_sync(url: str, source_name: str) -> list[dict[str, Any]]:
         log.warning("feed %s parse failed: %s", url, e)
         return []
 
-    out: list[dict[str, Any]] = []
+    out: list[FeedEntry] = []
     for entry in d.entries[:80]:
         out.append(
-            {
-                "headline": entry.get("title", "") or "",
-                "body": _strip_html(
+            FeedEntry(
+                headline=entry.get("title", "") or "",
+                body=_strip_html(
                     entry.get("summary", "") or entry.get("description", "") or ""
                 ),
-                "url": entry.get("link", "") or "",
-                "published_at": entry.get("published", "")
+                url=entry.get("link", "") or "",
+                published_at=entry.get("published", "")
                 or entry.get("updated", "")
                 or "",
-                "source": source_name,
-            }
+                source=source_name,
+            )
         )
     return out
 

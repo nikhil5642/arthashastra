@@ -25,7 +25,7 @@ Tests monkeypatch `_fetch_screener_in` on this module directly.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -40,19 +40,34 @@ from data_sources.fundamentals_source.primitives import (
     _screener_cagr,
     _screener_month_to_iso,
 )
+from data_sources.fundamentals_source.snapshot import (
+    DocumentRecord,
+    PeerRecord,
+    SnapshotFields,
+)
+
+if TYPE_CHECKING:
+    # Forward references — only the type checker sees these.
+    # Zero runtime import cost thanks to `from __future__ import annotations`.
+    from selectolax.parser import HTMLParser
 
 log = logging.getLogger(__name__)
+
+# Screener tables come out as (headers, {row_label: [v0, …, vN | None]})
+# where None marks a missing / non-numeric cell. Callers preserve column
+# alignment by using positional indexing into the values list.
+SectionRows = dict[str, list[float | None]]
 
 
 # ── Public entry point ───────────────────────────────────────────────────────
 
 
-async def _fetch_screener_in(ticker: str) -> dict[str, Any]:
+async def _fetch_screener_in(ticker: str) -> SnapshotFields:
     tree = await _fetch_html_tree(ticker)
     if tree is None:
-        return {}
+        return SnapshotFields()
 
-    out: dict[str, Any] = {}
+    out: SnapshotFields = SnapshotFields()
 
     _parse_top_ratios(tree, out)
     _parse_h1(tree, out)
@@ -89,7 +104,7 @@ async def _fetch_screener_in(ticker: str) -> dict[str, Any]:
     return out
 
 
-async def _fetch_html_tree(ticker: str):
+async def _fetch_html_tree(ticker: str) -> "HTMLParser | None":
     """Fetch the screener.in company page and return a parsed tree, or None."""
     urls = [
         f"{SCREENER_BASE_URL}/{ticker.upper()}/consolidated/",
@@ -127,7 +142,7 @@ async def _fetch_html_tree(ticker: str):
 # ── Top-of-page parsers (single-value fields) ────────────────────────────────
 
 
-def _parse_top_ratios(tree, out: dict[str, Any]) -> None:
+def _parse_top_ratios(tree: "HTMLParser", out: SnapshotFields) -> None:
     """Extract the `ul#top-ratios` list (P/E, P/B, ROE, ROCE, mcap, etc.)."""
     for item in tree.css("ul#top-ratios li"):
         name_el = item.css_first(".name")
@@ -179,7 +194,7 @@ def _parse_top_ratios(tree, out: dict[str, Any]) -> None:
                     out["low_52w"] = lo
 
 
-def _parse_h1(tree, out: dict[str, Any]) -> None:
+def _parse_h1(tree: "HTMLParser", out: SnapshotFields) -> None:
     h1 = tree.css_first("h1")
     if h1:
         text = h1.text(strip=True)
@@ -187,7 +202,7 @@ def _parse_h1(tree, out: dict[str, Any]) -> None:
             out["company_name"] = text
 
 
-def _parse_shareholding(tree, out: dict[str, Any]) -> None:
+def _parse_shareholding(tree: "HTMLParser", out: SnapshotFields) -> None:
     """Pull latest promoter holding + pledge % (the quarterly-SHP trend
     is captured separately by `_apply_shareholding_trend`)."""
     sh = tree.css_first("#shareholding")
@@ -216,7 +231,7 @@ def _parse_shareholding(tree, out: dict[str, Any]) -> None:
 
 
 def _parse_section(
-    tree, section_id: str
+    tree: "HTMLParser", section_id: str
 ) -> tuple[list[str], dict[str, list[float | None]]]:
     """Return (headers, {row_label: [v0, ..., vN]}) for a screener table.
 
@@ -262,7 +277,7 @@ def _parse_section(
 
 
 def _apply_balance_sheet(
-    out: dict[str, Any],
+    out: SnapshotFields,
     headers: list[str],
     rows: dict[str, list[float | None]],
 ) -> None:
@@ -287,7 +302,7 @@ def _apply_balance_sheet(
 
 
 def _apply_profit_loss(
-    out: dict[str, Any],
+    out: SnapshotFields,
     headers: list[str],
     rows: dict[str, list[float | None]],
 ) -> None:
@@ -336,7 +351,7 @@ def _apply_profit_loss(
 
 
 def _apply_cash_flow(
-    out: dict[str, Any],
+    out: SnapshotFields,
     cf_rows: dict[str, list[float | None]],
     pl_headers: list[str],
     pl_rows: dict[str, list[float | None]],
@@ -358,7 +373,7 @@ def _apply_cash_flow(
 
 
 def _apply_ratios(
-    out: dict[str, Any],
+    out: SnapshotFields,
     rows: dict[str, list[float | None]],
 ) -> None:
     if not rows:
@@ -377,7 +392,7 @@ def _apply_ratios(
         out["cash_conversion_cycle_days"] = ccc
 
 
-def _apply_quarters(tree, out: dict[str, Any]) -> None:
+def _apply_quarters(tree: "HTMLParser", out: SnapshotFields) -> None:
     headers, rows = _parse_section(tree, "quarters")
     sales = rows.get("sales") or rows.get("revenue")
     net_profit = rows.get("net profit")
@@ -418,7 +433,7 @@ def _apply_quarters(tree, out: dict[str, Any]) -> None:
 
 
 def _apply_derived(
-    out: dict[str, Any],
+    out: SnapshotFields,
     bs_rows: dict[str, list[float | None]],
     pl_headers: list[str],
     pl_rows: dict[str, list[float | None]],
@@ -432,7 +447,7 @@ def _apply_derived(
 
 
 def _apply_bank_metrics(
-    out: dict[str, Any],
+    out: SnapshotFields,
     bs_rows: dict[str, list[float | None]],
     pl_headers: list[str],
     pl_rows: dict[str, list[float | None]],
@@ -515,7 +530,7 @@ def _apply_bank_metrics(
 
 
 def _apply_multi_year_trends(
-    out: dict[str, Any],
+    out: SnapshotFields,
     bs_headers: list[str],
     bs_rows: dict[str, list[float | None]],
     pl_headers: list[str],
@@ -575,7 +590,7 @@ def _apply_multi_year_trends(
                     out["borrowings_delta_3y_pct"] = 0.0
 
 
-def _apply_shareholding_trend(tree, out: dict[str, Any]) -> None:
+def _apply_shareholding_trend(tree: "HTMLParser", out: SnapshotFields) -> None:
     """Parse the quarterly shareholding pattern table.
 
     Screener's `#shareholding > #quarterly-shp > table` has up to 12
@@ -671,12 +686,12 @@ def _apply_shareholding_trend(tree, out: dict[str, Any]) -> None:
 
 
 def _apply_raw_dumps(
-    out: dict[str, Any],
+    out: SnapshotFields,
     pl_headers: list[str], pl_rows: dict[str, list[float | None]],
     bs_headers: list[str], bs_rows: dict[str, list[float | None]],
     cf_headers: list[str], cf_rows: dict[str, list[float | None]],
     r_headers: list[str], r_rows: dict[str, list[float | None]],
-    tree,
+    tree: "HTMLParser",
 ) -> None:
     """Store every parsed row verbatim so future questions don't re-scrape.
 
@@ -734,7 +749,7 @@ def _apply_raw_dumps(
     out["raw_shareholding_quarterly"] = rows
 
 
-def _apply_peers(tree, out: dict[str, Any]) -> None:
+def _apply_peers(tree: "HTMLParser", out: SnapshotFields) -> None:
     """Extract the peer-comparison table (relative valuation vs industry).
 
     Screener loads peers via JS into a placeholder, so the static HTML
@@ -750,12 +765,12 @@ def _apply_peers(tree, out: dict[str, Any]) -> None:
     header_cells = [th.text(strip=True) for th in tbl.css("thead th")]
     if not header_cells:
         return
-    records: list[dict[str, Any]] = []
+    records: list[PeerRecord] = []
     for row in tbl.css("tbody tr"):
         cells = row.css("td")
         if len(cells) < 2:
             continue
-        rec: dict[str, Any] = {}
+        rec: PeerRecord = {}
         for i, cell in enumerate(cells):
             key = header_cells[i].lower() if i < len(header_cells) else f"col{i}"
             text = cell.text(strip=True)
@@ -769,12 +784,12 @@ def _apply_peers(tree, out: dict[str, Any]) -> None:
         out["peers"] = records
 
 
-def _apply_documents(tree, out: dict[str, Any]) -> None:
+def _apply_documents(tree: "HTMLParser", out: SnapshotFields) -> None:
     """Extract links to annual reports, credit ratings, investor PPTs."""
     docs_el = tree.css_first("#documents")
     if docs_el is None:
         return
-    records: list[dict[str, str]] = []
+    records: list[DocumentRecord] = []
     for a in docs_el.css("a[href]")[:40]:  # cap to avoid ballooning
         href = a.attributes.get("href", "") or ""
         label = a.text(strip=True)
@@ -787,7 +802,7 @@ def _apply_documents(tree, out: dict[str, Any]) -> None:
         out["documents"] = records
 
 
-def _apply_analysis_text(tree, out: dict[str, Any]) -> None:
+def _apply_analysis_text(tree: "HTMLParser", out: SnapshotFields) -> None:
     """Capture screener's own `#analysis` narrative block, if present."""
     el = tree.css_first("#analysis")
     if el is None:

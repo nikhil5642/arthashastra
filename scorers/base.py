@@ -18,7 +18,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
 
 
 # ── Enums (StrEnum = str subclass, backwards-compat with string literals) ────
@@ -75,7 +74,7 @@ class ScorerResult:
     def low_confidence(self) -> bool:
         return self.data_completeness_pct < 60.0
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self) | {"low_confidence": self.low_confidence}
 
 
@@ -101,5 +100,5 @@ class StockScore:
             self.last_updated = datetime.now().isoformat(timespec="seconds")
         self.low_confidence = self.data_completeness_pct < 60.0
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)

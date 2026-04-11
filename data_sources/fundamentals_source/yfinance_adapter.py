@@ -19,13 +19,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Callable, TypeVar
 
-from data_sources.fundamentals_source.snapshot import BalanceSheetSnapshot  # noqa: F401
+from data_sources.fundamentals_source.snapshot import SnapshotFields
+
+if TYPE_CHECKING:
+    # Forward references — only the type checker sees these. No runtime
+    # import cost because `from __future__ import annotations` makes every
+    # type hint a string that's only resolved by mypy / pyright.
+    from pandas import DataFrame
+    from yfinance import Ticker
 
 log = logging.getLogger(__name__)
 
 PriceRow = tuple[str, float]
+
+_T = TypeVar("_T")
 
 _NSE_SUFFIX = ".NS"
 _BSE_SUFFIX = ".BO"
@@ -49,35 +58,48 @@ def _yf_symbol(raw: str) -> str:
 # ── Public entry point ───────────────────────────────────────────────────────
 
 
-async def _fetch_yfinance(ticker: str) -> tuple[dict[str, Any], list[PriceRow]]:
+async def _fetch_yfinance(
+    ticker: str,
+) -> tuple[SnapshotFields, list[PriceRow]]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _fetch_yfinance_sync, ticker)
 
 
-def _fetch_yfinance_sync(ticker: str) -> tuple[dict[str, Any], list[PriceRow]]:
+def _fetch_yfinance_sync(
+    ticker: str,
+) -> tuple[SnapshotFields, list[PriceRow]]:
     try:
         import yfinance as yf
     except ImportError:
         log.warning("yfinance not installed")
-        return {}, []
+        return SnapshotFields(), []
 
     symbol = _yf_symbol(ticker)
 
     try:
-        t = yf.Ticker(symbol)
+        t: "Ticker" = yf.Ticker(symbol)
     except Exception as e:
         log.warning("yfinance Ticker() failed for %s: %s", ticker, e)
-        return {}, []
+        return SnapshotFields(), []
 
-    hist = _safe(lambda: t.history(period="1y", auto_adjust=True), label=f"history {ticker}")
-    bs = _safe(lambda: t.balance_sheet, label=f"balance_sheet {ticker}")
-    is_ = _safe(lambda: t.income_stmt, label=f"income_stmt {ticker}")
-    cf = _safe(lambda: t.cashflow, label=f"cashflow {ticker}")
-    q_is = _safe(
+    hist: "DataFrame | None" = _safe(
+        lambda: t.history(period="1y", auto_adjust=True),
+        label=f"history {ticker}",
+    )
+    bs: "DataFrame | None" = _safe(
+        lambda: t.balance_sheet, label=f"balance_sheet {ticker}"
+    )
+    is_: "DataFrame | None" = _safe(
+        lambda: t.income_stmt, label=f"income_stmt {ticker}"
+    )
+    cf: "DataFrame | None" = _safe(
+        lambda: t.cashflow, label=f"cashflow {ticker}"
+    )
+    q_is: "DataFrame | None" = _safe(
         lambda: t.quarterly_income_stmt, label=f"quarterly_income_stmt {ticker}"
     )
 
-    out: dict[str, Any] = {}
+    out: SnapshotFields = SnapshotFields()
     price_history: list[PriceRow] = []
 
     _fill_price_context(out, price_history, hist)
@@ -96,7 +118,9 @@ def _fetch_yfinance_sync(ticker: str) -> tuple[dict[str, Any], list[PriceRow]]:
 
 
 def _fill_price_context(
-    out: dict[str, Any], price_history: list[PriceRow], hist
+    out: SnapshotFields,
+    price_history: list[PriceRow],
+    hist: "DataFrame | None",
 ) -> None:
     if hist is None or hist.empty:
         return
@@ -114,7 +138,9 @@ def _fill_price_context(
             continue
 
 
-def _fill_balance_sheet_derived(out: dict[str, Any], bs) -> None:
+def _fill_balance_sheet_derived(
+    out: SnapshotFields, bs: "DataFrame | None"
+) -> None:
     total_debt = _bs_first(bs, ("Total Debt", "Long Term Debt"))
     equity = _bs_first(
         bs, ("Common Stock Equity", "Stockholders Equity", "Total Stockholder Equity")
@@ -140,7 +166,11 @@ def _fill_balance_sheet_derived(out: dict[str, Any], bs) -> None:
             )
 
 
-def _fill_income_statement_derived(out: dict[str, Any], is_, bs) -> None:
+def _fill_income_statement_derived(
+    out: SnapshotFields,
+    is_: "DataFrame | None",
+    bs: "DataFrame | None",
+) -> None:
     ebit = _bs_first(is_, ("EBIT", "Operating Income"))
     ebitda = _bs_first(is_, ("EBITDA", "Normalized EBITDA"))
     interest = _bs_first(is_, ("Interest Expense",))
@@ -228,7 +258,11 @@ def _fill_income_statement_derived(out: dict[str, Any], is_, bs) -> None:
         out["tax_rate"] = round(tax_provision / pretax * 100, 2)
 
 
-def _fill_cash_flow_derived(out: dict[str, Any], cf, is_) -> None:
+def _fill_cash_flow_derived(
+    out: SnapshotFields,
+    cf: "DataFrame | None",
+    is_: "DataFrame | None",
+) -> None:
     ocf = _bs_first(
         cf,
         (
@@ -251,7 +285,11 @@ def _fill_cash_flow_derived(out: dict[str, Any], cf, is_) -> None:
         out["fcf_to_pat"] = round(fcf / net_income, 3)
 
 
-def _fill_working_capital_days(out: dict[str, Any], is_, bs) -> None:
+def _fill_working_capital_days(
+    out: SnapshotFields,
+    is_: "DataFrame | None",
+    bs: "DataFrame | None",
+) -> None:
     revenue = _bs_first(is_, ("Total Revenue", "Operating Revenue"))
     cogs = _bs_first(is_, ("Cost Of Revenue", "Reconciled Cost Of Revenue"))
     inventory = _bs_first(bs, ("Inventory",))
@@ -275,7 +313,9 @@ def _fill_working_capital_days(out: dict[str, Any], is_, bs) -> None:
         )
 
 
-def _fill_asset_composition(out: dict[str, Any], bs) -> None:
+def _fill_asset_composition(
+    out: SnapshotFields, bs: "DataFrame | None"
+) -> None:
     equity = _bs_first(
         bs, ("Common Stock Equity", "Stockholders Equity", "Total Stockholder Equity")
     )
@@ -294,7 +334,9 @@ def _fill_asset_composition(out: dict[str, Any], bs) -> None:
         out["goodwill_to_equity"] = round(goodwill_intangibles / equity, 3)
 
 
-def _fill_quarterly_trend(out: dict[str, Any], q_is) -> None:
+def _fill_quarterly_trend(
+    out: SnapshotFields, q_is: "DataFrame | None"
+) -> None:
     q_rev, q_pat, q_dates = _extract_quarterly_series(q_is)
     if q_rev:
         out["quarterly_revenue"] = q_rev
@@ -311,7 +353,9 @@ def _fill_quarterly_trend(out: dict[str, Any], q_is) -> None:
         )
 
 
-def _fill_info_metadata(out: dict[str, Any], t, ticker: str) -> None:
+def _fill_info_metadata(
+    out: SnapshotFields, t: "Ticker", ticker: str
+) -> None:
     """`.info` is best-effort — rate-limited on busy days."""
     info = _safe(lambda: t.info or {}, label=f"info {ticker}") or {}
     if not info:
@@ -358,7 +402,7 @@ def _fill_info_metadata(out: dict[str, Any], t, ticker: str) -> None:
 
 
 def _extract_quarterly_series(
-    q_is,
+    q_is: "DataFrame | None",
 ) -> tuple[list[float], list[float], list[str]]:
     """Return (revenue, net_income, date_iso) lists, most-recent-first."""
     if q_is is None:
@@ -414,7 +458,13 @@ def _extract_quarterly_series(
     return revenue_series, pat_series, dates
 
 
-def _safe(fn, *, label: str):
+def _safe(fn: Callable[[], _T], *, label: str) -> _T | None:
+    """Call `fn()`, log any exception, return None on failure.
+
+    Used to wrap yfinance accessors whose failure modes include network
+    errors, rate-limit responses, and mid-request resets — any of which
+    should degrade gracefully rather than crash the refresh.
+    """
     try:
         return fn()
     except Exception as e:
@@ -422,7 +472,9 @@ def _safe(fn, *, label: str):
         return None
 
 
-def _bs_first(df, candidates: tuple[str, ...]) -> float | None:
+def _bs_first(
+    df: "DataFrame | None", candidates: tuple[str, ...]
+) -> float | None:
     """Return the first populated value across `candidates` row names."""
     if df is None:
         return None
@@ -447,7 +499,10 @@ def _bs_first(df, candidates: tuple[str, ...]) -> float | None:
 
 
 def _compute_cagr(
-    df, candidates: tuple[str, ...], *, years: int
+    df: "DataFrame | None",
+    candidates: tuple[str, ...],
+    *,
+    years: int,
 ) -> float | None:
     """CAGR from a yfinance DataFrame's row. iloc[0] is newest."""
     if df is None:

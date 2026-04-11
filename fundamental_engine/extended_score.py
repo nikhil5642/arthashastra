@@ -17,7 +17,7 @@ and downstream code works with typed `ExtendedScore` objects.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from data_sources.fundamentals_source import BalanceSheetSnapshot
 from scorers.base import Pillar, StockScore, Verdict
@@ -65,7 +65,7 @@ class ExtendedScore:
         )
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ExtendedScore | None":
+    def from_dict(cls, data: dict[str, object]) -> "ExtendedScore | None":
         """Parse a row from `scores.json`. Returns None if it's unusable.
 
         "Unusable" means the row lacks the minimum StockScore fields
@@ -75,51 +75,50 @@ class ExtendedScore:
         """
         if "composite" not in data or "verdict" not in data:
             return None
-        try:
-            verdict = Verdict(data["verdict"])
-        except ValueError:
+        verdict_raw = data["verdict"]
+        if not isinstance(verdict_raw, str):
             return None
         try:
-            evidence_raw = data.get("evidence") or {}
-            evidence: dict[Pillar, list[str]] = {}
-            for key, bullets in evidence_raw.items():
-                try:
-                    pillar = Pillar(key)
-                except ValueError:
-                    continue
-                evidence[pillar] = list(bullets or [])
+            verdict = Verdict(verdict_raw)
+        except ValueError:
+            return None
 
+        try:
             score = StockScore(
-                ticker=str(data.get("ticker", "")),
-                leadership_score=float(data.get("leadership_score", 50)),
-                fundamentals_score=float(data.get("fundamentals_score", 50)),
-                prospects_score=float(data.get("prospects_score", 50)),
-                news_score=float(data.get("news_score", 50)),
-                composite=float(data["composite"]),
+                ticker=_as_str(data.get("ticker"), default=""),
+                leadership_score=_as_float(data.get("leadership_score"), default=50.0),
+                fundamentals_score=_as_float(
+                    data.get("fundamentals_score"), default=50.0
+                ),
+                prospects_score=_as_float(data.get("prospects_score"), default=50.0),
+                news_score=_as_float(data.get("news_score"), default=50.0),
+                composite=_as_float(data["composite"], default=0.0),
                 verdict=verdict,
-                confidence=float(data.get("confidence", 0.5)),
-                data_completeness_pct=float(data.get("data_completeness_pct", 50)),
-                evidence=evidence,
-                last_updated=str(data.get("last_updated", "")),
+                confidence=_as_float(data.get("confidence"), default=0.5),
+                data_completeness_pct=_as_float(
+                    data.get("data_completeness_pct"), default=50.0
+                ),
+                evidence=_parse_evidence(data.get("evidence")),
+                last_updated=_as_str(data.get("last_updated"), default=""),
             )
         except (KeyError, ValueError, TypeError):
             return None
 
         return cls(
             score=score,
-            company_name=str(data.get("company_name") or ""),
-            sector=str(data.get("sector") or ""),
-            industry=str(data.get("industry") or ""),
+            company_name=_as_str(data.get("company_name"), default=""),
+            sector=_as_str(data.get("sector"), default=""),
+            industry=_as_str(data.get("industry"), default=""),
             current_price=_optional_float(data.get("current_price")),
             high_52w=_optional_float(data.get("high_52w")),
             low_52w=_optional_float(data.get("low_52w")),
             market_cap_cr=_optional_float(data.get("market_cap_cr")),
-            source=str(data.get("source") or "unknown"),
+            source=_as_str(data.get("source"), default="unknown"),
         )
 
     # ── Serialization ───────────────────────────────────────────────────────
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         """Flatten to the `scores.json` row shape.
 
         StockScore fields live at the top level (composite, verdict,
@@ -144,10 +143,48 @@ class ExtendedScore:
         return d
 
 
-def _optional_float(v: Any) -> float | None:
+def _optional_float(v: object) -> float | None:
     if v is None:
         return None
-    try:
+    if isinstance(v, (int, float)):
         return float(v)
-    except (TypeError, ValueError):
-        return None
+    if isinstance(v, str):
+        try:
+            return float(v)
+        except ValueError:
+            return None
+    return None
+
+
+def _as_float(v: object, *, default: float) -> float:
+    """Coerce an untyped JSON value to a float or return the default."""
+    parsed = _optional_float(v)
+    return parsed if parsed is not None else default
+
+
+def _as_str(v: object, *, default: str) -> str:
+    """Coerce an untyped JSON value to a string or return the default."""
+    if v is None:
+        return default
+    if isinstance(v, str):
+        return v or default
+    return str(v)
+
+
+def _parse_evidence(raw: object) -> dict[Pillar, list[str]]:
+    """Parse the {pillar: [bullets]} shape from JSON, skipping unknown keys."""
+    out: dict[Pillar, list[str]] = {}
+    if not isinstance(raw, dict):
+        return out
+    for key, bullets in raw.items():
+        if not isinstance(key, str):
+            continue
+        try:
+            pillar = Pillar(key)
+        except ValueError:
+            continue
+        if not isinstance(bullets, list):
+            out[pillar] = []
+            continue
+        out[pillar] = [str(b) for b in bullets]
+    return out
