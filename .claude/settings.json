@@ -1,0 +1,44 @@
+{
+  "_comment": "Project-level guardrails. Blocks destructive ops and prompts before touching top-level config / docs / skills. Source code edits fall through to the default allow.",
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(rm -rf /:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean -f:*)",
+      "Bash(git clean -fd:*)",
+      "Bash(git checkout .:*)",
+      "Bash(git checkout --:*)",
+      "Bash(git branch -D:*)",
+      "Bash(git commit --amend:*)",
+      "Bash(git rebase:*)",
+      "Bash(sqlite3:* DROP TABLE*)",
+      "Bash(sqlite3:* DELETE FROM*)"
+    ],
+    "ask": [
+      "Edit(CLAUDE.md)",
+      "Edit(README.md)",
+      "Edit(launch.sh)",
+      "Edit(.env)",
+      "Edit(.env.example)",
+      "Edit(pyproject.toml)",
+      "Edit(requirements.txt)",
+      "Edit(.gitignore)",
+      "Edit(.claude/settings.json)",
+      "Edit(.claude/skills/**)",
+      "Write(CLAUDE.md)",
+      "Write(README.md)",
+      "Write(launch.sh)",
+      "Write(.env)",
+      "Write(.env.example)",
+      "Write(pyproject.toml)",
+      "Write(requirements.txt)",
+      "Write(.gitignore)",
+      "Write(.claude/settings.json)",
+      "Write(.claude/skills/**)"
+    ]
+  }
+}
