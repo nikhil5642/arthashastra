@@ -42,7 +42,6 @@ fundamental_engine/          # orchestrator, CLI, config, scheduler
 ├── resolver.py              # name → ticker via yfinance search
 ├── judgments.py             # Judgment + JudgmentStore (Claude writes, Python reads)
 ├── universe.py              # tickers currently in scores.json
-├── market_calendar.py       # weekday + market-hours gate (no holidays)
 ├── leader_mode_classifier.py
 ├── budget_parser.py         # "1L" / "2.5L" → INR float
 ├── ticker.py                # canonical / yf_symbol / slug

@@ -76,7 +76,11 @@ def check_dip(
     allowed_verdicts: frozenset[str] | set[str] | None = None,
 ) -> DipCheck:
     reasons: list[str] = []
-    allowed = allowed_verdicts or DEFAULT_QUALITY_VERDICTS
+    # Explicit None check — an empty set is a legitimate "block all" signal.
+    if allowed_verdicts is None:
+        allowed = DEFAULT_QUALITY_VERDICTS
+    else:
+        allowed = frozenset(allowed_verdicts)
 
     blocked = blocked_tickers or set()
     if score.ticker in blocked:

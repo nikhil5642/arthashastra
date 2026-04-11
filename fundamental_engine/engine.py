@@ -2,29 +2,35 @@
 
 The universe is whatever the user has already loaded via
 `refresh <ticker>` or `analyse <ticker>`. The engine walks that list at a
-fixed interval, fetches live fundamentals, recomputes deterministic scores,
-and persists them. Qualitative pillars come from judgments Claude writes —
+fixed interval, fetches live fundamentals + real daily closes, recomputes
+deterministic scores, and persists both the extended StockScore and the
+raw price history. Qualitative pillars come from judgments Claude writes —
 the engine never calls an LLM itself.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from dataclasses import asdict, dataclass
 
-from fundamental_engine.analyse_pipeline import NoDataError, analyse_ticker
+from data_sources.fundamentals_source import FundamentalsSource
+from fundamental_engine.analyse_pipeline import (
+    NoDataError,
+    build_extended_score_dict,
+    score_snapshot,
+)
 from fundamental_engine.cache import JsonStore
 from fundamental_engine.config import AnalystConfig
-from fundamental_engine.market_calendar import MarketCalendar
 from fundamental_engine.ticker import canonical
 from fundamental_engine.universe import load_universe
+from screener.price_history import PriceHistoryStore
 from signals.signal_bus import Severity, Signal, SignalBus, SignalType
 
 log = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL_SECONDS = 900
+PRICE_DB_FILENAME = "prices.db"
 
 
 @dataclass(slots=True)
@@ -34,6 +40,7 @@ class RefreshResult:
     composite: float | None = None
     verdict: str | None = None
     detail: str = ""
+    price_rows: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -42,9 +49,9 @@ class RefreshResult:
 class Engine:
     def __init__(self, cfg: AnalystConfig) -> None:
         self._cfg = cfg
-        self._calendar = MarketCalendar()
         self._scores_store = JsonStore(cfg.data_cache_dir / "scores.json")
         self._signal_bus = SignalBus(path=cfg.data_cache_dir / "signals.json")
+        self._price_db_path = cfg.data_cache_dir / PRICE_DB_FILENAME
 
     @classmethod
     def from_env(cls) -> "Engine":
@@ -56,33 +63,33 @@ class Engine:
     async def refresh_one(self, ticker: str) -> RefreshResult:
         ticker = canonical(ticker)
         try:
-            result = await analyse_ticker(
-                ticker, data_cache_dir=self._cfg.data_cache_dir
+            fetch = await FundamentalsSource().fetch_full(ticker)
+        except Exception as e:  # pragma: no cover
+            log.exception("fetch %s failed", ticker)
+            return RefreshResult(ticker=ticker, status="error", detail=str(e))
+
+        try:
+            result = score_snapshot(
+                fetch.snapshot,
+                data_cache_dir=self._cfg.data_cache_dir,
+                price_history=fetch.price_history,
             )
         except NoDataError as e:
             log.info("refresh %s: no_data", ticker)
             return RefreshResult(ticker=ticker, status="no_data", detail=str(e))
         except Exception as e:  # pragma: no cover
-            log.exception("refresh %s failed", ticker)
+            log.exception("score %s failed", ticker)
             return RefreshResult(ticker=ticker, status="error", detail=str(e))
 
-        snap = result.snapshot
-        score = result.score
-        extended = score.to_dict()
-        extended.update(
-            {
-                "company_name": snap.company_name,
-                "sector": snap.sector,
-                "industry": snap.industry,
-                "current_price": snap.current_price,
-                "high_52w": snap.high_52w,
-                "low_52w": snap.low_52w,
-                "market_cap_cr": snap.market_cap_cr,
-                "source": snap.source,
-            }
-        )
+        extended = build_extended_score_dict(result)
         self._scores_store.upsert(ticker, extended)
 
+        price_rows_written = 0
+        if result.price_history:
+            with PriceHistoryStore(self._price_db_path) as store:
+                price_rows_written = store.load_rows(ticker, result.price_history)
+
+        score = result.score
         self._signal_bus.emit(
             Signal(
                 signal_type=SignalType.SCORE_UPDATED,
@@ -97,6 +104,7 @@ class Engine:
             status="ok",
             composite=score.composite,
             verdict=score.verdict,
+            price_rows=price_rows_written,
         )
 
     async def refresh_all(
@@ -120,24 +128,6 @@ class Engine:
             )
         return results
 
-    async def process_refresh_queue(self) -> int:
-        queue_path = self._cfg.data_cache_dir / "refresh_queue.jsonl"
-        if not queue_path.exists():
-            return 0
-        lines = queue_path.read_text().splitlines()
-        queue_path.unlink()
-        processed = 0
-        for line in lines:
-            try:
-                req = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            ticker = req.get("ticker")
-            if ticker:
-                await self.refresh_one(ticker)
-                processed += 1
-        return processed
-
     async def run_forever(
         self, *, interval_seconds: int = DEFAULT_INTERVAL_SECONDS
     ) -> None:  # pragma: no cover — long-running loop
@@ -145,23 +135,8 @@ class Engine:
         while True:
             log.info("engine tick")
             await self.refresh_all()
-            await self.process_refresh_queue()
             try:
                 await asyncio.sleep(interval_seconds)
             except asyncio.CancelledError:
                 log.info("engine stopped")
                 break
-
-
-def enqueue_refresh(cache_dir, ticker: str) -> None:
-    from datetime import datetime
-
-    queue_path = cache_dir / "refresh_queue.jsonl"
-    queue_path.parent.mkdir(parents=True, exist_ok=True)
-    with queue_path.open("a") as f:
-        f.write(
-            json.dumps(
-                {"ticker": ticker, "ts": datetime.now().isoformat()}
-            )
-            + "\n"
-        )

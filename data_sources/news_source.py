@@ -18,7 +18,7 @@ import asyncio
 import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable
+from typing import Any
 from urllib.parse import quote_plus
 
 log = logging.getLogger(__name__)
@@ -152,7 +152,12 @@ class NewsSource:
         ticker: str,
         within_days: int,
     ) -> list[NewsItem]:
-        cutoff = datetime.now() - timedelta(days=within_days)
+        # Compare everything in naive UTC. `_parse_dt` normalises to naive
+        # UTC already; we do the same for `cutoff` so the filter doesn't
+        # silently drop or keep items based on the host system's timezone.
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            days=within_days
+        )
         items: list[NewsItem] = []
         for entry in raw:
             published_at = entry.get("published_at", "")
@@ -209,10 +214,14 @@ def _fetch_feed_sync(url: str, source_name: str) -> list[dict[str, Any]]:
 
 
 def _parse_dt(s: str) -> datetime:
+    """Parse a published-at string to a naive-UTC datetime."""
     if not s:
         return datetime.min
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+        parsed = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
     except ValueError:
         pass
     try:

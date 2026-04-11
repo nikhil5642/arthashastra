@@ -1,11 +1,10 @@
-"""Signal schema — the language between feeds and on-demand reports.
+"""Signal bus — append-only JSON log of analyst events.
 
-The cache warmer writes signals. CLI commands (analyse / pick / brief) read them
-to enrich reports. All communication happens through data_cache/signals.json.
-
-Shape copied from trading/feeds/signals.py (Signal, SignalBus, Severity) so the
-two projects share vocabulary without runtime coupling. The SignalType enum is
-analyst-specific — no options/IV/OI types from trading.
+The cache warmer writes signals. CLI commands (analyse / pick / brief) read
+them to enrich reports. All communication happens through a JSON file
+whose path is always supplied explicitly by the caller (typically
+`AnalystConfig.data_cache_dir / "signals.json"`) — there is no module-level
+default path that could silently disagree with DATA_CACHE_DIR.
 """
 
 from __future__ import annotations
@@ -19,8 +18,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-SIGNALS_FILE = Path(__file__).parent.parent / "data_cache" / "signals.json"
-MAX_SIGNALS_KEPT = 500  # larger than trading's 100 — analyst runs on longer horizons
+MAX_SIGNALS_KEPT = 500
 
 
 class Severity(str, Enum):
@@ -96,9 +94,9 @@ class Signal:
 
 
 class SignalBus:
-    """Append-only JSON log of analyst events. Single writer = cache warmer."""
+    """Append-only JSON log. Callers must pass the file path explicitly."""
 
-    def __init__(self, path: Path = SIGNALS_FILE, *, max_kept: int = MAX_SIGNALS_KEPT) -> None:
+    def __init__(self, *, path: Path, max_kept: int = MAX_SIGNALS_KEPT) -> None:
         self._path = path
         self._max_kept = max_kept
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -134,5 +132,5 @@ class SignalBus:
         try:
             return json.loads(self._path.read_text())
         except (json.JSONDecodeError, OSError):
-            log.warning("signals.json corrupt — returning empty list")
+            log.warning("signals file %s corrupt — returning empty list", self._path)
             return []

@@ -10,9 +10,7 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from datetime import datetime
-from pathlib import Path
 
-from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 

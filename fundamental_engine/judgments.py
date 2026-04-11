@@ -36,6 +36,9 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
+_RESERVED_PILLAR_KEYS: frozenset[str] = frozenset({"score", "evidence"})
+
+
 @dataclass(slots=True)
 class PillarJudgment:
     score: float
@@ -44,7 +47,12 @@ class PillarJudgment:
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"score": self.score, "evidence": list(self.evidence)}
-        d.update(self.extras)
+        # Never let extras clobber score/evidence even if a caller constructs
+        # a PillarJudgment with a poisoned extras dict.
+        for k, v in self.extras.items():
+            if k in _RESERVED_PILLAR_KEYS:
+                continue
+            d[k] = v
         return d
 
     @classmethod
@@ -54,7 +62,7 @@ class PillarJudgment:
         score = float(data["score"])
         evidence = list(data.get("evidence") or [])
         extras = {
-            k: v for k, v in data.items() if k not in {"score", "evidence"}
+            k: v for k, v in data.items() if k not in _RESERVED_PILLAR_KEYS
         }
         return cls(score=score, evidence=evidence, extras=extras)
 

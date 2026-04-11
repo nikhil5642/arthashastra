@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from data_sources.fundamentals_source import BalanceSheetSnapshot
+import pytest
+
+from data_sources.fundamentals_source import BalanceSheetSnapshot, FetchResult
 from fundamental_engine import analyse_pipeline
 from fundamental_engine.analyse_pipeline import (
     AnalysisResult,
     NoDataError,
     analyse_ticker,
+    build_extended_score_dict,
+    score_snapshot,
 )
 from fundamental_engine.judgments import Judgment, JudgmentStore, PillarJudgment
 
@@ -38,36 +42,42 @@ def _fresh_snap(ticker: str = "RELIANCE") -> BalanceSheetSnapshot:
     )
 
 
+def _install_fake_source(
+    monkeypatch, snap: BalanceSheetSnapshot, price_history: list | None = None
+) -> None:
+    class FakeSource:
+        async def fetch_full(self, ticker: str) -> FetchResult:
+            return FetchResult(snapshot=snap, price_history=price_history or [])
+
+        async def fetch(self, ticker: str) -> BalanceSheetSnapshot:
+            return snap
+
+    monkeypatch.setattr(analyse_pipeline, "FundamentalsSource", lambda: FakeSource())
+
+
 async def test_analyse_ticker_without_judgment_uses_pending(
     monkeypatch, tmp_path: Path
 ):
-    class FakeSource:
-        async def fetch(self, ticker: str):
-            return _fresh_snap(ticker)
-
-    monkeypatch.setattr(analyse_pipeline, "FundamentalsSource", lambda: FakeSource())
+    snap = _fresh_snap()
+    _install_fake_source(monkeypatch, snap, [("2026-04-01", 1500.0)])
 
     result = await analyse_ticker("RELIANCE", data_cache_dir=tmp_path)
     assert isinstance(result, AnalysisResult)
     assert result.snapshot.ticker == "RELIANCE"
     assert result.score.fundamentals_score > 70  # deterministic strong fundamentals
-    # Stubs for LLM pillars → 50 each with 0 completeness.
+    # Pending placeholders use neutral-prior 50 with zero completeness.
     assert result.score.leadership_score == 50.0
     assert result.score.prospects_score == 50.0
     assert result.score.news_score == 50.0
     assert result.judgment is None
-    # With pending judgments the completeness is pulled way down.
     assert result.score.low_confidence is True
+    assert result.price_history == [("2026-04-01", 1500.0)]
 
 
 async def test_analyse_ticker_with_judgment_merges(
     monkeypatch, tmp_path: Path
 ):
-    class FakeSource:
-        async def fetch(self, ticker: str):
-            return _fresh_snap(ticker)
-
-    monkeypatch.setattr(analyse_pipeline, "FundamentalsSource", lambda: FakeSource())
+    _install_fake_source(monkeypatch, _fresh_snap())
 
     store = JudgmentStore(tmp_path)
     store.save(
@@ -98,15 +108,35 @@ async def test_analyse_ticker_with_judgment_merges(
 
 
 async def test_analyse_ticker_raises_when_no_data(monkeypatch, tmp_path: Path):
-    class EmptySource:
-        async def fetch(self, ticker: str):
-            return BalanceSheetSnapshot(
-                ticker=ticker, as_of_date="2026-04-11", source="empty"
-            )
-
-    monkeypatch.setattr(analyse_pipeline, "FundamentalsSource", lambda: EmptySource())
-
-    import pytest
+    empty = BalanceSheetSnapshot(
+        ticker="NOPE", as_of_date="2026-04-11", source="empty"
+    )
+    _install_fake_source(monkeypatch, empty)
 
     with pytest.raises(NoDataError):
         await analyse_ticker("NOPE", data_cache_dir=tmp_path)
+
+
+def test_score_snapshot_pure_no_io(tmp_path: Path):
+    snap = _fresh_snap()
+    result = score_snapshot(snap, data_cache_dir=tmp_path)
+    assert isinstance(result, AnalysisResult)
+    assert result.snapshot is snap
+    assert result.price_history == []
+
+
+def test_build_extended_score_dict_has_snapshot_metadata(tmp_path: Path):
+    snap = _fresh_snap()
+    result = score_snapshot(snap, data_cache_dir=tmp_path)
+    extended = build_extended_score_dict(result)
+    assert extended["ticker"] == "RELIANCE"
+    assert extended["company_name"] == "Reliance Industries Limited"
+    assert extended["sector"] == "Energy"
+    assert extended["industry"] == "Oil & Gas"
+    assert extended["current_price"] == 1500.0
+    assert extended["high_52w"] == 1800.0
+    assert extended["low_52w"] == 1200.0
+    assert extended["market_cap_cr"] == 100000.0
+    assert extended["source"] == "yfinance+screener"
+    assert "composite" in extended
+    assert "verdict" in extended

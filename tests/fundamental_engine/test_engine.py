@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from data_sources.fundamentals_source import BalanceSheetSnapshot
-from fundamental_engine import analyse_pipeline
-from fundamental_engine.engine import Engine, enqueue_refresh
+from data_sources.fundamentals_source import BalanceSheetSnapshot, FetchResult
+from data_sources import fundamentals_source as fs_module
+from fundamental_engine.engine import Engine
+from screener.price_history import PriceHistoryStore
 
 
 def _snap(ticker: str, *, complete: bool = True) -> BalanceSheetSnapshot:
@@ -38,17 +39,25 @@ def _snap(ticker: str, *, complete: bool = True) -> BalanceSheetSnapshot:
     )
 
 
-def _install_source(monkeypatch, ticker_to_snap: dict[str, BalanceSheetSnapshot]):
-    class FakeSource:
-        async def fetch(self, ticker: str):
-            return ticker_to_snap.get(
-                ticker,
-                BalanceSheetSnapshot(
-                    ticker=ticker, as_of_date="2026-04-11", source="empty"
-                ),
-            )
+def _install_source(
+    monkeypatch, ticker_to_result: dict[str, FetchResult]
+) -> None:
+    default = FetchResult(
+        snapshot=BalanceSheetSnapshot(
+            ticker="", as_of_date="2026-04-11", source="empty"
+        ),
+        price_history=[],
+    )
 
-    monkeypatch.setattr(analyse_pipeline, "FundamentalsSource", lambda: FakeSource())
+    class FakeSource:
+        async def fetch_full(self, ticker: str) -> FetchResult:
+            return ticker_to_result.get(ticker, default)
+
+    # Engine imports FundamentalsSource from fundamentals_source.
+    monkeypatch.setattr(fs_module, "FundamentalsSource", lambda: FakeSource())
+
+    import fundamental_engine.engine as engine_module
+    monkeypatch.setattr(engine_module, "FundamentalsSource", lambda: FakeSource())
 
 
 def _env(monkeypatch, tmp_path):
@@ -56,9 +65,20 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_CACHE_DIR", str(tmp_path / "cache"))
 
 
+def _history(days: int = 20, start: float = 1400.0) -> list[tuple[str, float]]:
+    return [(f"2026-03-{i + 1:02d}", start + i * 5) for i in range(days)]
+
+
 async def test_refresh_one_success(tmp_path: Path, monkeypatch):
     _env(monkeypatch, tmp_path)
-    _install_source(monkeypatch, {"RELIANCE": _snap("RELIANCE")})
+    _install_source(
+        monkeypatch,
+        {
+            "RELIANCE": FetchResult(
+                snapshot=_snap("RELIANCE"), price_history=_history()
+            )
+        },
+    )
 
     engine = Engine.from_env()
     result = await engine.refresh_one("RELIANCE")
@@ -66,6 +86,7 @@ async def test_refresh_one_success(tmp_path: Path, monkeypatch):
     assert result.status == "ok"
     assert result.composite is not None
     assert result.verdict in {"STRONG_BUY", "BUY", "HOLD", "AVOID", "RED_FLAG"}
+    assert result.price_rows == 20
 
     scores = json.loads(
         (tmp_path / "cache" / "scores.json").read_text()
@@ -73,6 +94,10 @@ async def test_refresh_one_success(tmp_path: Path, monkeypatch):
     assert "RELIANCE" in scores
     assert scores["RELIANCE"]["company_name"] == "RELIANCE Limited"
     assert scores["RELIANCE"]["source"] == "yfinance+screener"
+
+    # Price history persisted to the SQLite store.
+    with PriceHistoryStore(tmp_path / "cache" / "prices.db") as store:
+        assert store.latest("RELIANCE") is not None
 
 
 async def test_refresh_one_no_data(tmp_path: Path, monkeypatch):
@@ -88,7 +113,14 @@ async def test_refresh_all_walks_emergent_universe(tmp_path: Path, monkeypatch):
     _env(monkeypatch, tmp_path)
     _install_source(
         monkeypatch,
-        {"RELIANCE": _snap("RELIANCE"), "TCS": _snap("TCS")},
+        {
+            "RELIANCE": FetchResult(
+                snapshot=_snap("RELIANCE"), price_history=_history()
+            ),
+            "TCS": FetchResult(
+                snapshot=_snap("TCS"), price_history=_history()
+            ),
+        },
     )
 
     # Seed cache so the universe is non-empty.
@@ -106,7 +138,14 @@ async def test_refresh_all_walks_emergent_universe(tmp_path: Path, monkeypatch):
 
 async def test_refresh_emits_signals(tmp_path: Path, monkeypatch):
     _env(monkeypatch, tmp_path)
-    _install_source(monkeypatch, {"RELIANCE": _snap("RELIANCE")})
+    _install_source(
+        monkeypatch,
+        {
+            "RELIANCE": FetchResult(
+                snapshot=_snap("RELIANCE"), price_history=_history()
+            )
+        },
+    )
 
     engine = Engine.from_env()
     await engine.refresh_one("RELIANCE")
@@ -120,22 +159,14 @@ async def test_refresh_emits_signals(tmp_path: Path, monkeypatch):
     )
 
 
-async def test_refresh_queue_drained(tmp_path: Path, monkeypatch):
+async def test_refresh_without_history_still_succeeds(tmp_path: Path, monkeypatch):
     _env(monkeypatch, tmp_path)
     _install_source(
         monkeypatch,
-        {"RELIANCE": _snap("RELIANCE"), "TCS": _snap("TCS")},
+        {"RELIANCE": FetchResult(snapshot=_snap("RELIANCE"), price_history=[])},
     )
 
-    cache_dir = tmp_path / "cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    enqueue_refresh(cache_dir, "RELIANCE")
-    enqueue_refresh(cache_dir, "TCS")
-
     engine = Engine.from_env()
-    processed = await engine.process_refresh_queue()
-    assert processed == 2
-    assert not (cache_dir / "refresh_queue.jsonl").exists()
-
-    scores = json.loads((cache_dir / "scores.json").read_text())
-    assert {"RELIANCE", "TCS"} <= set(scores)
+    result = await engine.refresh_one("RELIANCE")
+    assert result.status == "ok"
+    assert result.price_rows == 0

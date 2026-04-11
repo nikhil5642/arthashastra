@@ -1,9 +1,10 @@
 """`pick --amount <INR>` — budget-constrained buy-the-dip candidates.
 
-Reads cached scores (populated by `analyse` / `refresh` / the engine). For
-each ticker, reconstructs a deterministic dip check from the cached price
-anchors + composite score, then ranks, diversifies, and allocates within
-the budget. No live fetches here — everything comes from the cache.
+Reads cached scores + the real price history SQLite DB (populated by
+`analyse` / `refresh` / the engine). For each ticker, builds a real
+PriceSnapshot from the stored daily closes (SMA / RSI from actual yfinance
+data — nothing synthesised), runs the dip gate, then ranks, diversifies,
+and allocates within the budget.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from data_sources.fundamentals_source import BalanceSheetSnapshot
 from fundamental_engine.budget_parser import parse_budget
 from fundamental_engine.cache import JsonStore
 from fundamental_engine.config import AnalystConfig
@@ -29,11 +29,7 @@ from screener.dip_detector import (
     check_dip,
     dip_rank_key,
 )
-from screener.price_history import (
-    PriceHistory,
-    PriceSnapshot,
-    synthesize_from_anchors,
-)
+from screener.price_history import PriceHistoryStore, PriceSnapshot
 from signals.signal_bus import Severity, Signal, SignalBus, SignalType
 
 log = logging.getLogger(__name__)
@@ -43,6 +39,7 @@ MAX_PER_SECTOR = 2
 MIN_SHARES_AFFORDABLE = 10
 MIN_ALLOCATION_PCT = 5.0
 MAX_ALLOCATION_PCT = 25.0
+PRICE_DB_FILENAME = "prices.db"
 
 
 @dataclass(slots=True)
@@ -54,25 +51,6 @@ class Candidate:
     composite: float
     verdict: str
     dip: DipSignal
-
-
-def _snap_from_cache(ticker: str, data: dict) -> BalanceSheetSnapshot | None:
-    if not all(
-        data.get(k) is not None for k in ("current_price", "high_52w", "low_52w")
-    ):
-        return None
-    return BalanceSheetSnapshot(
-        ticker=ticker,
-        as_of_date=data.get("last_updated", ""),
-        company_name=data.get("company_name", ""),
-        sector=data.get("sector", ""),
-        industry=data.get("industry", ""),
-        source=data.get("source", "cache"),
-        current_price=float(data["current_price"]),
-        high_52w=float(data["high_52w"]),
-        low_52w=float(data["low_52w"]),
-        market_cap_cr=float(data["market_cap_cr"]) if data.get("market_cap_cr") else None,
-    )
 
 
 def _stock_score_from_cache(ticker: str, data: dict) -> StockScore | None:
@@ -96,54 +74,37 @@ def _stock_score_from_cache(ticker: str, data: dict) -> StockScore | None:
         return None
 
 
-def _build_price_snapshot(
-    snap: BalanceSheetSnapshot, history: PriceHistory
-) -> PriceSnapshot | None:
-    if (
-        snap.current_price is None
-        or snap.high_52w is None
-        or snap.low_52w is None
-    ):
-        return None
-    if history.latest(snap.ticker) is None:
-        rows = synthesize_from_anchors(
-            ticker=snap.ticker,
-            current_price=snap.current_price,
-            high_52w=snap.high_52w,
-            low_52w=snap.low_52w,
-        )
-        history.load_rows(snap.ticker, rows)
-    return history.snapshot(snap.ticker)
-
-
 def _gather_candidates(
     cache_dir,
     *,
     min_composite: float,
     allowed_verdicts: frozenset[str],
     blocked: set[str],
-) -> list[Candidate]:
+) -> tuple[list[Candidate], int]:
+    """Return (candidates, tickers_missing_history)."""
     entries = load_universe_with_metadata(cache_dir)
     if not entries:
-        return []
+        return [], 0
 
-    history = PriceHistory(":memory:")
+    missing_history = 0
     candidates: list[Candidate] = []
-    try:
+    with PriceHistoryStore(cache_dir / PRICE_DB_FILENAME) as store:
         for entry in entries:
             ticker = entry["ticker"]
             score = _stock_score_from_cache(ticker, entry)
-            snap = _snap_from_cache(ticker, entry)
-            if score is None or snap is None:
+            if score is None:
                 continue
 
-            prices = _build_price_snapshot(snap, history)
-            if prices is None:
+            price_snapshot: PriceSnapshot | None = store.snapshot(ticker)
+            if price_snapshot is None:
+                # The engine/refresh must persist daily closes before pick
+                # can run the dip detector on this ticker.
+                missing_history += 1
                 continue
 
             check = check_dip(
                 score=score,
-                prices=prices,
+                prices=price_snapshot,
                 blocked_tickers=blocked,
                 min_composite=min_composite,
                 allowed_verdicts=allowed_verdicts,
@@ -154,17 +115,15 @@ def _gather_candidates(
             candidates.append(
                 Candidate(
                     ticker=ticker,
-                    name=snap.company_name or ticker,
-                    sector=snap.sector or "Unknown",
-                    current_price=snap.current_price or 0.0,
+                    name=entry.get("company_name") or ticker,
+                    sector=entry.get("sector") or "Unknown",
+                    current_price=float(price_snapshot.current_price),
                     composite=score.composite,
                     verdict=score.verdict,
                     dip=check.dip,
                 )
             )
-        return candidates
-    finally:
-        history.close()
+    return candidates, missing_history
 
 
 def _diversify(
@@ -211,6 +170,7 @@ def _render(
     min_verdict: str,
     console: Console,
     universe_size: int,
+    missing_history: int,
 ) -> None:
     console.print(
         Panel(
@@ -229,6 +189,13 @@ def _render(
             "<TICKER>` on a few stocks first, then try again.[/yellow]"
         )
         return
+
+    if missing_history:
+        console.print(
+            f"[yellow]{missing_history} ticker(s) skipped — no cached price "
+            f"history yet. Run `fundamental_engine refresh <TICKER>` to "
+            f"populate the price store.[/yellow]"
+        )
 
     if not picks:
         console.print(
@@ -325,7 +292,7 @@ def run_pick_command(
 
     universe_size = len(load_universe_with_metadata(cfg.data_cache_dir))
 
-    candidates = _gather_candidates(
+    candidates, missing_history = _gather_candidates(
         cfg.data_cache_dir,
         min_composite=min_composite,
         allowed_verdicts=allowed_verdicts,
@@ -344,6 +311,7 @@ def run_pick_command(
         min_verdict=min_verdict,
         console=console,
         universe_size=universe_size,
+        missing_history=missing_history,
     )
 
     JsonStore(cfg.data_cache_dir / "dip_candidates.json").write(

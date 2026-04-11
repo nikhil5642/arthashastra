@@ -10,6 +10,7 @@ from __future__ import annotations
 from data_sources import fundamentals_source
 from data_sources.fundamentals_source import (
     BalanceSheetSnapshot,
+    FetchResult,
     FundamentalsSource,
     SCORED_FIELDS,
     _merge,
@@ -77,20 +78,23 @@ def test_source_tag_variants():
 
 
 async def test_fetch_merges_mocked_sources(monkeypatch):
-    def fake_yf_sync(ticker: str) -> dict:
-        return {
-            "debt_to_equity": 0.4,
-            "interest_coverage": 10.5,
-            "rev_3y_cagr": 12.0,
-            "pat_3y_cagr": 9.0,
-            "ocf_to_pat": 1.1,
-            "current_price": 1500.0,
-            "high_52w": 1800.0,
-            "low_52w": 1200.0,
-            "company_name": "Test Industries Limited",
-            "sector": "Energy",
-            "industry": "Oil & Gas",
-        }
+    def fake_yf_sync(ticker: str):
+        return (
+            {
+                "debt_to_equity": 0.4,
+                "interest_coverage": 10.5,
+                "rev_3y_cagr": 12.0,
+                "pat_3y_cagr": 9.0,
+                "ocf_to_pat": 1.1,
+                "current_price": 1500.0,
+                "high_52w": 1800.0,
+                "low_52w": 1200.0,
+                "company_name": "Test Industries Limited",
+                "sector": "Energy",
+                "industry": "Oil & Gas",
+            },
+            [("2026-04-01", 1600.0), ("2026-04-02", 1500.0)],
+        )
 
     async def fake_screener(ticker: str) -> dict:
         return {
@@ -105,7 +109,9 @@ async def test_fetch_merges_mocked_sources(monkeypatch):
     monkeypatch.setattr(fundamentals_source, "_fetch_yfinance_sync", fake_yf_sync)
     monkeypatch.setattr(fundamentals_source, "_fetch_screener_in", fake_screener)
 
-    snap = await FundamentalsSource().fetch("TEST")
+    result = await FundamentalsSource().fetch_full("TEST")
+    assert isinstance(result, FetchResult)
+    snap = result.snapshot
     assert snap.ticker == "TEST"
     assert snap.roe == 18.5  # screener wins
     assert snap.debt_to_equity == 0.4  # yfinance only
@@ -115,10 +121,26 @@ async def test_fetch_merges_mocked_sources(monkeypatch):
     assert snap.data_completeness_pct == 100.0
     assert snap.field_sources["roe"] == "screener"
     assert snap.field_sources["debt_to_equity"] == "yfinance"
+    assert result.price_history == [("2026-04-01", 1600.0), ("2026-04-02", 1500.0)]
+
+
+async def test_fetch_returns_snapshot_only_via_convenience(monkeypatch):
+    def fake_yf_sync(ticker: str):
+        return ({"debt_to_equity": 0.5, "current_price": 100.0}, [])
+
+    async def fake_screener(ticker: str) -> dict:
+        return {}
+
+    monkeypatch.setattr(fundamentals_source, "_fetch_yfinance_sync", fake_yf_sync)
+    monkeypatch.setattr(fundamentals_source, "_fetch_screener_in", fake_screener)
+
+    snap = await FundamentalsSource().fetch("TEST")
+    assert isinstance(snap, BalanceSheetSnapshot)
+    assert snap.debt_to_equity == 0.5
 
 
 async def test_fetch_handles_yfinance_exception(monkeypatch):
-    def boom(ticker: str) -> dict:
+    def boom(ticker: str):
         raise RuntimeError("rate limited")
 
     async def fake_screener(ticker: str) -> dict:
@@ -134,8 +156,8 @@ async def test_fetch_handles_yfinance_exception(monkeypatch):
 
 
 async def test_fetch_handles_screener_exception(monkeypatch):
-    def fake_yf_sync(ticker: str) -> dict:
-        return {"debt_to_equity": 0.5, "current_price": 100.0}
+    def fake_yf_sync(ticker: str):
+        return ({"debt_to_equity": 0.5, "current_price": 100.0}, [])
 
     async def boom(ticker: str) -> dict:
         raise RuntimeError("screener blocked")
@@ -149,7 +171,7 @@ async def test_fetch_handles_screener_exception(monkeypatch):
 
 
 async def test_fetch_empty_when_both_sources_fail(monkeypatch):
-    def boom_sync(ticker: str) -> dict:
+    def boom_sync(ticker: str):
         raise RuntimeError("x")
 
     async def boom_async(ticker: str) -> dict:
@@ -158,6 +180,7 @@ async def test_fetch_empty_when_both_sources_fail(monkeypatch):
     monkeypatch.setattr(fundamentals_source, "_fetch_yfinance_sync", boom_sync)
     monkeypatch.setattr(fundamentals_source, "_fetch_screener_in", boom_async)
 
-    snap = await FundamentalsSource().fetch("NOPE")
-    assert snap.source == "empty"
-    assert snap.data_completeness_pct == 0.0
+    result = await FundamentalsSource().fetch_full("NOPE")
+    assert result.snapshot.source == "empty"
+    assert result.snapshot.data_completeness_pct == 0.0
+    assert result.price_history == []

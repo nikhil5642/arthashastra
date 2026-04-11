@@ -30,4 +30,20 @@ def test_yf_symbol_respects_prefer_bse():
 def test_slug_normalizes_whitespace_and_case():
     assert slug("Mukesh Ambani") == "mukesh_ambani"
     assert slug("  Deepinder  Goyal  ") == "deepinder_goyal"
-    assert slug("N. R. Narayana Murthy") == "n._r._narayana_murthy"
+
+
+def test_slug_strips_punctuation():
+    assert slug("N. R. Narayana Murthy") == "n_r_narayana_murthy"
+    assert slug("O'Shaughnessy") == "oshaughnessy"
+    assert slug("Mukesh Ambani (Sr.)") == "mukesh_ambani_sr"
+    assert slug("A & B Corp") == "a_b_corp"
+
+
+def test_slug_handles_unicode():
+    # Diacritics are stripped to ASCII equivalents.
+    assert slug("Löfström") == "lofstrom"
+
+
+def test_slug_empty_input_returns_empty():
+    assert slug("") == ""
+    assert slug("   ") == ""

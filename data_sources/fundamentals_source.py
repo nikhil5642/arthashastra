@@ -1,7 +1,8 @@
 """Fundamentals data source — live yfinance + screener.in.
 
 Priority order:
-    1. yfinance statements + history: D/E, interest coverage, CAGRs, price range.
+    1. yfinance statements + history: D/E, interest coverage, CAGRs, price range,
+       and the raw daily close series used downstream for SMA / RSI.
     2. screener.in HTML scrape: ROE, ROCE, promoter holding, pledge %, market cap.
 
 yfinance's .info / .fast_info are unreliable in 2026 due to Yahoo rate limiting —
@@ -54,6 +55,8 @@ _SCREENER_WINS: frozenset[str] = frozenset({
     "market_cap_cr",
 })
 
+PriceRow = tuple[str, float]  # (ISO date, adjusted close)
+
 
 @dataclass(slots=True)
 class BalanceSheetSnapshot:
@@ -95,22 +98,47 @@ class BalanceSheetSnapshot:
         return cls(**kwargs)
 
 
+@dataclass(slots=True)
+class FetchResult:
+    """Everything a single yfinance + screener fetch produces.
+
+    `snapshot` carries the deterministic inputs the fundamentals scorer
+    needs. `price_history` carries the raw daily close series the engine
+    persists to the price history store so downstream dip detection uses
+    real SMA / RSI values instead of synthesised ones.
+    """
+
+    snapshot: BalanceSheetSnapshot
+    price_history: list[PriceRow] = field(default_factory=list)
+
+
 class FundamentalsSource:
     """Async facade over live yfinance + screener.in."""
 
     async def fetch(self, ticker: str) -> BalanceSheetSnapshot:
+        """Convenience wrapper returning just the snapshot."""
+        result = await self.fetch_full(ticker)
+        return result.snapshot
+
+    async def fetch_full(self, ticker: str) -> FetchResult:
+        """Fetch snapshot + raw daily close history in a single round trip."""
         bare = ticker.strip().upper()
         log.info("fundamentals: live fetch for %s", bare)
 
         yf_task = _fetch_yfinance(bare)
         screener_task = _fetch_screener_in(bare)
-        yf_data, screener_data = await asyncio.gather(
+        yf_result, screener_data = await asyncio.gather(
             yf_task, screener_task, return_exceptions=True
         )
 
-        if isinstance(yf_data, Exception):
-            log.warning("yfinance failed for %s: %s", bare, yf_data)
-            yf_data = {}
+        yf_data: dict[str, Any]
+        price_history: list[PriceRow]
+        if isinstance(yf_result, Exception):
+            log.warning("yfinance failed for %s: %s", bare, yf_result)
+            yf_data, price_history = {}, []
+        else:
+            yf_data, price_history = yf_result
+
         if isinstance(screener_data, Exception):
             log.warning("screener.in failed for %s: %s", bare, screener_data)
             screener_data = {}
@@ -124,23 +152,23 @@ class FundamentalsSource:
         kwargs = {k: v for k, v in merged.items() if k in allowed}
         snap = BalanceSheetSnapshot(**kwargs)
         snap.field_sources = _field_sources(yf_data, screener_data)
-        return snap
+        return FetchResult(snapshot=snap, price_history=price_history)
 
 
 # ── yfinance adapter ──────────────────────────────────────────────────────────
 
 
-async def _fetch_yfinance(ticker: str) -> dict[str, Any]:
+async def _fetch_yfinance(ticker: str) -> tuple[dict[str, Any], list[PriceRow]]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _fetch_yfinance_sync, ticker)
 
 
-def _fetch_yfinance_sync(ticker: str) -> dict[str, Any]:
+def _fetch_yfinance_sync(ticker: str) -> tuple[dict[str, Any], list[PriceRow]]:
     try:
         import yfinance as yf
     except ImportError:
         log.warning("yfinance not installed")
-        return {}
+        return {}, []
 
     from fundamental_engine.ticker import yf_symbol
 
@@ -150,7 +178,7 @@ def _fetch_yfinance_sync(ticker: str) -> dict[str, Any]:
         t = yf.Ticker(symbol)
     except Exception as e:
         log.warning("yfinance Ticker() failed for %s: %s", ticker, e)
-        return {}
+        return {}, []
 
     hist = _safe(lambda: t.history(period="1y", auto_adjust=True), label=f"history {ticker}")
     bs = _safe(lambda: t.balance_sheet, label=f"balance_sheet {ticker}")
@@ -158,13 +186,21 @@ def _fetch_yfinance_sync(ticker: str) -> dict[str, Any]:
     cf = _safe(lambda: t.cashflow, label=f"cashflow {ticker}")
 
     out: dict[str, Any] = {}
+    price_history: list[PriceRow] = []
 
+    # Price context + daily closes from the same history call.
     if hist is not None and not hist.empty:
         closes = hist["Close"].dropna()
         if len(closes) > 0:
             out["current_price"] = float(closes.iloc[-1])
             out["high_52w"] = float(hist["High"].max())
             out["low_52w"] = float(hist["Low"].min())
+            for ts, close in closes.items():
+                try:
+                    date_str = ts.date().isoformat() if hasattr(ts, "date") else str(ts)[:10]
+                    price_history.append((date_str, float(close)))
+                except Exception:
+                    continue
 
     total_debt = _bs_first(bs, ("Total Debt", "Long Term Debt"))
     equity = _bs_first(
@@ -175,8 +211,15 @@ def _fetch_yfinance_sync(ticker: str) -> dict[str, Any]:
 
     ebit = _bs_first(is_, ("EBIT", "Operating Income"))
     interest = _bs_first(is_, ("Interest Expense",))
-    if ebit is not None and interest is not None and interest != 0:
-        out["interest_coverage"] = round(abs(ebit / interest), 2)
+    # Interest coverage only makes sense when EBIT is positive — a loss-making
+    # company has no coverage no matter what the ratio looks like numerically.
+    if (
+        ebit is not None
+        and ebit > 0
+        and interest is not None
+        and interest != 0
+    ):
+        out["interest_coverage"] = round(ebit / abs(interest), 2)
 
     net_income = _bs_first(is_, ("Net Income", "Net Income Common Stockholders"))
     if net_income is not None and equity is not None and equity > 0:
@@ -220,7 +263,7 @@ def _fetch_yfinance_sync(ticker: str) -> dict[str, Any]:
         out.setdefault("sector", info.get("sector") or "")
         out.setdefault("industry", info.get("industry") or "")
 
-    return out
+    return out, price_history
 
 
 def _safe(fn, *, label: str):

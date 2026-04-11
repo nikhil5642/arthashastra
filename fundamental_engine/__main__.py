@@ -178,10 +178,15 @@ def _run_refresh(target: str) -> int:
 
 
 def _run_analyse(ticker: str) -> int:
-    from fundamental_engine.analyse_pipeline import NoDataError, analyse_ticker
+    from fundamental_engine.analyse_pipeline import (
+        NoDataError,
+        analyse_ticker,
+        build_extended_score_dict,
+    )
     from fundamental_engine.cache import JsonStore
     from fundamental_engine.ticker import canonical
     from reports.stock_report import render_stock_report
+    from screener.price_history import PriceHistoryStore
 
     cfg = AnalystConfig.from_env()
     bare = canonical(ticker)
@@ -195,8 +200,13 @@ def _run_analyse(ticker: str) -> int:
         print("Check the ticker symbol (use `resolve <NAME>` to look it up).")
         return 3
 
-    extended = _extended_score_dict(result)
-    JsonStore(cfg.data_cache_dir / "scores.json").upsert(bare, extended)
+    JsonStore(cfg.data_cache_dir / "scores.json").upsert(
+        bare, build_extended_score_dict(result)
+    )
+
+    if result.price_history:
+        with PriceHistoryStore(cfg.data_cache_dir / "prices.db") as store:
+            store.load_rows(bare, result.price_history)
 
     reports_dir = cfg.data_cache_dir / "reports"
     fp = render_stock_report(result.snapshot, result.score, output_dir=reports_dir)
@@ -209,24 +219,6 @@ def _run_analyse(ticker: str) -> int:
             "Code to generate and cache them."
         )
     return 0
-
-
-def _extended_score_dict(result) -> dict:
-    extended = result.score.to_dict()
-    snap = result.snapshot
-    extended.update(
-        {
-            "company_name": snap.company_name,
-            "sector": snap.sector,
-            "industry": snap.industry,
-            "current_price": snap.current_price,
-            "high_52w": snap.high_52w,
-            "low_52w": snap.low_52w,
-            "market_cap_cr": snap.market_cap_cr,
-            "source": snap.source,
-        }
-    )
-    return extended
 
 
 def _run_pick(amount_raw: str, min_composite: float, min_verdict: str) -> int:

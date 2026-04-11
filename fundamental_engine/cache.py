@@ -3,7 +3,8 @@
 Writers: the engine (cache warmer) writes aggregate files.
 Readers: CLI report generators read them.
 
-Phase 1 usage: stash StockScore results keyed by ticker.
+Used for `scores.json`, `dip_candidates.json`, and similar key-keyed blobs.
+Time-series data (daily closes) lives in `PriceHistoryStore`, not here.
 """
 
 from __future__ import annotations
