@@ -62,16 +62,85 @@ detector.
 python3 -m fundamental_engine analyse <TICKER>
 ```
 
-Read the "Analysis context" banner and the fundamentals evidence:
+Read the "Analysis context" banner and the whole Financial Profile
+section carefully — not just the fundamentals score at the bottom. The
+Financial Profile is where the business tells its story:
 
 - **`Cached judgment: none`** is what you want to see here — step 2
   wiped it. The pillars should all show "pending Claude judgment"
   except fundamentals.
-- Look at the fundamentals score and whether the growth-deceleration
-  VETO fired (`VETO: 3y growth decelerating ...`). If it fired, the
-  company is in the slow bucket — every later anchor caps harder.
-- Note the 3y revenue and PAT CAGRs — they drive the growth-bucket
-  classification in step 4.
+- **Fundamentals score and growth-deceleration VETO** — if the VETO
+  fired (`VETO: 3y growth decelerating ...`), the company is in the
+  slow bucket and every later anchor caps harder.
+- **3y revenue and PAT CAGRs** — drive the growth-bucket in step 4.
+- **Bank rubric vs industrial rubric** — if you see "Bank rubric
+  applied", the business is a bank / NBFC / insurer / AMC. GNPA /
+  CASA / CRAR are NOT in the data — you must verify them manually.
+- **Multi-year trend** (ROCE 5y / Operating margin 5y / Borrowings 3y
+  change) — is the business *improving or degrading*? A 15% ROE that
+  was 25% three years ago is a different story from a 15% ROE that
+  was 10% three years ago. Factor the direction into prospects.
+- **Shareholding trend**:
+  - **FII ≤ −2pts YoY** = smart-money exit. This is a material
+    bearish signal — flag it in news and drag prospects.
+  - **DII ≥ +2pts YoY paired with FII exit** = domestic money
+    buying what foreigners are selling. Tells you the narrative is
+    contested, not consensus.
+  - **Promoter Δ ≤ −1pt** = insider selling. Material red flag for
+    leadership; dock the score.
+  - **Promoter Δ ≥ +1pt** = insider accumulation. Material positive.
+  - **Retail shareholder count spiking while FIIs exit** = classic
+    "retail catching a falling knife" pattern. Raise the risk note.
+- **Valuation line** (P/E · P/B · Div yield) — a P/B compression
+  vs historical (e.g. HDFC Bank 4× → 2.2×) means the market has
+  already de-rated. You are NOT an early mover; ask whether the
+  re-rating thesis is done or still unfolding.
+
+## Step 3.5 — Write the business snapshot
+
+Before you touch any pillar scoring, write a 4-sentence business
+snapshot that answers these questions. This is the single most
+important step in the whole skill — if you skip it, you will end up
+scoring ratios without understanding what the business actually does.
+
+1. **What does the company make or do?** (products, services,
+   revenue mix — specific, not "technology" or "conglomerate").
+   The "Business — what the company actually does" panel at the top
+   of the report contains yfinance's official long business summary;
+   read it before writing your snapshot, don't rely on memory alone.
+2. **Who are the customers?** (B2B / B2C, concentrated / diversified,
+   domestic / export, sticky / promotional)
+3. **What is the moat?** (brand, scale, network effects, switching
+   costs, patents, regulation, location, cost advantage — or
+   *none*, which is itself important to state)
+4. **What is the main risk to the business *model*?** (NOT to the
+   stock — risk to the underlying business: disruption, regulation,
+   customer concentration, cyclicality, commodity exposure,
+   promoter governance, geopolitics)
+
+Write this down before you start scoring. Every subsequent pillar
+score must be consistent with this snapshot. If the prospects score
+contradicts the moat assessment, something is wrong — go back.
+
+**Sell-side consensus vs revealed FII flow.** The header panel shows
+the analyst bundle (e.g. `target ₹1,721 (+27.5% upside) · consensus
+Strong Buy (1.36) (34 analysts)`). Sell-side consensus is NOT
+load-bearing — it lags and is biased by investment-banking
+relationships. When analyst consensus contradicts FII flow (Strong
+Buy rating while FIIs are exiting ≥ 2pts YoY), trust the flow and
+flag the divergence in your news evidence. Upside to consensus target
+is useful for sizing, not for verdict.
+
+**Raw data dump is available** if you need to answer a specific
+question (e.g. "has dividend payout risen or fallen over 5 years?",
+"when did CWIP spike?", "what was operating profit in FY20?").
+Every line item screener shows is stored on the snapshot under
+`raw_profit_loss`, `raw_balance_sheet`, `raw_cash_flow`, `raw_ratios`,
+`raw_quarters`, `raw_shareholding_quarterly` as `{row_label: [v0, …]}`
+dicts (oldest→newest, None for missing cells). You don't need to
+re-parse the website — write a tiny Python one-liner through the CLI
+to introspect the snapshot if the report doesn't already show what
+you need.
 
 ## Step 4 — Growth-bucket classification
 

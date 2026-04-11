@@ -38,7 +38,7 @@ judgment` and you should tell the user so.
 
 ## Step 4 — Present the audit trail
 
-For each pillar (leadership 40%, fundamentals 30%, prospects 15%,
+For each pillar (fundamentals 40%, leadership 30%, prospects 15%,
 news 15%):
 
 - State the pillar score
@@ -46,7 +46,7 @@ news 15%):
 - Explain in one sentence how the sub-score was reached
 
 Then show the composite and verdict, and explain exactly how
-`0.40·leadership + 0.30·fundamentals + 0.15·prospects + 0.15·news`
+`0.40·fundamentals + 0.30·leadership + 0.15·prospects + 0.15·news`
 yielded the final number.
 
 ## Step 5 — Answer follow-up questions

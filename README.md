@@ -96,7 +96,7 @@ it step-by-step without additional context.
 ## Scoring
 
 ```
-composite = 0.40 × leadership + 0.30 × fundamentals + 0.15 × prospects + 0.15 × news
+composite = 0.40 × fundamentals + 0.30 × leadership + 0.15 × prospects + 0.15 × news
 ```
 
 Leadership is mode-adaptive so multi-generation Tata executives aren't

@@ -26,6 +26,7 @@ import json
 import logging
 import sys
 
+from data_sources.fundamentals_source import is_bank_snapshot
 from fundamental_engine.config import AnalystConfig
 
 log = logging.getLogger("fundamental_engine")
@@ -292,6 +293,15 @@ def _analysis_context_panel(result, ticker: str, price_rows_written: int):
             "(empty yfinance history response)"
         )
 
+    if is_bank_snapshot(snap):
+        lines.append(
+            "[cyan]Bank rubric:     profitability (ROE + ROA + NIM) + PAT "
+            "growth + franchise (fee income + CD ratio) + governance. "
+            "GNPA / CASA / CRAR are not exposed by screener — verify "
+            "asset quality and capital adequacy in the Claude leadership "
+            "pillar before trusting the verdict.[/cyan]"
+        )
+
     if result.judgment is None:
         lines.append(
             "Cached judgment:  [red]none[/red]  ·  leadership / prospects / "
@@ -317,6 +327,8 @@ def _analysis_context_panel(result, ticker: str, price_rows_written: int):
         title_align="left",
         border_style="dim",
     )
+
+
 
 
 def _judgment_age_days(updated_at: str) -> int | None:

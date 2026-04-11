@@ -1,10 +1,14 @@
 """Composite scorer — blends four pillar ScorerResults into a StockScore.
 
-Weights (per PLAN.md §Scoring rubrics):
-    leadership   0.40
-    fundamentals 0.30
-    prospects    0.15
-    news         0.15
+Weights:
+    fundamentals 0.40   balance sheet + profitability + growth + cash quality + promoter
+    leadership   0.30   integrity, track record, governance (Claude-judged)
+    prospects    0.15   moat + tailwind + capex/guidance clarity
+    news         0.15   30-day material-event sentiment
+
+Fundamentals is the single largest pillar — a business whose balance
+sheet, growth, and cash conversion all hold up together deserves more
+weight in the composite than any single qualitative read.
 """
 
 from __future__ import annotations
@@ -12,8 +16,8 @@ from __future__ import annotations
 from scorers.base import ScorerResult, StockScore, verdict_for
 
 PILLAR_WEIGHTS: dict[str, float] = {
-    "leadership": 0.40,
-    "fundamentals": 0.30,
+    "fundamentals": 0.40,
+    "leadership": 0.30,
     "prospects": 0.15,
     "news": 0.15,
 }

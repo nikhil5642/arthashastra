@@ -48,6 +48,18 @@ def test_blend_all_perfect_scores():
 
 
 def test_blend_respects_weights():
+    # Fundamentals is the heaviest pillar at 40%.
+    score = blend(
+        ticker="X",
+        leadership=_mk("leadership", 0),
+        fundamentals=_mk("fundamentals", 100),
+        prospects=_mk("prospects", 0),
+        news=_mk("news", 0),
+    )
+    assert score.composite == 40.0  # 0.40 × 100
+    assert score.verdict == "AVOID"
+
+    # Leadership is the second pillar at 30%.
     score = blend(
         ticker="X",
         leadership=_mk("leadership", 100),
@@ -55,8 +67,8 @@ def test_blend_respects_weights():
         prospects=_mk("prospects", 0),
         news=_mk("news", 0),
     )
-    assert score.composite == 40.0  # 0.40 × 100
-    assert score.verdict == "AVOID"
+    assert score.composite == 30.0  # 0.30 × 100
+    assert score.verdict == "RED_FLAG"
 
 
 def test_pending_judgment_placeholder():

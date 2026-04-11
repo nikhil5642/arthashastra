@@ -58,7 +58,7 @@ data_sources/                # live data adapters — see README.md
 scorers/                     # deterministic scoring — see README.md
 ├── base.py                  # ScorerResult, StockScore, Verdict, verdict_for
 ├── fundamentals_scorer.py   # 5-component rubric with graceful degradation + pledge veto
-└── composite_scorer.py      # blend(..) weighted 40/30/15/15 + pending_judgment placeholder
+└── composite_scorer.py      # blend(..) weighted fundamentals 40 / leadership 30 / prospects 15 / news 15
 
 screener/                    # pure logic — see README.md
 ├── dip_detector.py          # multi-gate check_dip + DipSignal
@@ -99,17 +99,35 @@ data_cache/                  # runtime state (gitignored)
 ## Scoring rules
 
 ```
-composite = 0.40*leadership + 0.30*fundamentals + 0.15*prospects + 0.15*news
+composite = 0.40*fundamentals + 0.30*leadership + 0.15*prospects + 0.15*news
 ```
 
-### Fundamentals (30%, deterministic — you never touch this)
+### Fundamentals (40%, deterministic — you never touch this)
 
-Rubric in `scorers/fundamentals_scorer.py`: debt health 25%,
-profitability 25%, growth 20%, cash quality 15%, promoter behaviour
-15%. Graceful degradation on missing inputs. Pledge > 10% clamps
-score ≤ 40.
+Two rubrics, chosen automatically by `_is_bank(snap)`:
 
-### Leadership (40%, YOU score this)
+**Industrial** (default): balance-sheet health 35% (D/E + interest
+coverage + current ratio + quick ratio + net debt / EBITDA),
+profitability 20% (ROE + ROCE + ROA), growth 15% (3y revenue + PAT
+CAGR), earnings quality 15% (OCF/PAT + FCF/PAT), promoter behaviour
+15% (holding + pledge). Graceful degradation on missing inputs.
+Pledge > 10% clamps the score to 40. Growth-deceleration veto caps
+the score at 70/60/50 when both 3y CAGRs fall below 7/5/3%.
+
+**Bank / NBFC / Financial Services**: profitability 35% (ROE + ROA
++ NIM, each on bank-calibrated curves — ROA 1.5% is good, not 12%),
+growth 25% (PAT 3y CAGR only — revenue CAGR is skipped because
+merger step-changes distort it), franchise 20% (non-interest income
+ratio + Credit-Deposit ratio), governance 20% (pledge + promoter,
+with 0% promoter treated as neutral because institutional ownership
+is normal for banks). GNPA / CASA / CRAR are not exposed by screener
+and must be verified in the Claude leadership pillar.
+
+Live data for Indian equities is sourced from screener.in (balance
+sheet, P&L, cash flow, ratios, quarters tables) with yfinance as a
+fallback for anything screener doesn't expose.
+
+### Leadership (30%, YOU score this)
 
 Three modes, you classify which applies:
 
