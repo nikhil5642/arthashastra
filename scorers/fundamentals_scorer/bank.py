@@ -23,14 +23,32 @@ Claude judgment pillar can cover these.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from enum import StrEnum
+
 from data_sources.fundamentals_source import BalanceSheetSnapshot
 from scorers.base import Pillar, ScorerResult
 
-_COMPONENT_WEIGHTS: dict[str, int] = {
-    "bank_profitability": 35,
-    "bank_growth": 25,
-    "bank_franchise": 20,
-    "bank_governance": 20,
+
+class BankComponent(StrEnum):
+    """Typed identifiers for the four bank sub-scorers.
+
+    Parallels `IndustrialComponent` — same typo-safety rationale.
+    """
+
+    PROFITABILITY = "bank_profitability"
+    GROWTH = "bank_growth"
+    FRANCHISE = "bank_franchise"
+    GOVERNANCE = "bank_governance"
+
+
+_SubScorerFn = Callable[[BalanceSheetSnapshot], tuple[float | None, list[str]]]
+
+_COMPONENT_WEIGHTS: dict[BankComponent, int] = {
+    BankComponent.PROFITABILITY: 35,
+    BankComponent.GROWTH: 25,
+    BankComponent.FRANCHISE: 20,
+    BankComponent.GOVERNANCE: 20,
 }
 
 
@@ -38,7 +56,7 @@ _COMPONENT_WEIGHTS: dict[str, int] = {
 
 
 def score(snap: BalanceSheetSnapshot) -> ScorerResult:
-    components: list[tuple[str, float, int]] = []
+    components: list[tuple[BankComponent, float, int]] = []
     evidence: list[str] = []
 
     for name, fn in _SUB_SCORERS.items():
@@ -275,9 +293,9 @@ def _score_governance(
     return sum(sub_scores) / len(sub_scores), evidence
 
 
-_SUB_SCORERS = {
-    "bank_profitability": _score_profitability,
-    "bank_growth": _score_growth,
-    "bank_franchise": _score_franchise,
-    "bank_governance": _score_governance,
+_SUB_SCORERS: dict[BankComponent, _SubScorerFn] = {
+    BankComponent.PROFITABILITY: _score_profitability,
+    BankComponent.GROWTH: _score_growth,
+    BankComponent.FRANCHISE: _score_franchise,
+    BankComponent.GOVERNANCE: _score_governance,
 }

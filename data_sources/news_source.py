@@ -18,27 +18,45 @@ import asyncio
 import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from enum import StrEnum
 from typing import Any
 from urllib.parse import quote_plus
 
 log = logging.getLogger(__name__)
 
-MATERIAL_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "earnings": (
+class NewsCategory(StrEnum):
+    """Categories a material news event can fall into.
+
+    Used as typed keys for `MATERIAL_KEYWORDS` so typos at the call
+    site surface immediately rather than silently missing a match.
+    `str` subclass (StrEnum) means JSON serialization still produces
+    the lowercased labels downstream code already expects.
+    """
+
+    EARNINGS = "earnings"
+    GOVERNANCE = "governance"
+    CORPORATE_ACTION = "corporate_action"
+    PROMOTER = "promoter"
+    RATING = "rating"
+    LEADERSHIP = "leadership"
+
+
+MATERIAL_KEYWORDS: dict[NewsCategory, tuple[str, ...]] = {
+    NewsCategory.EARNINGS: (
         "earnings", "results", "quarterly", "q1 ", "q2 ", "q3 ", "q4 ",
         "fy result", "profit", "revenue",
     ),
-    "governance": (
+    NewsCategory.GOVERNANCE: (
         "sebi", "fraud", "auditor", "scam", "investigation",
         "enforcement directorate", "ed raid",
     ),
-    "corporate_action": (
+    NewsCategory.CORPORATE_ACTION: (
         "merger", "acquisition", "takeover", "buyback", "dividend",
         "demerger", "spin-off",
     ),
-    "promoter": ("pledge", "promoter", "insider trading", "bulk deal"),
-    "rating": ("downgrade", "upgrade", "rating action", "default"),
-    "leadership": (
+    NewsCategory.PROMOTER: ("pledge", "promoter", "insider trading", "bulk deal"),
+    NewsCategory.RATING: ("downgrade", "upgrade", "rating action", "default"),
+    NewsCategory.LEADERSHIP: (
         "ceo", "chairman", "resignation", "resigned", "appointed",
         "stepped down",
     ),

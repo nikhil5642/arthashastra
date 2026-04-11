@@ -154,13 +154,17 @@ call time rather than in a production verdict. Members are `str`
 subclasses so JSON serialization and dict-key usage keep working, but
 callers get IDE autocomplete and exhaustive iteration.
 
-| Enum        | Location                                      | Values |
-|---          |---                                            |---     |
-| `Verdict`   | `scorers/base.py`                             | STRONG_BUY · BUY · HOLD · AVOID · RED_FLAG |
-| `Pillar`    | `scorers/base.py`                             | FUNDAMENTALS · LEADERSHIP · PROSPECTS · NEWS |
-| `LeaderMode`| `fundamental_engine/leader_mode_classifier.py`| FIRST_GEN · MULTI_GEN_FAMILY · PROFESSIONAL |
-| `Severity`  | `signals/signal_bus.py`                       | INFO · ALERT · URGENT |
-| `SignalType`| `signals/signal_bus.py`                       | DIP_DETECTED · QUALITY_DIP · LEADERSHIP_NEWS · … |
+| Enum                  | Location                                           | Values |
+|---                    |---                                                 |---     |
+| `Verdict`             | `scorers/base.py`                                  | STRONG_BUY · BUY · HOLD · AVOID · RED_FLAG |
+| `Pillar`              | `scorers/base.py`                                  | FUNDAMENTALS · LEADERSHIP · PROSPECTS · NEWS |
+| `IndustrialComponent` | `scorers/fundamentals_scorer/industrial.py`        | BALANCE_SHEET_HEALTH · PROFITABILITY · GROWTH · EARNINGS_QUALITY · PROMOTER |
+| `BankComponent`       | `scorers/fundamentals_scorer/bank.py`              | PROFITABILITY · GROWTH · FRANCHISE · GOVERNANCE |
+| `LeaderMode`          | `fundamental_engine/leader_mode_classifier.py`     | FIRST_GEN · MULTI_GEN_FAMILY · PROFESSIONAL |
+| `Magnitude`           | `fundamental_engine/budget_parser.py`              | K · LAKH · CRORE (float-valued enum) |
+| `NewsCategory`        | `data_sources/news_source.py`                      | EARNINGS · GOVERNANCE · CORPORATE_ACTION · PROMOTER · RATING · LEADERSHIP |
+| `Severity`            | `signals/signal_bus.py`                            | INFO · ALERT · URGENT |
+| `SignalType`          | `signals/signal_bus.py`                            | DIP_DETECTED · QUALITY_DIP · LEADERSHIP_NEWS · … |
 
 When you add a new domain-valued string (e.g. a new verdict band, a new
 signal type, a new leader mode), add it to the enum — never introduce a

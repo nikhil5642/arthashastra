@@ -19,17 +19,35 @@ Vetoes and caps (applied after the weighted sum):
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 from data_sources.fundamentals_source import BalanceSheetSnapshot
 from scorers.base import Pillar, ScorerResult
 
+
+class IndustrialComponent(StrEnum):
+    """Typed identifiers for the five industrial sub-scorers.
+
+    Using a StrEnum here means typos in the weight table surface at
+    import time (`AttributeError`) rather than silently zero-weighting
+    a component at runtime.
+    """
+
+    BALANCE_SHEET_HEALTH = "balance_sheet_health"
+    PROFITABILITY = "profitability"
+    GROWTH = "growth"
+    EARNINGS_QUALITY = "earnings_quality"
+    PROMOTER = "promoter"
+
+
 # ── Weights + growth-deceleration ceilings ──────────────────────────────────
 
-_COMPONENT_WEIGHTS: dict[str, int] = {
-    "balance_sheet_health": 35,
-    "profitability": 20,
-    "growth": 15,
-    "earnings_quality": 15,
-    "promoter": 15,
+_COMPONENT_WEIGHTS: dict[IndustrialComponent, int] = {
+    IndustrialComponent.BALANCE_SHEET_HEALTH: 35,
+    IndustrialComponent.PROFITABILITY: 20,
+    IndustrialComponent.GROWTH: 15,
+    IndustrialComponent.EARNINGS_QUALITY: 15,
+    IndustrialComponent.PROMOTER: 15,
 }
 
 # Growth-deceleration ceilings — applied only when BOTH revenue and PAT
@@ -45,7 +63,7 @@ _GROWTH_CEILINGS: tuple[tuple[float, float], ...] = (
 
 
 def score(snap: BalanceSheetSnapshot) -> ScorerResult:
-    components: list[tuple[str, float, int]] = []
+    components: list[tuple[IndustrialComponent, float, int]] = []
     evidence: list[str] = []
 
     for name, fn in _SUB_SCORERS.items():
@@ -381,10 +399,14 @@ def _score_promoter(
     return sum(sub_scores) / len(sub_scores), evidence
 
 
-_SUB_SCORERS = {
-    "balance_sheet_health": _score_balance_sheet_health,
-    "profitability": _score_profitability,
-    "growth": _score_growth,
-    "earnings_quality": _score_earnings_quality,
-    "promoter": _score_promoter,
+from collections.abc import Callable
+
+_SubScorerFn = Callable[[BalanceSheetSnapshot], tuple[float | None, list[str]]]
+
+_SUB_SCORERS: dict[IndustrialComponent, _SubScorerFn] = {
+    IndustrialComponent.BALANCE_SHEET_HEALTH: _score_balance_sheet_health,
+    IndustrialComponent.PROFITABILITY: _score_profitability,
+    IndustrialComponent.GROWTH: _score_growth,
+    IndustrialComponent.EARNINGS_QUALITY: _score_earnings_quality,
+    IndustrialComponent.PROMOTER: _score_promoter,
 }
