@@ -1,7 +1,21 @@
 {
-  "_comment": "Project-level guardrails. Blocks destructive ops and prompts before touching top-level config / docs / skills. Source code edits fall through to the default allow.",
+  "_comment": "Project-level guardrails. Project is complete — source code is locked (deny) and top-level config / docs / skills require confirmation (ask). Destructive shell ops also denied.",
   "permissions": {
     "deny": [
+      "Edit(fundamental_engine/**)",
+      "Edit(data_sources/**)",
+      "Edit(scorers/**)",
+      "Edit(screener/**)",
+      "Edit(reports/**)",
+      "Edit(signals/**)",
+      "Edit(tests/**)",
+      "Write(fundamental_engine/**)",
+      "Write(data_sources/**)",
+      "Write(scorers/**)",
+      "Write(screener/**)",
+      "Write(reports/**)",
+      "Write(signals/**)",
+      "Write(tests/**)",
       "Bash(rm -rf:*)",
       "Bash(rm -rf /:*)",
       "Bash(git push --force:*)",
