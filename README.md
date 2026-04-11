@@ -1,4 +1,4 @@
-# Fundamental Analyst
+# Arthashastra
 
 A Claude-Code-native fundamental analyst for Indian equities (NSE/BSE).
 You ask "analyse TCS" or "find solar stocks with strong fundamentals at
