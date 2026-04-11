@@ -11,7 +11,16 @@ Weights (per PLAN.md §Scoring rubrics):
     cash_quality    15
     promoter        15
 
-Pledge > 10% clamps the final score to 40 (promoter-behaviour veto).
+Vetoes and caps (applied after the weighted sum):
+  - Pledge > 10% clamps the final score to 40 (promoter-behaviour veto).
+  - Growth deceleration: when BOTH 3y revenue CAGR and 3y PAT CAGR are
+    below the thresholds below, the final score is capped regardless of
+    balance-sheet quality. This stops slow-growth compounders with
+    pristine legacy metrics from scoring 85+ on fundamentals alone.
+
+        both CAGRs <  3% → cap at 50 (HOLD floor)
+        both CAGRs <  5% → cap at 60
+        both CAGRs <  7% → cap at 70
 """
 
 from __future__ import annotations
@@ -26,6 +35,14 @@ _COMPONENT_WEIGHTS: dict[str, int] = {
     "cash_quality": 15,
     "promoter": 15,
 }
+
+# Growth-deceleration ceilings — applied only when BOTH revenue and PAT
+# CAGRs are populated. (threshold_pct, score_cap) in strictest-first order.
+_GROWTH_CEILINGS: tuple[tuple[float, float], ...] = (
+    (3.0, 50.0),
+    (5.0, 60.0),
+    (7.0, 70.0),
+)
 
 
 def score_fundamentals(snap: BalanceSheetSnapshot) -> ScorerResult:
@@ -64,6 +81,20 @@ def score_fundamentals(snap: BalanceSheetSnapshot) -> ScorerResult:
                 f"(score already below 40 on fundamentals)."
             )
 
+    growth_cap = _growth_deceleration_cap(snap)
+    if growth_cap is not None:
+        cap_pct, cap_score = growth_cap
+        if score > cap_score:
+            rev = snap.rev_3y_cagr or 0.0
+            pat = snap.pat_3y_cagr or 0.0
+            evidence.append(
+                f"VETO: 3y growth decelerating (rev {rev:.1f}%, PAT {pat:.1f}%, "
+                f"both < {cap_pct:.0f}%) — score capped at {cap_score:.1f} "
+                f"(uncapped was {score:.1f}). Balance-sheet quality does not "
+                f"compensate for a business that stopped growing."
+            )
+            score = cap_score
+
     return ScorerResult(
         pillar="fundamentals",
         score=score,
@@ -71,6 +102,20 @@ def score_fundamentals(snap: BalanceSheetSnapshot) -> ScorerResult:
         evidence=evidence,
         data_completeness_pct=float(total_weight),
     )
+
+
+def _growth_deceleration_cap(
+    snap: BalanceSheetSnapshot,
+) -> tuple[float, float] | None:
+    """Return (threshold_pct, score_cap) when both CAGRs are below a threshold."""
+    rev = snap.rev_3y_cagr
+    pat = snap.pat_3y_cagr
+    if rev is None or pat is None:
+        return None
+    for threshold, cap in _GROWTH_CEILINGS:
+        if rev < threshold and pat < threshold:
+            return threshold, cap
+    return None
 
 
 # ── Sub-scorers ───────────────────────────────────────────────────────────────

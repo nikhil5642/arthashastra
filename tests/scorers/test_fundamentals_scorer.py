@@ -68,7 +68,7 @@ def test_pledge_veto_caps_otherwise_good_score():
     )
     result = score_fundamentals(snap)
     assert result.score == 40.0
-    assert any("VETO" in ev and "capped at 40.0" in ev for ev in result.evidence)
+    assert any("pledge" in ev.lower() and "VETO" in ev for ev in result.evidence)
 
 
 def test_sparse_inputs_degrade_gracefully():
@@ -110,3 +110,91 @@ def test_evidence_mentions_every_provided_component():
     assert "OCF/PAT" in body
     assert "Promoter holding" in body
     assert "Promoter pledge" in body
+
+
+# ── Growth-deceleration veto ──────────────────────────────────────────────────
+
+
+def _pristine_balance_sheet(
+    *, rev: float, pat: float
+) -> BalanceSheetSnapshot:
+    """TCS-style pristine balance sheet with configurable growth rates."""
+    return _snap(
+        debt_to_equity=0.10,
+        interest_coverage=54.0,
+        roe=52.0,
+        roce=63.0,
+        rev_3y_cagr=rev,
+        pat_3y_cagr=pat,
+        ocf_to_pat=1.06,
+        promoter_holding=72.0,
+        pledge_pct=0.0,
+    )
+
+
+def test_growth_cap_70_when_both_cagrs_under_7():
+    """TCS-like: 5.8% rev / 5.3% PAT — pristine balance sheet, score capped at 70."""
+    snap = _pristine_balance_sheet(rev=5.8, pat=5.3)
+    result = score_fundamentals(snap)
+    assert result.score == 70.0
+    assert any(
+        "3y growth decelerating" in ev and "< 7" in ev
+        for ev in result.evidence
+    )
+
+
+def test_growth_cap_60_when_both_cagrs_under_5():
+    snap = _pristine_balance_sheet(rev=4.0, pat=3.8)
+    result = score_fundamentals(snap)
+    assert result.score == 60.0
+    assert any("< 5" in ev for ev in result.evidence)
+
+
+def test_growth_cap_50_when_both_cagrs_under_3():
+    snap = _pristine_balance_sheet(rev=2.0, pat=1.5)
+    result = score_fundamentals(snap)
+    assert result.score == 50.0
+    assert any("< 3" in ev for ev in result.evidence)
+
+
+def test_no_growth_cap_when_only_one_cagr_low():
+    """One weak, one strong — no cap fires (typical mid-cycle recovery)."""
+    snap = _pristine_balance_sheet(rev=4.0, pat=15.0)
+    result = score_fundamentals(snap)
+    assert result.score > 80  # uncapped, high because of quality
+    assert not any("growth decelerating" in ev for ev in result.evidence)
+
+
+def test_no_growth_cap_when_cagrs_missing():
+    """Sparse data — the cap doesn't trigger when either CAGR is None."""
+    snap = _snap(
+        debt_to_equity=0.10,
+        interest_coverage=54.0,
+        roe=52.0,
+        roce=63.0,
+        # no rev/pat CAGRs
+        ocf_to_pat=1.06,
+        promoter_holding=72.0,
+        pledge_pct=0.0,
+    )
+    result = score_fundamentals(snap)
+    assert not any("growth decelerating" in ev for ev in result.evidence)
+
+
+def test_growth_cap_respects_already_low_scores():
+    """If the uncapped score is already below the cap, the cap is a no-op."""
+    # Weak balance sheet + slow growth — uncapped score already ~40.
+    snap = _snap(
+        debt_to_equity=2.0,
+        interest_coverage=1.5,
+        roe=3.0,
+        roce=4.0,
+        rev_3y_cagr=5.0,
+        pat_3y_cagr=4.0,
+        ocf_to_pat=0.5,
+        promoter_holding=30.0,
+        pledge_pct=0.0,
+    )
+    result = score_fundamentals(snap)
+    # Score stays where it was — no "capped at X" evidence bullet.
+    assert result.score < 50

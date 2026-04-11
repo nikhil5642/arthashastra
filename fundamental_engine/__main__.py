@@ -58,6 +58,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "refresh", help="Fetch live data and cache score for a ticker or all cached tickers."
     )
     p_refresh.add_argument("target", help="Ticker symbol or 'all'.")
+    p_refresh.add_argument(
+        "--rejudge",
+        action="store_true",
+        help="Also delete the cached Claude judgment for the ticker, forcing a fresh /analyse-stock pass.",
+    )
 
     p_analyse = sub.add_parser(
         "analyse", help="Render stock report for one ticker (fetches live)."
@@ -144,10 +149,29 @@ def _run_resolve(query: str, limit: int, as_json: bool) -> int:
     return 0
 
 
-def _run_refresh(target: str) -> int:
+def _run_refresh(target: str, *, rejudge: bool = False) -> int:
     from fundamental_engine.engine import Engine
+    from fundamental_engine.judgments import JudgmentStore
+    from fundamental_engine.ticker import canonical
 
+    cfg = AnalystConfig.from_env()
     engine = Engine.from_env()
+
+    if rejudge:
+        store = JudgmentStore(cfg.data_cache_dir)
+        if target.lower() == "all":
+            for ticker in store.list_tickers():
+                store.path_for(ticker).unlink(missing_ok=True)
+                print(f"  cleared judgment for {ticker}")
+        else:
+            bare = canonical(target)
+            fp = store.path_for(bare)
+            if fp.exists():
+                fp.unlink()
+                print(f"cleared cached judgment for {bare}")
+            else:
+                print(f"no cached judgment for {bare} — nothing to clear")
+
     if target.lower() == "all":
         results = asyncio.run(engine.refresh_all())
         ok = sum(1 for r in results if r.status == "ok")
@@ -178,6 +202,8 @@ def _run_refresh(target: str) -> int:
 
 
 def _run_analyse(ticker: str) -> int:
+    from datetime import datetime, timedelta
+
     from fundamental_engine.analyse_pipeline import (
         NoDataError,
         analyse_ticker,
@@ -212,13 +238,46 @@ def _run_analyse(ticker: str) -> int:
     fp = render_stock_report(result.snapshot, result.score, output_dir=reports_dir)
     if fp:
         print(f"\nReport saved: {fp}")
+
     if result.judgment is None:
         print(
             "\n[hint] Leadership / prospects / news pillars are awaiting "
             "Claude judgment. Run `/analyse-stock " + bare + "` in Claude "
             "Code to generate and cache them."
         )
+    else:
+        age = _judgment_age_days(result.judgment.updated_at)
+        if age is None:
+            print(
+                "\n[info] Blended with cached Claude judgment (timestamp unreadable)."
+            )
+        elif age >= 3:
+            print(
+                f"\n[warn] Blended with a {age}-day-old Claude judgment. "
+                f"Run `fundamental_engine refresh {bare} --rejudge` "
+                f"followed by `/analyse-stock {bare}` in Claude Code for "
+                f"a fresh qualitative pass."
+            )
+        else:
+            print(
+                f"\n[info] Blended with cached Claude judgment ({age} day(s) old)."
+            )
     return 0
+
+
+def _judgment_age_days(updated_at: str) -> int | None:
+    from datetime import datetime
+
+    if not updated_at:
+        return None
+    try:
+        # Strip any trailing timezone offset; we compare naive.
+        ts = updated_at.split("+")[0].rstrip("Z")
+        parsed = datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    delta = datetime.now() - parsed.replace(tzinfo=None)
+    return max(0, delta.days)
 
 
 def _run_pick(amount_raw: str, min_composite: float, min_verdict: str) -> int:
@@ -390,7 +449,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "resolve":
         return _run_resolve(args.query, args.limit, args.json)
     if args.command == "refresh":
-        return _run_refresh(args.target)
+        return _run_refresh(args.target, rejudge=args.rejudge)
     if args.command == "analyse":
         return _run_analyse(args.ticker)
     if args.command == "pick":
