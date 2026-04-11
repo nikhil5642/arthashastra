@@ -94,7 +94,7 @@ def test_pick_command_finds_real_dip(tmp_path, monkeypatch):
     _prime_scores(cache_dir)
     _prime_prices(cache_dir)
 
-    from reports.picks_report import run_pick_command
+    from fundamental_engine.commands.pick import run_pick_command
 
     rc = run_pick_command("100000", min_composite=75, min_verdict="BUY")
     assert rc == 0
@@ -111,7 +111,7 @@ def test_pick_command_empty_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("ANALYST_ENV", "sandbox")
     (tmp_path / "cache").mkdir(parents=True, exist_ok=True)
 
-    from reports.picks_report import run_pick_command
+    from fundamental_engine.commands.pick import run_pick_command
 
     rc = run_pick_command("100000", min_composite=75, min_verdict="BUY")
     assert rc == 0
@@ -123,7 +123,7 @@ def test_pick_command_invalid_budget(tmp_path, monkeypatch):
     _prime_scores(tmp_path / "cache")
     _prime_prices(tmp_path / "cache")
 
-    from reports.picks_report import run_pick_command
+    from fundamental_engine.commands.pick import run_pick_command
 
     rc = run_pick_command("banana", min_composite=75, min_verdict="BUY")
     assert rc == 4
@@ -138,7 +138,7 @@ def test_pick_command_missing_price_history_gracefully_skipped(
     _prime_scores(tmp_path / "cache")
     # Note: no _prime_prices — the SQLite DB doesn't exist yet.
 
-    from reports.picks_report import run_pick_command
+    from fundamental_engine.commands.pick import run_pick_command
 
     rc = run_pick_command("100000", min_composite=75, min_verdict="BUY")
     assert rc == 0

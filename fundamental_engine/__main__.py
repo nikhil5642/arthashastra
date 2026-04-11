@@ -285,7 +285,7 @@ def _judgment_age_days_for(store, ticker: str) -> int | None:
 
 
 def _run_pick(amount_raw: str, min_composite: float, min_verdict: str) -> int:
-    from reports.picks_report import run_pick_command
+    from fundamental_engine.commands.pick import run_pick_command
 
     return run_pick_command(
         amount_raw, min_composite=min_composite, min_verdict=min_verdict
@@ -293,7 +293,7 @@ def _run_pick(amount_raw: str, min_composite: float, min_verdict: str) -> int:
 
 
 def _run_brief() -> int:
-    from reports.market_brief import run_brief_command
+    from fundamental_engine.commands.brief import run_brief_command
 
     return run_brief_command()
 

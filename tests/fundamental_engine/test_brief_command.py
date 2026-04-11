@@ -49,7 +49,7 @@ def test_brief_runs_with_populated_cache(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("ANALYST_ENV", "sandbox")
     _prime_cache(tmp_path / "cache")
 
-    from reports.market_brief import run_brief_command
+    from fundamental_engine.commands.brief import run_brief_command
 
     rc = run_brief_command()
     assert rc == 0
@@ -69,7 +69,7 @@ def test_brief_runs_on_empty_cache(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("ANALYST_ENV", "sandbox")
     (tmp_path / "cache").mkdir(parents=True, exist_ok=True)
 
-    from reports.market_brief import run_brief_command
+    from fundamental_engine.commands.brief import run_brief_command
 
     rc = run_brief_command()
     assert rc == 0

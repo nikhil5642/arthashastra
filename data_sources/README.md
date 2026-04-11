@@ -4,20 +4,47 @@ Live data adapters — every module here is the **only** place in the
 project that talks to an external API. No synthetic data, no fixtures,
 no hardcoded ticker or company lists.
 
+This is the **lowest non-leaf layer** in the architecture: it depends
+only on `signals/` (shared infra) and nothing else. Run `grep -rhE
+'^from (scorers|screener|reports|fundamental_engine)' data_sources/`
+to confirm — it must always come back empty.
+
+## Layout
+
+```
+data_sources/
+├── fundamentals_source/     # split by responsibility
+│   ├── __init__.py          #   public API re-exports
+│   ├── snapshot.py          #   BalanceSheetSnapshot + SCORED_FIELDS + is_bank_snapshot
+│   ├── source.py            #   FundamentalsSource facade + merge rules + _SCREENER_WINS
+│   ├── yfinance_adapter.py  #   yfinance fetcher + section fillers (with _yf_symbol helper)
+│   ├── screener_adapter.py  #   screener.in fetcher + section parsers + appliers
+│   └── primitives.py        #   parse helpers + _drop_ttm + _screener_cagr
+├── research_source.py       # Wikipedia API + Brave Search (optional)
+└── news_source.py           # Google News RSS per-company + market RSS
+```
+
 ## Modules
 
 | Module | External source | What it returns |
 |---|---|---|
-| `fundamentals_source.py` | yfinance (`.history()`, `.balance_sheet`, `.income_stmt`, `.cashflow`, `.quarterly_income_stmt`) + screener.in HTML scrape | `BalanceSheetSnapshot` (14 scored ratios: leverage/liquidity/solvency/profitability/growth/earnings-quality/promoter; plus non-scored **Financial Profile** — margin stack, cost structure, working-capital days, asset composition, 5-quarter revenue/PAT trend + YoY growth) **and** the raw daily close rows, bundled into a `FetchResult` |
+| `fundamentals_source/` | yfinance (`.history()`, `.balance_sheet`, `.income_stmt`, `.cashflow`, `.quarterly_income_stmt`, `.info`) + screener.in HTML scrape | `BalanceSheetSnapshot` — 14 scored ratios, full **Financial Profile** (margin stack, cost mix, working-capital days, asset composition, quarterly trend, multi-year ratio trends, shareholding trend), bank-specific fields (NIM, NII, CD ratio) populated when the snapshot is a bank, the yfinance analyst bundle (target + recommendation), and full raw section dumps (`raw_profit_loss`, `raw_balance_sheet`, …) keyed by screener row label for ad-hoc downstream queries |
 | `research_source.py` | Wikipedia (`wikipedia-api`) + Brave Search API (optional, requires `BRAVE_API_KEY`) | `ResearchBundle` — biography text + web hit snippets for a leader |
 | `news_source.py` | Google News RSS per-company queries + market-wide RSS (ET, Moneycontrol) | `NewsItem` list with a keyword-based `is_material` gate |
 
 ## Conventions for this layer
 
-- **Every public async method is mockable at the sync adapter level.**
-  Tests monkeypatch `_fetch_yfinance_sync`, `_fetch_screener_in`,
-  `_fetch_wikipedia_sync`, `_fetch_brave_search`, `_fetch_feed_sync`.
-  No network in tests.
+- **Every public async method is mockable at the submodule level.**
+  Tests monkeypatch adapter functions on the submodules where they
+  live — `yfinance_adapter._fetch_yfinance_sync` and
+  `screener_adapter._fetch_screener_in`. `source.py` imports the
+  adapter *modules* (not functions) so attribute lookups are deferred
+  to call time, making monkeypatching actually take effect.
+- **No upward imports.** `data_sources/` must not import from
+  `scorers/`, `screener/`, `reports/`, or `fundamental_engine/`.
+  yfinance-symbol formatting (`_yf_symbol`) is a private helper inside
+  `yfinance_adapter.py` — it used to reach into `fundamental_engine.
+  ticker.yf_symbol` which was a layering violation; fixed now.
 - **Screener.in is authoritative for every Indian-specific ratio it exposes** —
   D/E (from the `Borrowings` row, not yfinance's lease-inflated "Total Debt"),
   interest coverage, operating/net/tax margins, OCF/PAT, FCF/PAT, working-

@@ -27,6 +27,24 @@ log = logging.getLogger(__name__)
 
 PriceRow = tuple[str, float]
 
+_NSE_SUFFIX = ".NS"
+_BSE_SUFFIX = ".BO"
+
+
+def _yf_symbol(raw: str) -> str:
+    """Format a bare ticker as a yfinance symbol ('RELIANCE' → 'RELIANCE.NS').
+
+    Kept private to this adapter — the `.NS` / `.BO` suffix convention is
+    a yfinance implementation detail and shouldn't leak upward into the
+    orchestrator layer. (Previously this lived in `fundamental_engine.
+    ticker` which created a layering violation: a low-level data source
+    shouldn't depend on the high-level engine package.)
+    """
+    t = raw.strip().upper()
+    if t.endswith(_NSE_SUFFIX) or t.endswith(_BSE_SUFFIX):
+        return t
+    return f"{t}{_NSE_SUFFIX}"
+
 
 # ── Public entry point ───────────────────────────────────────────────────────
 
@@ -43,9 +61,7 @@ def _fetch_yfinance_sync(ticker: str) -> tuple[dict[str, Any], list[PriceRow]]:
         log.warning("yfinance not installed")
         return {}, []
 
-    from fundamental_engine.ticker import yf_symbol
-
-    symbol = yf_symbol(ticker)
+    symbol = _yf_symbol(ticker)
 
     try:
         t = yf.Ticker(symbol)

@@ -31,47 +31,98 @@ covers what you need to know as the LLM driving the project.
    (`data_sources/*.py:_fetch_*`) at the module level. Do NOT create
    JSON fixture files. Do NOT ship pre-computed "example" data.
 
+## Architecture
+
+The project is a strict **layered architecture** — each layer depends
+only on layers below it, never on layers above. Run-time direction:
+
+```
+   ┌─────────────────────────────────────────────┐
+   │  fundamental_engine (orchestrator + CLI)    │   high level
+   │  ├── __main__.py  — parser + dispatch       │
+   │  ├── commands/    — pick, brief, …          │
+   │  └── analyse_pipeline, engine, resolver     │
+   └──────────────┬──────────────────────────────┘
+                  ↓
+   ┌──────────────┴──────────────┐
+   │  reports/      │  screener/  │                 presentation + screening
+   └──────┬─────────┴──────┬──────┘
+          ↓                ↓
+   ┌──────┴────────────────┴──────┐
+   │        scorers/              │                 deterministic scoring
+   └──────────────┬───────────────┘
+                  ↓
+   ┌──────────────┴───────────────┐
+   │       data_sources/          │                 live API adapters
+   └──────────────┬───────────────┘
+                  ↓
+   ┌──────────────┴───────────────┐
+   │         signals/             │   low level    (leaf — depends on nothing)
+   └──────────────────────────────┘
+```
+
+A grep at commit time confirms: `data_sources/`, `scorers/`,
+`screener/`, `reports/`, and `signals/` have **zero upward imports**.
+Breaking that discipline will land you a layering violation at the
+next `git log` sanity check.
+
 ## Directory map
 
 Each source folder has its own `README.md` explaining the contracts.
 Read those when you're touching a layer for the first time.
 
 ```
-fundamental_engine/          # orchestrator, CLI, pipeline, engine — see README.md
-├── __main__.py              # CLI: resolve / refresh / analyse / news / research / pick / brief / engine
-├── config.py                # AnalystConfig.from_env() — ANALYST_ENV + DATA_CACHE_DIR + BRAVE_API_KEY
+fundamental_engine/          # orchestrator + CLI commands — see README.md
+├── __main__.py              # argparse + dispatch (the thin CLI shim)
+├── commands/                # one file per CLI subcommand that needs orchestration
+│   ├── pick.py              #   pick --amount <INR>   (was reports/picks_report.py)
+│   └── brief.py             #   brief                 (was reports/market_brief.py)
 ├── analyse_pipeline.py      # analyse_ticker / score_snapshot / build_extended_score_dict
+├── analysis_context.py      # "Analysis context" banner + judgment-age helpers
 ├── engine.py                # background cache warmer; writes scores.json + prices.db + signals.json
 ├── resolver.py              # free-text → NSE/BSE ticker via yfinance.Search
 ├── judgments.py             # Judgment + JudgmentStore (Claude writes, Python reads)
 ├── universe.py              # emergent universe loaded from scores.json (never hardcoded)
-├── leader_mode_classifier.py
+├── leader_mode_classifier.py  # LeaderMode StrEnum + classify_mode(...)
 ├── budget_parser.py         # "1L" / "2.5L" / "1cr" → INR float
-├── ticker.py                # canonical / yf_symbol / slug (path-safe)
+├── ticker.py                # canonical / slug (path-safe name)
+├── config.py                # AnalystConfig.from_env()
 └── cache.py                 # JsonStore
 
 data_sources/                # live data adapters — see README.md
-├── fundamentals_source.py   # yfinance statements + history + screener.in HTML scrape
+├── fundamentals_source/     # yfinance + screener.in, split into single-responsibility submodules
+│   ├── __init__.py          #   public API re-exports
+│   ├── snapshot.py          #   BalanceSheetSnapshot + SCORED_FIELDS + is_bank_snapshot
+│   ├── source.py            #   FundamentalsSource async facade + merge rules + _SCREENER_WINS
+│   ├── yfinance_adapter.py  #   yfinance fetcher + section fillers
+│   ├── screener_adapter.py  #   screener.in fetcher + section parsers + appliers
+│   └── primitives.py        #   parse helpers + _drop_ttm + _screener_cagr
 ├── research_source.py       # Wikipedia API + Brave Search (optional)
 └── news_source.py           # Google News RSS per-company + market RSS aggregates
 
 scorers/                     # deterministic scoring — see README.md
-├── base.py                  # ScorerResult, StockScore, Verdict, verdict_for
-├── fundamentals_scorer.py   # 5-component rubric with graceful degradation + pledge veto
-└── composite_scorer.py      # blend(..) weighted fundamentals 40 / leadership 30 / prospects 15 / news 15
+├── base.py                  # Verdict + Pillar StrEnums + ScorerResult + StockScore + verdict_for
+├── composite_scorer.py      # blend(...) weighted fundamentals 40 / leadership 30 / prospects 15 / news 15
+└── fundamentals_scorer/     # dispatches to industrial or bank rubric based on is_bank_snapshot
+    ├── __init__.py          #   score_fundamentals entry
+    ├── industrial.py        #   industrial rubric + 5 sub-scorers + growth-veto
+    └── bank.py              #   bank / NBFC rubric + 4 sub-scorers
 
 screener/                    # pure logic — see README.md
-├── dip_detector.py          # multi-gate check_dip + DipSignal
+├── dip_detector.py          # multi-gate check_dip + DipSignal (Severity enum, VERDICT_ORDER from enum)
 └── price_history.py         # PriceHistoryStore (SQLite) + Wilder RSI14 + SMA
 
-reports/                     # Rich terminal + Markdown rendering — see README.md
-├── stock_report.py          # analyse <TICKER> output
-├── picks_report.py          # pick --amount <INR> output
-├── market_brief.py          # brief output
-└── formatting.py            # Rich helpers shared by the three above
+reports/                     # pure Rich + Markdown presentation — see README.md
+├── formatting.py            # make_console, verdict_text, VERDICT_STYLES (keyed by Verdict enum)
+└── stock_report/            # /analyse output split into single-responsibility renderers
+    ├── __init__.py          #   re-exports render_stock_report
+    ├── render.py            #   entry + markdown writer
+    ├── header.py            #   header panel + valuation + analyst bundle
+    ├── financial_profile.py #   profile dispatcher + industrial / bank variants
+    └── trends.py            #   multi-year + shareholding + quarterly rows
 
 signals/                     # append-only file pub/sub — see README.md
-└── signal_bus.py            # Signal + SignalBus; path= always required
+└── signal_bus.py            # Signal + SignalBus + SignalType + Severity enums
 
 .claude/skills/<name>/SKILL.md   # Claude-native slash commands
 ├── resolve-ticker/SKILL.md
@@ -95,6 +146,25 @@ data_cache/                  # runtime state (gitignored)
 ├── signals.json             # append-only event log (bounded at 500)
 └── reports/                 # saved Markdown reports (analyse / brief)
 ```
+
+## Typed interfaces (no raw strings)
+
+Every domain-valued string lives in a `StrEnum` so typos surface at
+call time rather than in a production verdict. Members are `str`
+subclasses so JSON serialization and dict-key usage keep working, but
+callers get IDE autocomplete and exhaustive iteration.
+
+| Enum        | Location                                      | Values |
+|---          |---                                            |---     |
+| `Verdict`   | `scorers/base.py`                             | STRONG_BUY · BUY · HOLD · AVOID · RED_FLAG |
+| `Pillar`    | `scorers/base.py`                             | FUNDAMENTALS · LEADERSHIP · PROSPECTS · NEWS |
+| `LeaderMode`| `fundamental_engine/leader_mode_classifier.py`| FIRST_GEN · MULTI_GEN_FAMILY · PROFESSIONAL |
+| `Severity`  | `signals/signal_bus.py`                       | INFO · ALERT · URGENT |
+| `SignalType`| `signals/signal_bus.py`                       | DIP_DETECTED · QUALITY_DIP · LEADERSHIP_NEWS · … |
+
+When you add a new domain-valued string (e.g. a new verdict band, a new
+signal type, a new leader mode), add it to the enum — never introduce a
+fresh string literal.
 
 ## Scoring rules
 
