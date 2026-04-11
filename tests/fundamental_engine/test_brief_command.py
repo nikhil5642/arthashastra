@@ -46,7 +46,6 @@ def _prime_cache(cache_dir: Path) -> None:
 
 def test_brief_runs_with_populated_cache(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("DATA_CACHE_DIR", str(tmp_path / "cache"))
-    monkeypatch.setenv("ANALYST_ENV", "sandbox")
     _prime_cache(tmp_path / "cache")
 
     from fundamental_engine.commands.brief import run_brief_command
@@ -66,7 +65,6 @@ def test_brief_runs_with_populated_cache(tmp_path: Path, monkeypatch):
 
 def test_brief_runs_on_empty_cache(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("DATA_CACHE_DIR", str(tmp_path / "cache"))
-    monkeypatch.setenv("ANALYST_ENV", "sandbox")
     (tmp_path / "cache").mkdir(parents=True, exist_ok=True)
 
     from fundamental_engine.commands.brief import run_brief_command

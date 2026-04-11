@@ -89,7 +89,6 @@ def _prime_prices(cache_dir: Path) -> None:
 
 def test_pick_command_finds_real_dip(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_CACHE_DIR", str(tmp_path / "cache"))
-    monkeypatch.setenv("ANALYST_ENV", "sandbox")
     cache_dir = tmp_path / "cache"
     _prime_scores(cache_dir)
     _prime_prices(cache_dir)
@@ -108,7 +107,6 @@ def test_pick_command_finds_real_dip(tmp_path, monkeypatch):
 
 def test_pick_command_empty_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_CACHE_DIR", str(tmp_path / "cache"))
-    monkeypatch.setenv("ANALYST_ENV", "sandbox")
     (tmp_path / "cache").mkdir(parents=True, exist_ok=True)
 
     from fundamental_engine.commands.pick import run_pick_command
@@ -119,7 +117,6 @@ def test_pick_command_empty_cache(tmp_path, monkeypatch):
 
 def test_pick_command_invalid_budget(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_CACHE_DIR", str(tmp_path / "cache"))
-    monkeypatch.setenv("ANALYST_ENV", "sandbox")
     _prime_scores(tmp_path / "cache")
     _prime_prices(tmp_path / "cache")
 
@@ -134,7 +131,6 @@ def test_pick_command_missing_price_history_gracefully_skipped(
 ):
     """If refresh hasn't persisted price history, the ticker is skipped."""
     monkeypatch.setenv("DATA_CACHE_DIR", str(tmp_path / "cache"))
-    monkeypatch.setenv("ANALYST_ENV", "sandbox")
     _prime_scores(tmp_path / "cache")
     # Note: no _prime_prices — the SQLite DB doesn't exist yet.
 

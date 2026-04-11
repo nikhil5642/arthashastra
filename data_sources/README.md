@@ -15,14 +15,36 @@ to confirm — it must always come back empty.
 data_sources/
 ├── fundamentals_source/     # split by responsibility
 │   ├── __init__.py          #   public API re-exports
-│   ├── snapshot.py          #   BalanceSheetSnapshot + SCORED_FIELDS + is_bank_snapshot
+│   ├── snapshot.py          #   BalanceSheetSnapshot dataclass
+│   │                        #   + SnapshotFields TypedDict (adapter builder shape)
+│   │                        #   + SCORED_FIELDS + is_bank_snapshot
+│   │                        #   + PeerRecord / DocumentRecord aliases
 │   ├── source.py            #   FundamentalsSource facade + merge rules + _SCREENER_WINS
-│   ├── yfinance_adapter.py  #   yfinance fetcher + section fillers (with _yf_symbol helper)
+│   ├── yfinance_adapter.py  #   yfinance fetcher + section fillers
+│   │                        #   (pandas.DataFrame / yfinance.Ticker types via TYPE_CHECKING)
 │   ├── screener_adapter.py  #   screener.in fetcher + section parsers + appliers
+│   │                        #   (selectolax HTMLParser type via TYPE_CHECKING)
 │   └── primitives.py        #   parse helpers + _drop_ttm + _screener_cagr
-├── research_source.py       # Wikipedia API + Brave Search (optional)
-└── news_source.py           # Google News RSS per-company + market RSS
+├── research_source.py       # Wikipedia API + Brave Search + WebHit TypedDict
+└── news_source.py           # Google News RSS + FeedEntry TypedDict + NewsCategory enum
 ```
+
+## Type-safety contract for this layer
+
+- **No `typing.Any` anywhere.** The adapter builder dict is typed as
+  `SnapshotFields` (a `TypedDict(total=False)` mirroring the
+  `BalanceSheetSnapshot` fields). Every `_fill_*` / `_apply_*` /
+  `_parse_*` helper signature takes `SnapshotFields` not
+  `dict[str, Any]`. Typos in keys surface at edit time.
+- **External library objects are forward-referenced.** pandas
+  `DataFrame | None`, yfinance `Ticker`, selectolax `HTMLParser` —
+  all via `if TYPE_CHECKING: from ... import ...` blocks so there's
+  zero runtime import cost.
+- **RSS entries are typed as `FeedEntry`** (not `dict[str, Any]`),
+  web search results as `WebHit`.
+- **`ResearchBundle.to_dict()` / `NewsItem.to_dict()` / `BalanceSheetSnapshot.to_dict()`**
+  return `dict[str, object]`, not `dict[str, Any]` — callers at the
+  JSON boundary must narrow explicitly.
 
 ## Modules
 

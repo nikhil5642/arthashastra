@@ -1,7 +1,5 @@
 # Environment
 .env
-.env.sandbox
-.env.live
 
 # Python
 __pycache__/

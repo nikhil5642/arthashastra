@@ -42,8 +42,10 @@ via `refresh` or `analyse`. Everything else comes from live sources.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env.sandbox
-# optionally set BRAVE_API_KEY in .env.sandbox for leadership web research
+cp .env.example .env
+# (Optional) set BRAVE_API_KEY in .env for the /research-founder web search.
+# Everything else runs without any secrets — no Anthropic key, no sandbox /
+# live split, no cost budget.
 ```
 
 ## Daily use (from the terminal)
@@ -70,8 +72,12 @@ python -m fundamental_engine brief
 # 7. Refresh everything in the cache
 python -m fundamental_engine refresh all
 
-# 8. Run the background warmer (long-running; Ctrl+C to stop)
-bash launch.sh
+# 8. Run the background warmer (long-running; Ctrl+C to stop).
+# Default: stdout is tee'd into data_cache/engine.log so you can
+# watch the terminal AND tail the file. Pass --foreground when
+# running under tmux / launchd / systemd that already captures stdout.
+./launch.sh
+./launch.sh --foreground    # no tee, stream to tty only
 ```
 
 ## Daily use (from Claude Code)

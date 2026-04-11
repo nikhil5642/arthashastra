@@ -61,7 +61,6 @@ def _install_source(
 
 
 def _env(monkeypatch, tmp_path):
-    monkeypatch.setenv("ANALYST_ENV", "sandbox")
     monkeypatch.setenv("DATA_CACHE_DIR", str(tmp_path / "cache"))
 
 

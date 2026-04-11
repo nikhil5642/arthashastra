@@ -75,30 +75,34 @@ Read those when you're touching a layer for the first time.
 fundamental_engine/          # orchestrator + CLI commands — see README.md
 ├── __main__.py              # argparse + dispatch (the thin CLI shim)
 ├── commands/                # one file per CLI subcommand that needs orchestration
-│   ├── pick.py              #   pick --amount <INR>   (was reports/picks_report.py)
-│   └── brief.py             #   brief                 (was reports/market_brief.py)
-├── analyse_pipeline.py      # analyse_ticker / score_snapshot / build_extended_score_dict
+│   ├── pick.py              #   pick --amount <INR>  (was reports/picks_report.py)
+│   └── brief.py             #   brief                (was reports/market_brief.py)
+├── analyse_pipeline.py      # analyse_ticker / score_snapshot / AnalysisResult
 ├── analysis_context.py      # "Analysis context" banner + judgment-age helpers
+├── extended_score.py        # ExtendedScore — typed scores.json row + from_dict / to_dict
+├── dip_candidate.py         # DipCandidateRecord — typed dip_candidates.json row
 ├── engine.py                # background cache warmer; writes scores.json + prices.db + signals.json
 ├── resolver.py              # free-text → NSE/BSE ticker via yfinance.Search
 ├── judgments.py             # Judgment + JudgmentStore (Claude writes, Python reads)
-├── universe.py              # emergent universe loaded from scores.json (never hardcoded)
+├── universe.py              # load_scores / load_dip_candidates — typed loaders
 ├── leader_mode_classifier.py  # LeaderMode StrEnum + classify_mode(...)
-├── budget_parser.py         # "1L" / "2.5L" / "1cr" → INR float
+├── budget_parser.py         # Magnitude StrEnum (K/LAKH/CRORE) + parse_budget
 ├── ticker.py                # canonical / slug (path-safe name)
 ├── config.py                # AnalystConfig.from_env()
-└── cache.py                 # JsonStore
+└── cache.py                 # JsonStore — dict[str, object] boundary
 
 data_sources/                # live data adapters — see README.md
 ├── fundamentals_source/     # yfinance + screener.in, split into single-responsibility submodules
 │   ├── __init__.py          #   public API re-exports
-│   ├── snapshot.py          #   BalanceSheetSnapshot + SCORED_FIELDS + is_bank_snapshot
+│   ├── snapshot.py          #   BalanceSheetSnapshot + SnapshotFields TypedDict + SCORED_FIELDS
+│   │                        #   + is_bank_snapshot + PeerRecord / DocumentRecord aliases
 │   ├── source.py            #   FundamentalsSource async facade + merge rules + _SCREENER_WINS
-│   ├── yfinance_adapter.py  #   yfinance fetcher + section fillers
+│   ├── yfinance_adapter.py  #   yfinance fetcher + section fillers (pandas types via TYPE_CHECKING)
 │   ├── screener_adapter.py  #   screener.in fetcher + section parsers + appliers
+│   │                        #   (HTMLParser type via TYPE_CHECKING)
 │   └── primitives.py        #   parse helpers + _drop_ttm + _screener_cagr
-├── research_source.py       # Wikipedia API + Brave Search (optional)
-└── news_source.py           # Google News RSS per-company + market RSS aggregates
+├── research_source.py       # Wikipedia API + Brave Search (WebHit TypedDict)
+└── news_source.py           # Google News RSS (FeedEntry TypedDict) + NewsCategory enum
 
 scorers/                     # deterministic scoring — see README.md
 ├── base.py                  # Verdict + Pillar StrEnums + ScorerResult + StockScore + verdict_for
@@ -147,9 +151,22 @@ data_cache/                  # runtime state (gitignored)
 └── reports/                 # saved Markdown reports (analyse / brief)
 ```
 
-## Typed interfaces (no raw strings)
+## Typed interfaces (zero `Any` in the source tree)
 
-Every domain-valued string lives in a `StrEnum` so typos surface at
+The codebase enforces a hard "no `typing.Any` anywhere in source" rule.
+A grep confirms it at commit time:
+
+```bash
+grep -rnE '\bAny\b' data_sources/ scorers/ screener/ reports/ \
+    signals/ fundamental_engine/ --include='*.py'
+# (docstring / comment mentions only — never a type hint)
+```
+
+Every domain value has a proper home:
+
+### Enums — domain-valued strings
+
+Every discriminated string lives in a `StrEnum` so typos surface at
 call time rather than in a production verdict. Members are `str`
 subclasses so JSON serialization and dict-key usage keep working, but
 callers get IDE autocomplete and exhaustive iteration.
@@ -166,9 +183,59 @@ callers get IDE autocomplete and exhaustive iteration.
 | `Severity`            | `signals/signal_bus.py`                            | INFO · ALERT · URGENT |
 | `SignalType`          | `signals/signal_bus.py`                            | DIP_DETECTED · QUALITY_DIP · LEADERSHIP_NEWS · … |
 
-When you add a new domain-valued string (e.g. a new verdict band, a new
-signal type, a new leader mode), add it to the enum — never introduce a
-fresh string literal.
+### TypedDicts — partial / structured JSON shapes
+
+| TypedDict        | Location                                                    | Purpose |
+|---               |---                                                          |---     |
+| `SnapshotFields` | `data_sources/fundamentals_source/snapshot.py`              | The **builder shape** used by yfinance + screener adapters. Every `_fill_*`, `_apply_*`, `_parse_*` helper takes this instead of `dict[str, Any]`. Mirrors `BalanceSheetSnapshot` fields with `total=False`. |
+| `FeedEntry`      | `data_sources/news_source.py`                               | One normalised RSS row (`headline`, `body`, `url`, `published_at`, `source`). |
+| `WebHit`         | `data_sources/research_source.py`                           | One Brave Search result (`title`, `url`, `snippet`). |
+
+### Typed records — JSON persistence boundary
+
+Raw JSON from `data_cache/*.json` is parsed into typed records *once*
+at the load site, then the rest of the codebase works with typed
+objects. There's a single `from_dict` / `to_dict` pair per record; no
+consumer anywhere else does `.get("key", default)` on a raw dict.
+
+| Record                | Location                                       | Cache file |
+|---                    |---                                             |---     |
+| `ExtendedScore`       | `fundamental_engine/extended_score.py`         | `scores.json` |
+| `DipCandidateRecord`  | `fundamental_engine/dip_candidate.py`          | `dip_candidates.json` |
+| `Judgment`, `PillarJudgment` | `fundamental_engine/judgments.py`       | `judgments/<TICKER>.json` |
+
+Each `from_dict(data: dict[str, object])` narrows untyped input with
+dedicated `_as_float`, `_as_str`, `_as_int`, `_parse_evidence`,
+`_parse_severity` helpers — every coercion is explicit and isinstance-
+checked. Corrupt rows return `None` instead of crashing the caller.
+
+### Pandas / selectolax / yfinance types
+
+External-library objects are forward-referenced via `TYPE_CHECKING`
+imports so there's zero runtime cost. See `yfinance_adapter.py` for
+the pattern — `is_: "DataFrame | None"`, `tree: "HTMLParser"`,
+`t: "Ticker"`.
+
+### `dict[str, object]` at serialization boundaries
+
+Every `to_dict()` method returns `dict[str, object]` (not `dict[str, Any]`).
+`object` has no methods, so callers cannot use the value without
+explicit narrowing — which forces the untyped-to-typed transition to
+happen in one place per record, not scattered across consumers.
+
+`JsonStore.read/write/upsert/get` in `fundamental_engine/cache.py`
+uses `dict[str, object]` + an `isinstance(parsed, dict)` guard on
+the top-level value (a corrupt file with an array or scalar at the
+root returns an empty dict instead of crashing `.items()`).
+
+### The rule
+
+When you add a new field / persisted shape / domain value:
+
+1. Domain-valued strings → add to the relevant `StrEnum`, never a fresh string literal.
+2. A new field on `BalanceSheetSnapshot` → also add it to `SnapshotFields`.
+3. A new persisted JSON shape → define a typed record with `from_dict` / `to_dict` and coerce at the boundary; never let raw dict access leak into business logic.
+4. If you *must* accept polymorphic input, use `object` and narrow with `isinstance`; **never `Any`**.
 
 ## Scoring rules
 
@@ -282,7 +349,7 @@ pending. Re-running `/analyse-stock <TICKER>` will refresh them.
 - Don't ship a company registry, alias list, ticker list, or holiday
   list. Everything dynamic.
 - Don't re-introduce an LLM client in Python
-- Don't commit `.env.sandbox` or `.env.live` or anything from
+- Don't commit `.env` or anything from
   `data_cache/`
 
 ## When running tests

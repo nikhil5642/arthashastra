@@ -15,7 +15,7 @@ Mirrors the source layout one-for-one:
 
 ```
 tests/
-├── conftest.py                          # sets ANALYST_ENV=sandbox; nothing else
+├── conftest.py                          # placeholder — no shared fixtures
 ├── data_sources/
 │   ├── test_fundamentals_source.py      # mocks _fetch_yfinance_sync + _fetch_screener_in
 │   ├── test_research_source.py          # mocks _fetch_wikipedia_sync + _fetch_brave_search
