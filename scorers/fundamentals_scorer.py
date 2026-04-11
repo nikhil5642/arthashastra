@@ -638,7 +638,7 @@ def _score_bank_governance(
             note = "(institutional — normal for a private bank)"
         elif h >= 40:
             s = 90.0
-            note = "(concentrated — PSU or family-controlled)"
+            note = "(concentrated promoter — PSU / family / founder-led)"
         else:
             s = 75.0
             note = "(mixed ownership)"

@@ -1351,9 +1351,13 @@ def _apply_bank_metrics(
     if nii is not None and total_assets is not None and total_assets > 0:
         out["nim"] = round(nii / total_assets * 100, 2)
 
-    if latest_other is not None:
+    # Non-interest income: only meaningful for banks where fees/treasury are
+    # a real franchise axis. NBFCs book fee income inside the "revenue" row,
+    # so screener's "other income" is essentially a rounding line (often
+    # negligible or negative). Skip the ratio when it's structurally absent.
+    if latest_other is not None and nii is not None and nii > 0:
         out["non_interest_income_cr"] = round(latest_other, 0)
-        if nii is not None and (nii + latest_other) > 0:
+        if (nii + latest_other) > 0 and abs(latest_other) / nii >= 0.02:
             out["non_interest_income_ratio"] = round(
                 latest_other / (nii + latest_other) * 100, 2
             )
