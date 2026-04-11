@@ -1,41 +1,48 @@
 #!/usr/bin/env bash
-# launch.sh — start the background cache warmer for the fundamental analyst.
+# launch.sh — open the Claude-native fundamental-analyst cockpit.
 #
-# The warmer walks the emergent universe (whatever is already in
-# data_cache/scores.json), re-fetches live fundamentals + daily closes,
-# recomputes deterministic scores, and persists everything. Qualitative
-# pillars come from judgment files Claude writes in slash commands;
-# the warmer never calls an LLM itself.
+# The default mode (`./launch.sh`) just opens an interactive Claude
+# Code session with a short primer prompt explaining what's available.
+# There is NO background process by default — refresh is on-demand,
+# done inside each slash command when the user asks to analyse a
+# specific ticker. Nothing gets pre-warmed.
+#
+# The optional `--engine` mode runs a periodic cache warmer that walks
+# every cached ticker and re-fetches screener.in + yfinance. Most users
+# don't need this — it's mainly useful if you want `/market-brief` to
+# show fresh numbers without invoking refresh yourself, or you're
+# monitoring a large universe and want a continuous background tick.
+# Use sparingly: every tick costs N live HTTP requests against
+# screener.in.
 #
 # Usage:
-#   ./launch.sh                # run with output tee'd to data_cache/engine.log
-#   ./launch.sh --foreground   # stream to tty only (for systemd / launchd)
-#   ./launch.sh -h             # show this help
+#   ./launch.sh              # cockpit: open Claude with a primer prompt
+#   ./launch.sh --engine     # engine-only: periodic background refresher
+#                            #   with log tail in the current terminal
+#   ./launch.sh --foreground # engine-only, no log tee; for systemd / tmux
+#   ./launch.sh -h           # this help
 #
 # Environment:
 #   DATA_CACHE_DIR  — read by AnalystConfig.from_env; defaults to ./data_cache
-#   BRAVE_API_KEY   — optional, only used for the /research-founder skill
+#   BRAVE_API_KEY   — optional, only used by /research-founder
 #
-# Stopping:
-#   Ctrl+C sends SIGINT; the Python `run_forever` loop catches it and
-#   exits cleanly (persists any in-flight writes, then returns).
-#   For unattended operation wrap this in tmux / launchd / systemd.
+# Manual stop of a stray engine (in case --engine was killed uncleanly):
+#   kill -INT "$(cat data_cache/engine.pid)" && rm data_cache/engine.pid
 
 set -euo pipefail
 
-# Resolve to the project root so relative paths (data_cache/, .env)
-# behave the same no matter where the user invoked us from.
 cd "$(dirname "$0")"
 
 # ── Args ────────────────────────────────────────────────────────────────────
-FOREGROUND=0
+MODE="cockpit"   # cockpit | engine | foreground
 for arg in "$@"; do
     case "$arg" in
-        --foreground|-f) FOREGROUND=1 ;;
         -h|--help)
-            sed -n '1,23p' "$0" | sed -e 's/^# \{0,1\}//'
+            sed -n '1,29p' "$0" | sed -e 's/^# \{0,1\}//'
             exit 0
             ;;
+        --engine)        MODE="engine" ;;
+        --foreground|-f) MODE="foreground" ;;
         *)
             echo "launch.sh: unknown flag '$arg' (try -h for help)" >&2
             exit 2
@@ -52,38 +59,128 @@ fi
 DATA_DIR="${DATA_CACHE_DIR:-data_cache}"
 mkdir -p "$DATA_DIR"
 
+# ── Cockpit mode: open Claude, no background engine ─────────────────────────
+if [[ "$MODE" == "cockpit" ]]; then
+    if [[ "${CLAUDECODE:-}" == "1" ]]; then
+        echo "⚠  already inside a Claude Code session — nothing to launch." >&2
+        echo "   Use \`./launch.sh --engine\` if you specifically want the" >&2
+        echo "   periodic background cache warmer." >&2
+        exit 0
+    fi
+    if ! command -v claude >/dev/null 2>&1; then
+        echo "launch.sh: 'claude' CLI not found on PATH." >&2
+        echo "Install Claude Code from https://claude.com/claude-code" >&2
+        exit 127
+    fi
+
+    # Primer prompt — keep short, it's just the session opener. The real
+    # playbooks live in .claude/skills/<name>/SKILL.md; this just points
+    # Claude at them and restates the load-bearing rules.
+    read -r -d '' PRIMER <<'EOF' || true
+You're driving the fundamental analyst for Indian equities in this repo.
+
+Data model:
+- Fetching is **on-demand** — there is no background warmer running.
+  Each slash command refreshes the ticker it operates on before scoring.
+- CLAUDE.md at the project root has the project rules. Read "Your role"
+  and "The rules" before scoring anything. Non-negotiables: no LLM in
+  Python, no hardcoding, anti-optimism defaults, verify verdicts from
+  numbers not brand priors, screener.in is authoritative for Indian
+  ratios.
+
+Available slash commands:
+  /analyse-stock <TICKER>    full four-pillar deep dive
+  /research-founder <name>   leadership research + mode-aware rubric
+  /pick-stocks <amount>      buy-the-dip candidates across the cache
+  /market-brief              overview of cached universe + recent signals
+  /refresh-now <TICKER|all>  force live data refresh
+  /explain-score <TICKER>    audit trail for a cached score, no re-fetch
+  /resolve-ticker <name>     free-text name → NSE/BSE ticker
+
+Greet the user in one short line and ask what they want to analyse.
+Don't pre-run any commands until they ask for something specific.
+EOF
+    exec claude "$PRIMER"
+fi
+
+# ── Engine modes ────────────────────────────────────────────────────────────
+LOG_FILE="$DATA_DIR/engine.log"
+PID_FILE="$DATA_DIR/engine.pid"
 SCORES_JSON="$DATA_DIR/scores.json"
+
+# Kill any stale engine from a prior crashed run.
+if [[ -f "$PID_FILE" ]]; then
+    stale_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$stale_pid" ]] && kill -0 "$stale_pid" 2>/dev/null; then
+        echo "Stopping stale engine from previous run (pid $stale_pid)..."
+        kill -INT "$stale_pid" 2>/dev/null || true
+        for _ in 1 2 3 4 5; do
+            kill -0 "$stale_pid" 2>/dev/null || break
+            sleep 1
+        done
+        kill -KILL "$stale_pid" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
+fi
+
 if [[ ! -s "$SCORES_JSON" ]]; then
     cat >&2 <<'WARN'
-⚠  The cache is empty — the engine will idle until you load at least
-   one ticker. In a separate shell:
+⚠  The cache is empty. The engine will walk 0 tickers per tick until
+   you load some. In another shell:
        python3 -m fundamental_engine refresh RELIANCE
        python3 -m fundamental_engine refresh HDFCBANK
-   (or `python3 -m fundamental_engine refresh all` once populated).
 
 WARN
 fi
 
-LOG_FILE="$DATA_DIR/engine.log"
-
-echo "fundamental-analyst engine starting"
-echo "  data cache : $DATA_DIR"
-if [[ "$FOREGROUND" -eq 1 ]]; then
-    echo "  log        : stdout only (--foreground)"
-else
-    echo "  log file   : $LOG_FILE"
+# ── Foreground mode (systemd / launchd / tmux pane) ─────────────────────────
+if [[ "$MODE" == "foreground" ]]; then
+    echo "fundamental-analyst engine (foreground, interval 900s)"
+    echo "  data cache : $DATA_DIR"
+    echo "  Ctrl+C to stop"
+    echo
+    exec python3 -m fundamental_engine engine
 fi
-echo "  Ctrl+C to stop"
+
+# ── Engine mode: background + tail ──────────────────────────────────────────
+echo "fundamental-analyst engine (--engine, background + log tail)"
+echo "  data cache : $DATA_DIR"
+echo "  log file   : $LOG_FILE"
+
+: > "$LOG_FILE"
+
+python3 -m fundamental_engine engine >>"$LOG_FILE" 2>&1 &
+ENGINE_PID=$!
+echo "$ENGINE_PID" > "$PID_FILE"
+echo "  engine pid : $ENGINE_PID"
+
+cleanup() {
+    local rc=$?
+    trap - EXIT INT TERM HUP
+    if [[ -n "${ENGINE_PID:-}" ]] && kill -0 "$ENGINE_PID" 2>/dev/null; then
+        echo
+        echo "Stopping engine (pid $ENGINE_PID)..."
+        kill -INT "$ENGINE_PID" 2>/dev/null || true
+        for _ in 1 2 3 4 5; do
+            kill -0 "$ENGINE_PID" 2>/dev/null || break
+            sleep 1
+        done
+        kill -KILL "$ENGINE_PID" 2>/dev/null || true
+        wait "$ENGINE_PID" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
+    exit "$rc"
+}
+trap cleanup EXIT INT TERM HUP
+
+# Fail fast if startup blew up.
+sleep 1
+if ! kill -0 "$ENGINE_PID" 2>/dev/null; then
+    echo "launch.sh: engine died during startup — see $LOG_FILE" >&2
+    tail -20 "$LOG_FILE" >&2 || true
+    exit 1
+fi
+echo "  engine ok  ·  Ctrl+C to stop"
 echo
 
-# ── Launch ──────────────────────────────────────────────────────────────────
-# With `--foreground`, `exec` replaces this shell with the Python
-# process so Ctrl+C / signals land directly on the engine loop with
-# no shell-in-the-middle. Otherwise we pipe through tee into the log
-# file, preserving python3's exit code via PIPESTATUS.
-if [[ "$FOREGROUND" -eq 1 ]]; then
-    exec python3 -m fundamental_engine engine
-else
-    python3 -m fundamental_engine engine 2>&1 | tee -a "$LOG_FILE"
-    exit "${PIPESTATUS[0]}"
-fi
+tail -f "$LOG_FILE"

@@ -1,11 +1,21 @@
-"""Background cache warmer — refreshes the emergent universe.
+"""Background cache warmer — opt-in, for users who want a standing refresh.
 
-The universe is whatever the user has already loaded via
-`refresh <ticker>` or `analyse <ticker>`. The engine walks that list at a
-fixed interval, fetches live fundamentals + real daily closes, recomputes
-deterministic scores, and persists both the extended StockScore and the
-raw price history. Qualitative pillars come from judgments Claude writes —
-the engine never calls an LLM itself.
+**This is not part of the default cockpit.** The Claude-native workflow
+is on-demand: each slash command refreshes the ticker it operates on
+before scoring, so nothing has to be pre-warmed. The engine here exists
+for the rare case where someone wants `/market-brief` to always show
+fresh numbers without invoking `/refresh-now` first.
+
+When run (via `./launch.sh --engine`), the engine walks the emergent
+universe (whatever the user has loaded via `refresh` / `analyse`),
+re-fetches live fundamentals + daily closes, recomputes deterministic
+scores, and persists both the extended StockScore and the raw price
+history. Qualitative pillars come from judgments Claude writes — the
+engine never calls an LLM itself.
+
+The default interval is 1 hour. 15-minute ticks (from the original
+800-ticker scan-the-market plan) don't fit an emergent-universe model
+and just hammer screener.in for no real benefit.
 """
 
 from __future__ import annotations
@@ -26,7 +36,7 @@ from signals.signal_bus import Severity, Signal, SignalBus, SignalType
 
 log = logging.getLogger(__name__)
 
-DEFAULT_INTERVAL_SECONDS = 900
+DEFAULT_INTERVAL_SECONDS = 3600  # 1 hour — Claude-native workflow is on-demand
 PRICE_DB_FILENAME = "prices.db"
 
 

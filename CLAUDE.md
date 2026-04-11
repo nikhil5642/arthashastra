@@ -8,7 +8,44 @@ prospects, and news judgements and writes them to a judgment cache.
 Read [`README.md`](./README.md) for the user-facing guide. This file
 covers what you need to know as the LLM driving the project.
 
-## The rules (critical)
+## Your role (read this first)
+
+This project is a **two-halves machine**. Understand which half you're
+in before every action:
+
+- **Python half** — data fetching, deterministic scoring, screening,
+  signal bus, reports. Runs with no LLM involvement. Takes live yfinance
+  + screener.in + Google News inputs and produces a `BalanceSheetSnapshot`
+  and a four-pillar `StockScore`. The fundamentals score is fully
+  determined by the numbers; you must never hand-edit it.
+- **Claude half (you)** — the qualitative judgement pillars.
+  Leadership, prospects, and news get scored by you inside slash
+  commands (`.claude/skills/<name>/SKILL.md`), and you write the
+  result to `data_cache/judgments/<TICKER>.json`. The Python side
+  picks up your judgment at report time and blends it into the
+  composite.
+
+Every session Claude works in this repo, the default workflow is:
+
+1. If the user asks to **analyse / research a ticker** → invoke the
+   matching slash command (`/analyse-stock`, `/research-founder`,
+   `/pick-stocks`, etc.). Each skill is a self-contained recipe that
+   handles data refresh + qualitative scoring + judgment writing.
+2. If the user asks an **ad-hoc question** about a ticker → run
+   `python3 -m fundamental_engine analyse <TICKER>` (which reads the
+   cached judgment + re-fetches live data) and answer from the typed
+   report output. The snapshot carries full raw dumps
+   (`raw_profit_loss`, `raw_balance_sheet`, `raw_cash_flow`,
+   `raw_ratios`, `raw_quarters`, `raw_shareholding_quarterly`) keyed
+   by the screener row label, so most line-item questions can be
+   answered without re-scraping.
+3. If the user asks you to **change the code** → obey the layer
+   discipline (see "Architecture" below), add a typed interface for
+   any new field / shape / value (see "Typed interfaces"), and
+   write/update tests that monkeypatch adapters instead of loading
+   fixtures.
+
+## The rules (critical — read every session)
 
 1. **Nothing is hardcoded.** There is no default ticker list, no
    default alias list, no default holiday calendar, no mock LLM, no
@@ -30,6 +67,40 @@ covers what you need to know as the LLM driving the project.
    the network, monkeypatch the adapter functions
    (`data_sources/*.py:_fetch_*`) at the module level. Do NOT create
    JSON fixture files. Do NOT ship pre-computed "example" data.
+
+5. **Anti-optimism defaults** (load-bearing). Apply downward anchors
+   by default:
+   - A business with decelerating growth should be downgraded, not
+     excused. The growth-deceleration veto in the industrial rubric
+     caps the score at 70/60/50 when both 3y CAGRs fall below 7/5/3%.
+     Never weaken or bypass it.
+   - "Nothing bad happened in the news window" is **neutral (55)**,
+     not bullish (70). A quiet window is not a buy signal.
+   - Structural disruption (AI automating a legacy service,
+     commodity cycle turning, regulated margins tightening) →
+     prospects ≤ 55 regardless of moat narrative.
+   - Integrity red flags (fraud, SEBI action, auditor resignation,
+     prior venture bankruptcy) → leadership ≤ 30 regardless.
+   When your verdict feels more optimistic than the tape, check
+   whether you've actually applied these anchors or whether you're
+   importing brand priors.
+
+6. **Verify from data, not brand.** When a score clashes with a
+   famous company's reputation (e.g. "HDFC Bank got AVOID but it's
+   a top-tier bank"), **walk through the actual numbers before
+   defending or overriding**: ROE trend, ROA trend, P/B vs historical,
+   FII/DII flows, PAT CAGR. Reputation is not evidence. The rubric
+   has caught real underperformance that contradicted brand priors
+   multiple times — trust the math.
+
+7. **Screener.in is authoritative for Indian ratios.** When screener
+   and yfinance disagree on D/E, ROE, margins, OCF/PAT, working-
+   capital days, or any ratio screener's standard tables expose,
+   screener wins. See `_SCREENER_WINS` in
+   `data_sources/fundamentals_source/source.py` for the full list
+   and the rationale — yfinance's "Total Debt" includes leases that
+   Indian analysts exclude, and similar US-centric definitional
+   mismatches pervade its other fields.
 
 ## Architecture
 

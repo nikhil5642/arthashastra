@@ -72,12 +72,16 @@ python -m fundamental_engine brief
 # 7. Refresh everything in the cache
 python -m fundamental_engine refresh all
 
-# 8. Run the background warmer (long-running; Ctrl+C to stop).
-# Default: stdout is tee'd into data_cache/engine.log so you can
-# watch the terminal AND tail the file. Pass --foreground when
-# running under tmux / launchd / systemd that already captures stdout.
+# 8. Open the Claude-native cockpit (interactive Claude Code session
+#    with a primer prompt pointing at the slash commands above).
+#    No background process — fetching is on-demand inside each
+#    slash command.
 ./launch.sh
-./launch.sh --foreground    # no tee, stream to tty only
+
+# 8b. (Optional, rarely needed) Run the periodic background cache
+#     warmer. Hits screener.in every 15 min for every cached ticker,
+#     so use sparingly.
+./launch.sh --engine
 ```
 
 ## Daily use (from Claude Code)
