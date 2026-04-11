@@ -160,17 +160,25 @@ def _run_refresh(target: str, *, rejudge: bool = False) -> int:
     if rejudge:
         store = JudgmentStore(cfg.data_cache_dir)
         if target.lower() == "all":
-            for ticker in store.list_tickers():
+            tickers = store.list_tickers()
+            if not tickers:
+                print("rejudge: no cached judgments to clear")
+            for ticker in tickers:
+                age = _judgment_age_days_for(store, ticker)
                 store.path_for(ticker).unlink(missing_ok=True)
-                print(f"  cleared judgment for {ticker}")
+                age_str = _format_age(age)
+                print(f"rejudge: cleared {ticker} judgment ({age_str})")
         else:
             bare = canonical(target)
+            existing = store.get(bare)
             fp = store.path_for(bare)
-            if fp.exists():
+            if existing is not None:
+                age = _judgment_age_days(existing.updated_at)
+                age_str = _format_age(age)
                 fp.unlink()
-                print(f"cleared cached judgment for {bare}")
+                print(f"rejudge: cleared {bare} judgment ({age_str})")
             else:
-                print(f"no cached judgment for {bare} — nothing to clear")
+                print(f"rejudge: no prior judgment for {bare} — this will be a fresh analysis")
 
     if target.lower() == "all":
         results = asyncio.run(engine.refresh_all())
@@ -202,8 +210,6 @@ def _run_refresh(target: str, *, rejudge: bool = False) -> int:
 
 
 def _run_analyse(ticker: str) -> int:
-    from datetime import datetime, timedelta
-
     from fundamental_engine.analyse_pipeline import (
         NoDataError,
         analyse_ticker,
@@ -211,7 +217,9 @@ def _run_analyse(ticker: str) -> int:
     )
     from fundamental_engine.cache import JsonStore
     from fundamental_engine.ticker import canonical
+    from reports.formatting import make_console
     from reports.stock_report import render_stock_report
+    from rich.panel import Panel
     from screener.price_history import PriceHistoryStore
 
     cfg = AnalystConfig.from_env()
@@ -230,9 +238,16 @@ def _run_analyse(ticker: str) -> int:
         bare, build_extended_score_dict(result)
     )
 
+    price_rows_written = 0
     if result.price_history:
         with PriceHistoryStore(cfg.data_cache_dir / "prices.db") as store:
-            store.load_rows(bare, result.price_history)
+            price_rows_written = store.load_rows(bare, result.price_history)
+
+    # Always print an "analysis context" banner up front so the user can
+    # see exactly which state this run used — fresh deterministic vs
+    # blended with a cached judgment, and how old that judgment was.
+    console = make_console()
+    console.print(_analysis_context_panel(result, bare, price_rows_written))
 
     reports_dir = cfg.data_cache_dir / "reports"
     fp = render_stock_report(result.snapshot, result.score, output_dir=reports_dir)
@@ -247,22 +262,61 @@ def _run_analyse(ticker: str) -> int:
         )
     else:
         age = _judgment_age_days(result.judgment.updated_at)
-        if age is None:
+        if age is not None and age >= 3:
             print(
-                "\n[info] Blended with cached Claude judgment (timestamp unreadable)."
-            )
-        elif age >= 3:
-            print(
-                f"\n[warn] Blended with a {age}-day-old Claude judgment. "
+                f"\n[warn] Blended with a {_format_age(age)} Claude judgment. "
                 f"Run `fundamental_engine refresh {bare} --rejudge` "
                 f"followed by `/analyse-stock {bare}` in Claude Code for "
                 f"a fresh qualitative pass."
             )
-        else:
-            print(
-                f"\n[info] Blended with cached Claude judgment ({age} day(s) old)."
-            )
     return 0
+
+
+def _analysis_context_panel(result, ticker: str, price_rows_written: int):
+    from rich.panel import Panel
+
+    snap = result.snapshot
+    lines: list[str] = []
+    lines.append(
+        f"Fundamentals:     live fetch  ·  source: {snap.source}  ·  "
+        f"completeness {snap.data_completeness_pct:.0f}%"
+    )
+    if price_rows_written > 0:
+        lines.append(
+            f"Price history:    refreshed  ·  {price_rows_written} daily closes "
+            f"persisted to prices.db"
+        )
+    else:
+        lines.append(
+            "Price history:    not refreshed this run "
+            "(empty yfinance history response)"
+        )
+
+    if result.judgment is None:
+        lines.append(
+            "Cached judgment:  [red]none[/red]  ·  leadership / prospects / "
+            "news will be rendered as pending — this is the honest "
+            "deterministic-only baseline."
+        )
+    else:
+        age = _judgment_age_days(result.judgment.updated_at)
+        age_str = _format_age(age)
+        if age is not None and age >= 3:
+            tag = f"[yellow]{age_str} — STALE[/yellow]"
+        else:
+            tag = f"[green]{age_str}[/green]"
+        leader = result.judgment.leader_name or "—"
+        lines.append(
+            f"Cached judgment:  {tag}  ·  leader: {leader}  ·  "
+            f"last updated {result.judgment.updated_at or 'unknown'}"
+        )
+
+    return Panel(
+        "\n".join(lines),
+        title=f"Analysis context — {ticker}",
+        title_align="left",
+        border_style="dim",
+    )
 
 
 def _judgment_age_days(updated_at: str) -> int | None:
@@ -278,6 +332,23 @@ def _judgment_age_days(updated_at: str) -> int | None:
         return None
     delta = datetime.now() - parsed.replace(tzinfo=None)
     return max(0, delta.days)
+
+
+def _judgment_age_days_for(store, ticker: str) -> int | None:
+    judgment = store.get(ticker)
+    if judgment is None:
+        return None
+    return _judgment_age_days(judgment.updated_at)
+
+
+def _format_age(days: int | None) -> str:
+    if days is None:
+        return "age unknown"
+    if days == 0:
+        return "0 days old"
+    if days == 1:
+        return "1 day old"
+    return f"{days} days old"
 
 
 def _run_pick(amount_raw: str, min_composite: float, min_verdict: str) -> int:
