@@ -19,9 +19,10 @@ from rich.table import Table
 from fundamental_engine.budget_parser import parse_budget
 from fundamental_engine.cache import JsonStore
 from fundamental_engine.config import AnalystConfig
-from fundamental_engine.universe import load_universe_with_metadata
+from fundamental_engine.dip_candidate import DipCandidateRecord
+from fundamental_engine.universe import load_scores
 from reports.formatting import VERDICT_STYLES, make_console
-from scorers.base import StockScore
+from scorers.base import Verdict
 from screener.dip_detector import (
     DEFAULT_MIN_COMPOSITE,
     DipSignal,
@@ -30,7 +31,7 @@ from screener.dip_detector import (
     dip_rank_key,
 )
 from screener.price_history import PriceHistoryStore, PriceSnapshot
-from signals.signal_bus import Severity, Signal, SignalBus, SignalType
+from signals.signal_bus import Signal, SignalBus, SignalType
 
 log = logging.getLogger(__name__)
 
@@ -49,52 +50,26 @@ class Candidate:
     sector: str
     current_price: float
     composite: float
-    verdict: str
+    verdict: Verdict
     dip: DipSignal
-
-
-def _stock_score_from_cache(ticker: str, data: dict) -> StockScore | None:
-    if "composite" not in data or "verdict" not in data:
-        return None
-    try:
-        return StockScore(
-            ticker=ticker,
-            leadership_score=float(data.get("leadership_score", 50)),
-            fundamentals_score=float(data.get("fundamentals_score", 50)),
-            prospects_score=float(data.get("prospects_score", 50)),
-            news_score=float(data.get("news_score", 50)),
-            composite=float(data["composite"]),
-            verdict=data["verdict"],
-            confidence=float(data.get("confidence", 0.5)),
-            data_completeness_pct=float(data.get("data_completeness_pct", 50)),
-            evidence=data.get("evidence", {}),
-            last_updated=data.get("last_updated", ""),
-        )
-    except (KeyError, ValueError, TypeError):
-        return None
 
 
 def _gather_candidates(
     cache_dir,
     *,
     min_composite: float,
-    allowed_verdicts: frozenset[str],
+    allowed_verdicts: frozenset[Verdict],
     blocked: set[str],
 ) -> tuple[list[Candidate], int]:
     """Return (candidates, tickers_missing_history)."""
-    entries = load_universe_with_metadata(cache_dir)
-    if not entries:
+    scores = load_scores(cache_dir)
+    if not scores:
         return [], 0
 
     missing_history = 0
     candidates: list[Candidate] = []
     with PriceHistoryStore(cache_dir / PRICE_DB_FILENAME) as store:
-        for entry in entries:
-            ticker = entry["ticker"]
-            score = _stock_score_from_cache(ticker, entry)
-            if score is None:
-                continue
-
+        for ticker, extended in scores.items():
             price_snapshot: PriceSnapshot | None = store.snapshot(ticker)
             if price_snapshot is None:
                 # The engine/refresh must persist daily closes before pick
@@ -103,7 +78,7 @@ def _gather_candidates(
                 continue
 
             check = check_dip(
-                score=score,
+                score=extended.score,
                 prices=price_snapshot,
                 blocked_tickers=blocked,
                 min_composite=min_composite,
@@ -115,11 +90,11 @@ def _gather_candidates(
             candidates.append(
                 Candidate(
                     ticker=ticker,
-                    name=entry.get("company_name") or ticker,
-                    sector=entry.get("sector") or "Unknown",
+                    name=extended.company_name or ticker,
+                    sector=extended.sector or "Unknown",
                     current_price=float(price_snapshot.current_price),
-                    composite=score.composite,
-                    verdict=score.verdict,
+                    composite=extended.score.composite,
+                    verdict=extended.score.verdict,
                     dip=check.dip,
                 )
             )
@@ -290,7 +265,7 @@ def run_pick_command(
         if s.signal_type == SignalType.LEADERSHIP_RED_FLAG
     }
 
-    universe_size = len(load_universe_with_metadata(cfg.data_cache_dir))
+    universe_size = len(load_scores(cfg.data_cache_dir))
 
     candidates, missing_history = _gather_candidates(
         cfg.data_cache_dir,
@@ -314,13 +289,17 @@ def run_pick_command(
         missing_history=missing_history,
     )
 
+    # Persist dip candidates as typed DipCandidateRecord rows. `brief`
+    # reads them back through `load_dip_candidates` which returns the
+    # same typed objects — no raw-dict access on either side.
     JsonStore(cfg.data_cache_dir / "dip_candidates.json").write(
         {
-            c.ticker: {
-                **c.dip.to_dict(),
-                "sector": c.sector,
-                "name": c.name,
-            }
+            c.ticker: DipCandidateRecord.from_dip(
+                ticker=c.ticker,
+                name=c.name,
+                sector=c.sector,
+                dip=c.dip,
+            ).to_dict()
             for c in picks
         }
     )
@@ -329,7 +308,7 @@ def run_pick_command(
         bus.emit(
             Signal(
                 signal_type=SignalType.DIP_DETECTED,
-                severity=_sev(c.dip.severity),
+                severity=c.dip.severity,
                 ticker=c.ticker,
                 message=c.dip.reason,
                 data={
@@ -339,11 +318,3 @@ def run_pick_command(
             )
         )
     return 0
-
-
-def _sev(name: str) -> Severity:
-    if name == "URGENT":
-        return Severity.URGENT
-    if name == "ALERT":
-        return Severity.ALERT
-    return Severity.INFO

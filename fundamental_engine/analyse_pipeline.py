@@ -18,11 +18,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from data_sources.fundamentals_source import (
     BalanceSheetSnapshot,
-    FetchResult,
     FundamentalsSource,
 )
 from fundamental_engine.judgments import Judgment, JudgmentStore, PillarJudgment
@@ -97,29 +95,12 @@ def score_snapshot(
     )
 
 
-def build_extended_score_dict(
-    result: AnalysisResult | FetchResult | Any,
-) -> dict[str, Any]:
-    """Single source of truth for the JSON shape persisted to scores.json.
-
-    Accepts either an AnalysisResult (preferred) or any object that exposes
-    `.score` (StockScore) and `.snapshot` (BalanceSheetSnapshot) attributes.
-    """
-    extended = result.score.to_dict()
-    snap = result.snapshot
-    extended.update(
-        {
-            "company_name": snap.company_name,
-            "sector": snap.sector,
-            "industry": snap.industry,
-            "current_price": snap.current_price,
-            "high_52w": snap.high_52w,
-            "low_52w": snap.low_52w,
-            "market_cap_cr": snap.market_cap_cr,
-            "source": snap.source,
-        }
-    )
-    return extended
+# `build_extended_score_dict` used to live here but was an untyped
+# `dict[str, Any]` factory that accepted `| Any` as a parameter — a
+# typed-interface smell. It's been replaced by `ExtendedScore.from_analysis`
+# in `fundamental_engine/extended_score.py`, which returns a typed object.
+# Call sites that need the JSON row shape should do
+# `ExtendedScore.from_analysis(result).to_dict()`.
 
 
 def _result_from_pillar(

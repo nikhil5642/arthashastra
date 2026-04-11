@@ -215,12 +215,9 @@ def _run_refresh(target: str, *, rejudge: bool = False) -> int:
 
 
 def _run_analyse(ticker: str) -> int:
-    from fundamental_engine.analyse_pipeline import (
-        NoDataError,
-        analyse_ticker,
-        build_extended_score_dict,
-    )
+    from fundamental_engine.analyse_pipeline import NoDataError, analyse_ticker
     from fundamental_engine.cache import JsonStore
+    from fundamental_engine.extended_score import ExtendedScore
     from fundamental_engine.ticker import canonical
     from reports.formatting import make_console
     from reports.stock_report import render_stock_report
@@ -240,7 +237,7 @@ def _run_analyse(ticker: str) -> int:
         return 3
 
     JsonStore(cfg.data_cache_dir / "scores.json").upsert(
-        bare, build_extended_score_dict(result)
+        bare, ExtendedScore.from_analysis(result).to_dict()
     )
 
     price_rows_written = 0

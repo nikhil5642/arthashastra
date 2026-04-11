@@ -12,9 +12,9 @@ from fundamental_engine.analyse_pipeline import (
     AnalysisResult,
     NoDataError,
     analyse_ticker,
-    build_extended_score_dict,
     score_snapshot,
 )
+from fundamental_engine.extended_score import ExtendedScore
 from fundamental_engine.judgments import Judgment, JudgmentStore, PillarJudgment
 
 
@@ -125,18 +125,32 @@ def test_score_snapshot_pure_no_io(tmp_path: Path):
     assert result.price_history == []
 
 
-def test_build_extended_score_dict_has_snapshot_metadata(tmp_path: Path):
+def test_extended_score_captures_snapshot_metadata(tmp_path: Path):
     snap = _fresh_snap()
     result = score_snapshot(snap, data_cache_dir=tmp_path)
-    extended = build_extended_score_dict(result)
-    assert extended["ticker"] == "RELIANCE"
-    assert extended["company_name"] == "Reliance Industries Limited"
-    assert extended["sector"] == "Energy"
-    assert extended["industry"] == "Oil & Gas"
-    assert extended["current_price"] == 1500.0
-    assert extended["high_52w"] == 1800.0
-    assert extended["low_52w"] == 1200.0
-    assert extended["market_cap_cr"] == 100000.0
-    assert extended["source"] == "yfinance+screener"
-    assert "composite" in extended
-    assert "verdict" in extended
+    extended = ExtendedScore.from_analysis(result)
+
+    # Typed-object access (the fields business logic uses).
+    assert extended.score.ticker == "RELIANCE"
+    assert extended.company_name == "Reliance Industries Limited"
+    assert extended.sector == "Energy"
+    assert extended.industry == "Oil & Gas"
+    assert extended.current_price == 1500.0
+    assert extended.high_52w == 1800.0
+    assert extended.low_52w == 1200.0
+    assert extended.market_cap_cr == 100000.0
+    assert extended.source == "yfinance+screener"
+
+    # Flat-dict serialization (the scores.json row shape).
+    as_dict = extended.to_dict()
+    assert as_dict["ticker"] == "RELIANCE"
+    assert as_dict["company_name"] == "Reliance Industries Limited"
+    assert "composite" in as_dict
+    assert "verdict" in as_dict
+
+    # Round-trip through from_dict — must preserve the same values.
+    reloaded = ExtendedScore.from_dict(as_dict)
+    assert reloaded is not None
+    assert reloaded.score.composite == extended.score.composite
+    assert reloaded.score.verdict == extended.score.verdict
+    assert reloaded.company_name == extended.company_name

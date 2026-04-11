@@ -15,13 +15,10 @@ import logging
 from dataclasses import asdict, dataclass
 
 from data_sources.fundamentals_source import FundamentalsSource
-from fundamental_engine.analyse_pipeline import (
-    NoDataError,
-    build_extended_score_dict,
-    score_snapshot,
-)
+from fundamental_engine.analyse_pipeline import NoDataError, score_snapshot
 from fundamental_engine.cache import JsonStore
 from fundamental_engine.config import AnalystConfig
+from fundamental_engine.extended_score import ExtendedScore
 from fundamental_engine.ticker import canonical
 from fundamental_engine.universe import load_universe
 from screener.price_history import PriceHistoryStore
@@ -81,8 +78,8 @@ class Engine:
             log.exception("score %s failed", ticker)
             return RefreshResult(ticker=ticker, status="error", detail=str(e))
 
-        extended = build_extended_score_dict(result)
-        self._scores_store.upsert(ticker, extended)
+        extended = ExtendedScore.from_analysis(result)
+        self._scores_store.upsert(ticker, extended.to_dict())
 
         price_rows_written = 0
         if result.price_history:
