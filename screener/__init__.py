@@ -1,1 +1,1 @@
-"""Universe scanning, dip detection, price history, alias resolution."""
+"""Dip detection + SQLite-backed price history (real yfinance closes)."""

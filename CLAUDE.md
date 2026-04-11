@@ -33,60 +33,67 @@ covers what you need to know as the LLM driving the project.
 
 ## Directory map
 
+Each source folder has its own `README.md` explaining the contracts.
+Read those when you're touching a layer for the first time.
+
 ```
-fundamental_engine/          # orchestrator, CLI, config, scheduler
-├── __main__.py              # CLI router (analyse/refresh/pick/brief/research/resolve/engine)
-├── config.py                # AnalystConfig.from_env()
-├── analyse_pipeline.py      # fetch + deterministic score + judgment read
-├── engine.py                # background cache warmer
-├── resolver.py              # name → ticker via yfinance search
+fundamental_engine/          # orchestrator, CLI, pipeline, engine — see README.md
+├── __main__.py              # CLI: resolve / refresh / analyse / news / research / pick / brief / engine
+├── config.py                # AnalystConfig.from_env() — ANALYST_ENV + DATA_CACHE_DIR + BRAVE_API_KEY
+├── analyse_pipeline.py      # analyse_ticker / score_snapshot / build_extended_score_dict
+├── engine.py                # background cache warmer; writes scores.json + prices.db + signals.json
+├── resolver.py              # free-text → NSE/BSE ticker via yfinance.Search
 ├── judgments.py             # Judgment + JudgmentStore (Claude writes, Python reads)
-├── universe.py              # tickers currently in scores.json
+├── universe.py              # emergent universe loaded from scores.json (never hardcoded)
 ├── leader_mode_classifier.py
-├── budget_parser.py         # "1L" / "2.5L" → INR float
-├── ticker.py                # canonical / yf_symbol / slug
-├── cache.py                 # JsonStore
+├── budget_parser.py         # "1L" / "2.5L" / "1cr" → INR float
+├── ticker.py                # canonical / yf_symbol / slug (path-safe)
+└── cache.py                 # JsonStore
 
-data_sources/                # live data adapters
-├── fundamentals_source.py   # yfinance + screener.in
-├── research_source.py       # Wikipedia + Brave Search
-└── news_source.py           # Google News per-company + market RSS
+data_sources/                # live data adapters — see README.md
+├── fundamentals_source.py   # yfinance statements + history + screener.in HTML scrape
+├── research_source.py       # Wikipedia API + Brave Search (optional)
+└── news_source.py           # Google News RSS per-company + market RSS aggregates
 
-scorers/                     # deterministic scoring
-├── base.py                  # ScorerResult, StockScore, verdict_for
-├── fundamentals_scorer.py
-└── composite_scorer.py      # blend + pending_judgment placeholder
+scorers/                     # deterministic scoring — see README.md
+├── base.py                  # ScorerResult, StockScore, Verdict, verdict_for
+├── fundamentals_scorer.py   # 5-component rubric with graceful degradation + pledge veto
+└── composite_scorer.py      # blend(..) weighted 40/30/15/15 + pending_judgment placeholder
 
-screener/                    # pure logic
-├── dip_detector.py
-└── price_history.py         # SQLite + RSI14
+screener/                    # pure logic — see README.md
+├── dip_detector.py          # multi-gate check_dip + DipSignal
+└── price_history.py         # PriceHistoryStore (SQLite) + Wilder RSI14 + SMA
 
-reports/                     # Rich + Markdown rendering
-├── stock_report.py
-├── picks_report.py
-├── market_brief.py
-└── formatting.py
+reports/                     # Rich terminal + Markdown rendering — see README.md
+├── stock_report.py          # analyse <TICKER> output
+├── picks_report.py          # pick --amount <INR> output
+├── market_brief.py          # brief output
+└── formatting.py            # Rich helpers shared by the three above
 
-signals/
-└── signal_bus.py            # file-based pub/sub
+signals/                     # append-only file pub/sub — see README.md
+└── signal_bus.py            # Signal + SignalBus; path= always required
 
-.claude/skills/              # Claude-native orchestration
-├── resolve-ticker.md
-├── analyse-stock.md
-├── research-founder.md
-├── pick-stocks.md
-├── market-brief.md
-├── refresh-now.md
-└── explain-score.md
+.claude/skills/<name>/SKILL.md   # Claude-native slash commands
+├── resolve-ticker/SKILL.md
+├── analyse-stock/SKILL.md
+├── research-founder/SKILL.md
+├── pick-stocks/SKILL.md
+├── market-brief/SKILL.md
+├── refresh-now/SKILL.md
+└── explain-score/SKILL.md
+
+tests/                       # hermetic, adapter-mocked — see README.md
+└── (mirrors the source layout one-for-one)
 
 data_cache/                  # runtime state (gitignored)
-├── scores.json
-├── judgments/<TICKER>.json
-├── research/<slug>.json
-├── dip_candidates.json
-├── signals.json
-├── refresh_queue.jsonl
-└── reports/
+├── scores.json              # per-ticker extended StockScore (engine + analyse write)
+├── prices.db                # SQLite — real daily closes from yfinance.history()
+├── judgments/<TICKER>.json  # Claude-written qualitative scores
+├── research/<slug>.json     # cached Wikipedia + Brave bundles
+├── news/<TICKER>.json       # per-company Google News RSS snapshots
+├── dip_candidates.json      # last pick run output
+├── signals.json             # append-only event log (bounded at 500)
+└── reports/                 # saved Markdown reports (analyse / brief)
 ```
 
 ## Scoring rules
@@ -195,3 +202,16 @@ pytest
 Tests are fast because there is no network. If a test needs a
 `BalanceSheetSnapshot` or `ResearchBundle`, construct it inline in
 the test function. Don't create a conftest fixture that loads JSON.
+See `tests/README.md` for the full testing conventions.
+
+## Further reading
+
+Each source folder has a focused `README.md`:
+
+- [`fundamental_engine/README.md`](./fundamental_engine/README.md) — orchestrator + CLI
+- [`data_sources/README.md`](./data_sources/README.md) — live adapters
+- [`scorers/README.md`](./scorers/README.md) — fundamentals + composite blend
+- [`screener/README.md`](./screener/README.md) — dip detection + SQLite price history
+- [`reports/README.md`](./reports/README.md) — Rich + Markdown renderers
+- [`signals/README.md`](./signals/README.md) — file pub/sub
+- [`tests/README.md`](./tests/README.md) — hermetic testing conventions
