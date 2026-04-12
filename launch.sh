@@ -100,6 +100,36 @@ Available slash commands:
 Greet the user in one short line and ask what they want to analyse.
 Don't pre-run any commands until they ask for something specific.
 EOF
+
+    # Linux (VPS / Azure CLI): wrap Claude in tmux so SSH disconnects
+    # don't kill the session. macOS → straight exec (iTerm2 handles it).
+    if [[ "$(uname)" != "Darwin" ]]; then
+        if ! command -v tmux >/dev/null 2>&1; then
+            echo "launch.sh: tmux not found on PATH (required on Linux)." >&2
+            echo "   install with: sudo apt-get install tmux" >&2
+            exit 127
+        fi
+        SESSION="arthashastra"
+        if tmux has-session -t "$SESSION" 2>/dev/null; then
+            echo "Session '$SESSION' exists. Reattaching..."
+            exec tmux attach -t "$SESSION"
+        fi
+        # Write primer + launcher to temp files to avoid tmux command-
+        # string quoting hell with multi-line heredoc content.
+        PRIMER_FILE="$(mktemp "${TMPDIR:-/tmp}/arthashastra-primer.XXXXXX")"
+        LAUNCHER="$(mktemp "${TMPDIR:-/tmp}/arthashastra-launcher.XXXXXX.sh")"
+        printf '%s' "$PRIMER" > "$PRIMER_FILE"
+        cat > "$LAUNCHER" <<LAUNCHEOF
+#!/usr/bin/env bash
+cd "$(pwd)"
+PRIMER_CONTENT="\$(cat '$PRIMER_FILE')"
+rm -f '$PRIMER_FILE' '$LAUNCHER'
+exec claude "\$PRIMER_CONTENT"
+LAUNCHEOF
+        chmod +x "$LAUNCHER"
+        exec tmux new-session -s "$SESSION" "bash '$LAUNCHER'"
+    fi
+
     exec claude "$PRIMER"
 fi
 
