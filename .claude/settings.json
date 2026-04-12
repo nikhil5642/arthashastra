@@ -1,5 +1,4 @@
 {
-  "_comment": "Project-level guardrails. Project is complete — source code is locked (deny) and top-level config / docs / skills require confirmation (ask). Destructive shell ops also denied.",
   "permissions": {
     "deny": [
       "Edit(fundamental_engine/**)",
@@ -17,20 +16,13 @@
       "Write(signals/**)",
       "Write(tests/**)",
       "Bash(rm -rf:*)",
-      "Bash(rm -rf /:*)",
       "Bash(git push --force:*)",
       "Bash(git push -f:*)",
-      "Bash(git push --force-with-lease:*)",
       "Bash(git reset --hard:*)",
       "Bash(git clean -f:*)",
-      "Bash(git clean -fd:*)",
       "Bash(git checkout .:*)",
-      "Bash(git checkout --:*)",
       "Bash(git branch -D:*)",
-      "Bash(git commit --amend:*)",
-      "Bash(git rebase:*)",
-      "Bash(sqlite3:* DROP TABLE*)",
-      "Bash(sqlite3:* DELETE FROM*)"
+      "Bash(git commit --amend:*)"
     ],
     "ask": [
       "Edit(CLAUDE.md)",
