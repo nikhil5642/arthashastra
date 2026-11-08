@@ -18,7 +18,8 @@ the default), `--years` (default 30), `--step year|quarter`, `--horizon`
 (forward-return months, default one step), `--lag` (days after a fiscal
 year ends before its numbers count as public, default 90). The report
 is printed and saved to `data_cache/reports/backtest_<date>.md`. Exit code
-1 means a suite FAILed, like a failing test run.
+1 means a suite FAILed — the data significantly contradicted its claim —
+like a failing test run.
 
 ## Outcomes
 
@@ -27,9 +28,16 @@ Every suite is judged by the same rules, fixed before looking at data:
 | Outcome | Meaning |
 |---|---|
 | **PASS** | the effect points the way the claim says, and \|t\| ≥ 2 |
-| **WEAK** | it points the claimed way, but \|t\| < 2 — could be noise |
-| **FAIL** | it points the other way |
-| **NO DATA** | too few dates (< 5) or observations (< 10 per group) to say anything |
+| **WEAK PASS** | it points the claimed way, but \|t\| < 2 — could be noise |
+| **WEAK FAIL** | it points the other way, but \|t\| < 2 — could be noise |
+| **FAIL** | it points the other way and \|t\| ≥ 2 — the data contradicts the claim |
+| **NO DATA** | too few dates or observations to say anything (see below) |
+
+A ranking claim needs **10+ scored tickers on a date** (a rank correlation
+across five names has a standard error near 0.5) and 5+ such dates; a
+group comparison needs 10+ observations in each group. The finding says
+what was missing — e.g. "the most on any date was 8" means analyse more
+names of that kind.
 
 ## Suites
 

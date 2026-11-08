@@ -1,7 +1,8 @@
 """Every suite on synthetic histories built to make its claim true, then false.
 
-Each history is ten year-ends × six tickers with deterministic noise, so a
-claim that holds PASSes, its mirror image FAILs, and nothing NO DATAs.
+Each history is ten year-ends × twelve tickers (ranking claims need 10+
+names on a date) with deterministic noise, so a claim that holds PASSes,
+its mirror image FAILs, and nothing NO DATAs.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from backtests.suites import (
     verdict_bands,
 )
 
-DATES, TICKERS = 10, 6
+DATES, TICKERS = 10, 12
 
 
 def noise(i: int, j: int) -> float:
@@ -52,7 +53,7 @@ def history(build: Callable[[int, int], dict[str, object]]) -> list[Observation]
 
 def ranked_by(field: str, sign: int, **extra: object) -> list[Observation]:
     return history(
-        lambda i, j: {field: 30.0 + 10 * j, "forward_return_pct": sign * 3.0 * j + noise(i, j), **extra}
+        lambda i, j: {field: 30.0 + 5 * j, "forward_return_pct": sign * 3.0 * j + noise(i, j), **extra}
     )
 
 
@@ -69,7 +70,7 @@ def combined_history(sign: int) -> list[Observation]:
     """Fundamentals barely differ; returns follow (or oppose) a wide valuation spread."""
     return history(
         lambda i, j: {
-            "fundamentals": 50.0 + (j % 2), "valuation": 10.0 + 15 * j,
+            "fundamentals": 50.0 + (j % 2), "valuation": 10.0 + 7 * j,
             "forward_return_pct": sign * 3.0 * j + noise(i, j),
         }
     )
@@ -79,14 +80,14 @@ def bands_history(sign: int) -> list[Observation]:
     """Half STRONG_BUY, half RED_FLAG on the deterministic composite."""
     return history(
         lambda i, j: {
-            "fundamentals": 90.0 if j < 3 else 20.0, "valuation": 90.0 if j < 3 else 20.0,
-            "forward_return_pct": sign * (5.0 if j < 3 else -5.0) + noise(i, j),
+            "fundamentals": 90.0 if j < 6 else 20.0, "valuation": 90.0 if j < 6 else 20.0,
+            "forward_return_pct": sign * (5.0 if j < 6 else -5.0) + noise(i, j),
         }
     )
 
 
 def value_trap_history(sign: int) -> list[Observation]:
-    """The two cheapest tickers per date: one slow grower, one grower."""
+    """The cheapest third (four tickers) holds one slow grower per date."""
     return history(
         lambda i, j: {
             "earnings_yield": 12.0 - j, "slow_growth": j == (i % 2),
@@ -136,8 +137,8 @@ def test_growth_veto_ignores_banks():
 def test_value_trap_universe_is_the_cheapest_profitable_third():
     observations = value_trap_history(+1)
     cheap = value_trap_guard.cheapest_third(observations)
-    assert len(cheap) == DATES * 2
-    assert all(o.earnings_yield is not None and o.earnings_yield >= 11.0 for o in cheap)
+    assert len(cheap) == DATES * TICKERS // 3
+    assert all(o.earnings_yield is not None and o.earnings_yield >= 9.0 for o in cheap)
     loss_makers = history(lambda i, j: {"earnings_yield": None if j else -3.0})
     assert value_trap_guard.cheapest_third(loss_makers) == []
 

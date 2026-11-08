@@ -8,6 +8,7 @@ from datetime import date
 import pytest
 
 from backtests.engine.metrics import (
+    MIN_CROSS_SECTION,
     Observation,
     ReturnStats,
     ScoreKind,
@@ -16,6 +17,7 @@ from backtests.engine.metrics import (
     compare_groups,
     cross_sectional_ics,
     ic_difference,
+    largest_cross_section,
     mean_test,
     spearman,
     tercile_returns,
@@ -58,17 +60,26 @@ def test_combined_score_uses_the_live_relative_weights():
     assert obs("MSFT", D1, 80, 1.0, valuation=40).score(ScoreKind.FUNDAMENTALS) == 80
 
 
-def test_cross_sectional_ic_needs_three_scored_tickers_with_returns():
+def cross_section(day: date, names: int, *, ret_sign: int = 1, **fields: float) -> list[Observation]:
+    """`names` tickers whose fundamentals and returns both rise with the index."""
+    return [
+        obs(f"T{j}", day, 40.0 + 5 * j, ret_sign * 2.0 * j, valuation=fields.get("valuation", 90.0 - 5 * j))
+        for j in range(names)
+    ]
+
+
+def test_cross_sectional_ic_needs_ten_scored_tickers_with_returns():
     observations = [
-        obs("MSFT", D1, 90, 30.0, valuation=20), obs("GOOGL", D1, 80, 20.0, valuation=30),
-        obs("RBRK", D1, 40, -10.0, valuation=90),
-        obs("MSFT", D2, 90, 5.0), obs("GOOGL", D2, 80, 1.0),  # only two → skipped
+        *cross_section(D1, MIN_CROSS_SECTION),
+        *cross_section(D2, MIN_CROSS_SECTION - 1),  # one name short → skipped
         obs("005930.KS", D2, 70, None),  # no forward window → ignored
     ]
     [ic] = cross_sectional_ics(observations, ScoreKind.FUNDAMENTALS)
-    assert (ic.as_of, ic.tickers) == (D1, 3) and ic.ic == pytest.approx(1.0)
+    assert (ic.as_of, ic.tickers) == (D1, 10) and ic.ic == pytest.approx(1.0)
     [valuation_ic] = cross_sectional_ics(observations, ScoreKind.VALUATION)
     assert valuation_ic.ic == pytest.approx(-1.0)
+    assert largest_cross_section(observations, ScoreKind.FUNDAMENTALS) == 10
+    assert largest_cross_section([], ScoreKind.FUNDAMENTALS) == 0
 
 
 def test_mean_test_t_stat_and_edge_cases():
@@ -82,23 +93,24 @@ def test_mean_test_t_stat_and_edge_cases():
 
 
 def test_ic_difference_pairs_dates():
-    # Valuation reverses the fundamentals order, and returns follow valuation.
+    # Fundamentals barely fall across names; a wide valuation spread (and the
+    # returns) rise — so the blend ranks perfectly and fundamentals inversely.
     observations = [
-        obs(t, day, f, r, valuation=v)
+        obs(f"T{j}", day, 60.0 - j, 2.0 * j, valuation=10.0 * j)
         for day in (D1, D2)
-        for t, f, v, r in (("A", 60, 0, -10.0), ("B", 55, 50, 0.0), ("C", 50, 100, 10.0))
+        for j in range(MIN_CROSS_SECTION)
     ]
     gain = ic_difference(observations, ScoreKind.COMBINED, ScoreKind.FUNDAMENTALS)
     assert gain.n == 2 and gain.mean == pytest.approx(2.0)  # IC +1 vs −1 on both dates
 
 
 def test_terciles_split_each_date_into_thirds():
-    observations = [obs("A", D1, 10, -5.0), obs("B", D1, 50, 0.0), obs("C", D1, 90, 15.0)]
+    observations = cross_section(D1, 12)  # returns 0, 2, …, 22 → thirds of four
     spread = tercile_spread(observations, ScoreKind.FUNDAMENTALS)
-    assert spread.n == 1 and spread.mean == pytest.approx(20.0)
-    assert tercile_spread(observations[:2], ScoreKind.FUNDAMENTALS).n == 0
+    assert spread.n == 1 and spread.mean == pytest.approx(19.0 - 3.0)
+    assert tercile_spread(observations[:9], ScoreKind.FUNDAMENTALS).n == 0
     bottom, middle, top = tercile_returns(observations, ScoreKind.FUNDAMENTALS)
-    assert (bottom.mean_return_pct, middle.mean_return_pct, top.mean_return_pct) == (-5.0, 0.0, 15.0)
+    assert (bottom.mean_return_pct, middle.mean_return_pct, top.mean_return_pct) == (3.0, 11.0, 19.0)
 
 
 def test_band_returns_group_by_verdict():

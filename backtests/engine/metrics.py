@@ -26,7 +26,10 @@ from enum import StrEnum
 from scorers.base import VERDICT_BANDS, Pillar, Verdict, verdict_for
 from scorers.composite_scorer import PILLAR_WEIGHTS
 
-MIN_CROSS_SECTION = 3  # fewer tickers on a date than this → that date is skipped
+# A rank correlation across a handful of names is mostly noise (its standard
+# error is ~1 / √(n − 1): 0.5 for five names), so a date needs this many
+# scored tickers with a complete window before it counts in a ranking claim.
+MIN_CROSS_SECTION = 10
 NEUTRAL_SCORE = 50.0  # what the live composite uses for an unscored pillar
 
 
@@ -158,6 +161,11 @@ def cross_sectional_ics(observations: Sequence[Observation], kind: ScoreKind) ->
         if ic is not None:
             ics.append(DatedIC(as_of=day, ic=ic, tickers=len(group)))
     return ics
+
+
+def largest_cross_section(observations: Sequence[Observation], kind: ScoreKind) -> int:
+    """The most scored tickers with a complete window on any one date."""
+    return max((len(group) for group in _by_date(_scored(observations, kind)).values()), default=0)
 
 
 def ic_difference(

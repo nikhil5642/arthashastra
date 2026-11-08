@@ -69,6 +69,8 @@ def run_backtest(
         total_return = PriceSeries.from_rows(history.total_return) if history.total_return else prices
         scored: list[Observation] = []
         for as_of in dates:
+            if prices.close_on_or_before(as_of) is None:
+                continue  # not listed yet (or halted): nothing to buy on this date
             snap = snapshot_as_of(history, as_of, reporting_lag_days=reporting_lag_days, prices=prices)
             if snap is None:
                 continue

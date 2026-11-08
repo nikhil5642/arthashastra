@@ -18,29 +18,30 @@ from backtests.suite import (
 
 
 def test_judge_rules():
-    assert judge(0.05, 2.5, claimed=Direction.POSITIVE, enough_data=True) is Outcome.PASS
-    assert judge(0.05, -2.5, claimed=Direction.POSITIVE, enough_data=True) is Outcome.PASS  # |t|
-    assert judge(0.05, 1.2, claimed=Direction.POSITIVE, enough_data=True) is Outcome.WEAK
-    assert judge(0.05, None, claimed=Direction.POSITIVE, enough_data=True) is Outcome.WEAK
-    assert judge(-0.01, -0.3, claimed=Direction.POSITIVE, enough_data=True) is Outcome.FAIL
-    assert judge(0.0, None, claimed=Direction.POSITIVE, enough_data=True) is Outcome.FAIL
-    assert judge(-4.0, -3.0, claimed=Direction.NEGATIVE, enough_data=True) is Outcome.PASS
-    assert judge(4.0, 3.0, claimed=Direction.NEGATIVE, enough_data=True) is Outcome.FAIL
-    assert judge(0.3, 9.0, claimed=Direction.POSITIVE, enough_data=False) is Outcome.NO_DATA
-    assert judge(None, None, claimed=Direction.POSITIVE, enough_data=True) is Outcome.NO_DATA
-    assert judge(0.2, math.inf, claimed=Direction.POSITIVE, enough_data=True) is Outcome.PASS
+    up, down = Direction.POSITIVE, Direction.NEGATIVE
+    assert judge(0.05, 2.5, claimed=up, enough_data=True) is Outcome.PASS
+    assert judge(0.05, 1.2, claimed=up, enough_data=True) is Outcome.WEAK_PASS
+    assert judge(0.05, None, claimed=up, enough_data=True) is Outcome.WEAK_PASS
+    assert judge(-0.01, -0.3, claimed=up, enough_data=True) is Outcome.WEAK_FAIL  # noise, not proof
+    assert judge(0.0, None, claimed=up, enough_data=True) is Outcome.WEAK_FAIL
+    assert judge(-0.08, -2.4, claimed=up, enough_data=True) is Outcome.FAIL
+    assert judge(-4.0, -3.0, claimed=down, enough_data=True) is Outcome.PASS
+    assert judge(4.0, 3.0, claimed=down, enough_data=True) is Outcome.FAIL
+    assert judge(0.3, 9.0, claimed=up, enough_data=False) is Outcome.NO_DATA
+    assert judge(None, None, claimed=up, enough_data=True) is Outcome.NO_DATA
+    assert judge(0.2, math.inf, claimed=up, enough_data=True) is Outcome.PASS
 
 
-def _ranked(direction: int) -> list[Observation]:
-    """Eight years × six tickers; returns rise (or fall) with the score, plus noise."""
+def _ranked(direction: int, tickers: int = 12) -> list[Observation]:
+    """Eight years × `tickers` names; returns rise (or fall) with the score, plus noise."""
     observations = [
         Observation(
-            ticker=f"T{j}", as_of=date(2010 + i, 12, 31), is_bank=False, fundamentals=40.0 + 10 * j,
+            ticker=f"T{j}", as_of=date(2010 + i, 12, 31), is_bank=False, fundamentals=30.0 + 5 * j,
             completeness=100.0, valuation=None,
             forward_return_pct=direction * 3.0 * j + ((i * 7 + j * 3) % 5) - 2,
         )
         for i in range(8)
-        for j in range(6)
+        for j in range(tickers)
     ]
     attach_excess_returns(observations)
     return observations
@@ -57,18 +58,20 @@ def test_ranks_returns_passes_fails_and_needs_dates():
 
     few_dates = [o for o in _ranked(+1) if o.as_of.year < 2013]
     assert ranks_returns(few_dates, ScoreKind.FUNDAMENTALS).outcome is Outcome.NO_DATA
-    empty = ranks_returns([], ScoreKind.FUNDAMENTALS)
-    assert empty.outcome is Outcome.NO_DATA and "no date had 3+" in empty.finding
+    too_few_names = ranks_returns(_ranked(+1, tickers=8), ScoreKind.FUNDAMENTALS)
+    assert too_few_names.outcome is Outcome.NO_DATA
+    assert "needs 10+ scored tickers" in too_few_names.finding
+    assert "the most on any date was 8" in too_few_names.finding
 
 
 def test_beats_compares_excess_returns_and_needs_group_size():
     observations = _ranked(+1)
-    top = [o for o in observations if o.fundamentals >= 70]
-    rest = [o for o in observations if o.fundamentals < 70]
+    top = [o for o in observations if o.fundamentals >= 60]
+    rest = [o for o in observations if o.fundamentals < 60]
     result = beats(top, rest, claimed=Direction.POSITIVE, labels=("Top half", "Bottom half"))
     assert result.outcome is Outcome.PASS
     assert result.finding.startswith("Top half returned +")
-    assert "24 vs 24 observations" in result.finding
+    assert "48 vs 48 observations" in result.finding
 
     reversed_claim = beats(top, rest, claimed=Direction.NEGATIVE, labels=("Top half", "Bottom half"))
     assert reversed_claim.outcome is Outcome.FAIL

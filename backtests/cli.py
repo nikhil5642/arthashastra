@@ -8,7 +8,8 @@ Every selected suite reads the same observations: each ticker's history is
 fetched once (SEC EDGAR for US filers, screener.in for Indian listings,
 Yahoo for prices and everything else) and scored on every rebalance date.
 
-Exit code 0 when no suite FAILs, 1 when one does — like a test run.
+Exit code 1 when a suite FAILs (the data significantly contradicts its
+claim), else 0 — like a test run.
 """
 
 from __future__ import annotations

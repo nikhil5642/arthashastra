@@ -3,7 +3,8 @@
 `tests/` checks that the code does what it says; `backtests/` checks that
 the scores mean what they say. Each module in `suites/` tests one claim
 ("slow growers underperform", "dip signals beat the rest", …) against
-point-in-time history and reports PASS / WEAK / FAIL / NO DATA.
+point-in-time history and reports PASS / WEAK PASS / WEAK FAIL / FAIL /
+NO DATA.
 
     python3 -m backtests                          # every suite, every cached ticker
     python3 -m backtests growth_veto dip_signals  # just these claims

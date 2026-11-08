@@ -39,7 +39,8 @@ CAVEATS: tuple[str, ...] = (
 
 OUTCOME_STYLES: dict[Outcome, str] = {
     Outcome.PASS: "bold green",
-    Outcome.WEAK: "yellow",
+    Outcome.WEAK_PASS: "green",
+    Outcome.WEAK_FAIL: "yellow",
     Outcome.FAIL: "bold red",
     Outcome.NO_DATA: "dim",
 }
@@ -88,15 +89,15 @@ def render_terminal(console: Console, report: BacktestReport) -> None:
 
     for run in report.runs:
         style = OUTCOME_STYLES[run.result.outcome]
-        outcome = f"[{style}]{run.result.outcome.value:<8}[/{style}]"
+        outcome = f"[{style}]{run.result.outcome.value:<9}[/{style}]"
         console.print()
         console.print(f"{outcome} [bold]{run.suite.name}[/bold] — {run.suite.claim}")
-        console.print(f"         [dim]{run.result.finding}[/dim]")
+        console.print(f"          [dim]{run.result.finding}[/dim]")
         if run.result.table is not None:
             console.print(_rich_table(run.result.table))
 
     summary = "\n".join(
-        f"[{OUTCOME_STYLES[run.result.outcome]}]{run.result.outcome.value:<8}[/] {run.suite.name}"
+        f"[{OUTCOME_STYLES[run.result.outcome]}]{run.result.outcome.value:<9}[/] {run.suite.name}"
         for run in report.runs
     )
     console.print(Panel(f"{summary}\n\n{report.tally()}", title="Summary", title_align="left"))

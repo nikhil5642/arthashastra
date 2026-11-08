@@ -89,6 +89,14 @@ def test_forward_returns_come_from_the_total_return_series():
     assert obs.forward_return_pct == pytest.approx((1.0006 ** 366 - 1) * 100, rel=1e-3)
 
 
+def test_dates_before_the_listing_trades_are_not_scored():
+    ipo = us_filer("RBRK", margin=0.1)
+    ipo.prices = [(day, close) for day, close in ipo.prices if day >= "2024-04-25"]
+    result = run_backtest([ipo], [date(2023, 12, 31), date(2024, 12, 31)], horizon_months=12)
+    assert [o.as_of for o in result.observations] == [date(2024, 12, 31)]
+    assert result.coverage[0].first_scored == date(2024, 12, 31)
+
+
 def test_ticker_without_fundamentals_is_reported_not_scored():
     empty = StatementHistory(symbol="005930.KS", prices=[("2024-01-02", 70000.0)])
     result = run_backtest([empty], [date(2025, 12, 31)], horizon_months=12)

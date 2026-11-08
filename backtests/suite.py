@@ -6,10 +6,11 @@ with the numbers behind it, and an optional table.
 
 Every suite is judged by the same rules, fixed before looking at data:
 
-    PASS     the effect points the way the claim says, and |t| ≥ 2
-    WEAK     it points the claimed way, but |t| < 2 — could be noise
-    FAIL     it points the other way
-    NO DATA  too few dates or observations to say anything
+    PASS       the effect points the way the claim says, and |t| ≥ 2
+    WEAK PASS  it points the claimed way, but |t| < 2 — could be noise
+    WEAK FAIL  it points the other way, but |t| < 2 — could be noise
+    FAIL       it points the other way, and |t| ≥ 2 — the data contradicts the claim
+    NO DATA    too few dates or observations to say anything
 
 Most claims take one of two shapes, built here so every suite reads alike:
 `ranks_returns` (a higher score comes before a higher return) and
@@ -23,6 +24,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from backtests.engine.metrics import (
+    MIN_CROSS_SECTION,
     GroupComparison,
     MeanTest,
     Observation,
@@ -30,6 +32,7 @@ from backtests.engine.metrics import (
     ScoreKind,
     compare_groups,
     cross_sectional_ics,
+    largest_cross_section,
     mean_test,
     tercile_returns,
     tercile_spread,
@@ -44,7 +47,8 @@ RETURN_COLUMNS: tuple[str, ...] = ("Observations", "Mean return", "vs same-date 
 
 class Outcome(StrEnum):
     PASS = "PASS"
-    WEAK = "WEAK"
+    WEAK_PASS = "WEAK PASS"
+    WEAK_FAIL = "WEAK FAIL"
     FAIL = "FAIL"
     NO_DATA = "NO DATA"
 
@@ -81,12 +85,11 @@ def judge(
 ) -> Outcome:
     if not enough_data or estimate is None:
         return Outcome.NO_DATA
-    signed = estimate if claimed is Direction.POSITIVE else -estimate
-    if signed <= 0:
-        return Outcome.FAIL
-    if t_stat is not None and abs(t_stat) >= SIGNIFICANT_T:
-        return Outcome.PASS
-    return Outcome.WEAK
+    supported = estimate > 0 if claimed is Direction.POSITIVE else estimate < 0
+    significant = t_stat is not None and abs(t_stat) >= SIGNIFICANT_T
+    if supported:
+        return Outcome.PASS if significant else Outcome.WEAK_PASS
+    return Outcome.FAIL if significant else Outcome.WEAK_FAIL
 
 
 # ── Claim shape 1: a higher score comes before a higher return ───────────────
@@ -98,7 +101,10 @@ def ranks_returns(observations: Sequence[Observation], kind: ScoreKind) -> Suite
     spread = tercile_spread(observations, kind)
     outcome = judge(ic.mean, ic.t_stat, claimed=Direction.POSITIVE, enough_data=ic.n >= MIN_DATES)
     if ic.n == 0:
-        finding = "no date had 3+ scored tickers with a complete forward window"
+        finding = (
+            f"a date needs {MIN_CROSS_SECTION}+ scored tickers with a complete forward window; "
+            f"the most on any date was {largest_cross_section(observations, kind)}"
+        )
     else:
         finding = (
             f"mean rank IC {signed(ic.mean, 3)} over {ic.n} dates (t {signed(ic.t_stat, 2)}, "
