@@ -1,24 +1,27 @@
-"""Bank / NBFC / Financial-Services fundamentals rubric.
+"""Bank / NBFC / levered-financial fundamentals rubric.
 
 Banks are structurally leveraged (10:1 by design) and earn a spread
 rather than converting sales to PAT, so the industrial axes make no
-sense. We score four bank-appropriate axes:
+sense. We score five bank-appropriate axes:
 
-    profitability   35   ROE + ROA + NIM (bank-calibrated curves)
-    growth          25   PAT 3y CAGR (revenue CAGR omitted — mergers
+    profitability   30   ROE + ROA + NIM (bank-calibrated curves)
+    asset_quality   25   gross NPA + net NPA + 1y NPA trend
+    growth          20   PAT 3y CAGR (revenue CAGR omitted — mergers
                                       inflate it)
-    franchise       20   non-interest income ratio + CD ratio
-    governance      20   pledge clean + promoter neutrality
+    franchise       15   non-interest income ratio + CD ratio
+    governance      10   shared ownership sub-score (pledge, insider
+                         stake change, neutral-centred holding)
 
-Curves for ROE / ROA / NIM use bank-calibrated thresholds (ROE 15% is
-*good* for a bank, not a minimum). Credit-Deposit ratio above 100%
-drags the franchise score — it means the bank is lending more than it
-can fund from sticky deposits.
+Asset quality carries a quarter of the weight because most bank failures
+are credit failures, and a bank can print a fine ROE right up until its
+NPAs crystallise. Curves for ROE / ROA / NIM use bank-calibrated
+thresholds (ROE 15% is *good* for a bank, not a minimum). A
+Credit-Deposit ratio above 100% drags the franchise score — the bank is
+lending more than it can fund from sticky deposits.
 
-Bank data limitations: screener.in does not expose GNPA, CASA, or CRAR
-in its standard tables, so we cannot score asset quality or capital
-adequacy deterministically. Banks are flagged in the report so the
-Claude judgment pillar can cover these.
+Data limitations: screener's bank quarterly table exposes Gross / Net
+NPA % (scored here), but not CASA or CRAR, so funding mix and capital
+adequacy still have to be checked in the Claude judgment.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from enum import StrEnum
 
 from data_sources.fundamentals_source import BalanceSheetSnapshot
 from scorers.base import Pillar, ScorerResult
+from scorers.fundamentals_scorer import ownership
 
 
 class BankComponent(StrEnum):
@@ -37,6 +41,7 @@ class BankComponent(StrEnum):
     """
 
     PROFITABILITY = "bank_profitability"
+    ASSET_QUALITY = "bank_asset_quality"
     GROWTH = "bank_growth"
     FRANCHISE = "bank_franchise"
     GOVERNANCE = "bank_governance"
@@ -45,10 +50,11 @@ class BankComponent(StrEnum):
 _SubScorerFn = Callable[[BalanceSheetSnapshot], tuple[float | None, list[str]]]
 
 _COMPONENT_WEIGHTS: dict[BankComponent, int] = {
-    BankComponent.PROFITABILITY: 35,
-    BankComponent.GROWTH: 25,
-    BankComponent.FRANCHISE: 20,
-    BankComponent.GOVERNANCE: 20,
+    BankComponent.PROFITABILITY: 30,
+    BankComponent.ASSET_QUALITY: 25,
+    BankComponent.GROWTH: 20,
+    BankComponent.FRANCHISE: 15,
+    BankComponent.GOVERNANCE: 10,
 }
 
 
@@ -78,12 +84,17 @@ def score(snap: BalanceSheetSnapshot) -> ScorerResult:
     weighted = sum(s * w for _, s, w in components) / total_weight
     result_score = round(weighted, 1)
 
-    evidence.insert(
-        0,
-        "Bank rubric applied (profitability 35% + growth 25% + franchise 20% "
-        "+ governance 20%). GNPA / CASA / CRAR are not available from screener "
-        "and must be sanity-checked manually before trusting the verdict.",
+    header = (
+        "Bank rubric applied (profitability 30% + asset quality 25% + growth 20% "
+        "+ franchise 15% + governance 10%). CASA / CRAR are not exposed by the "
+        "data sources — check funding mix and capital adequacy manually."
     )
+    if not any(name == BankComponent.ASSET_QUALITY for name, _, _ in components):
+        header += (
+            " No GNPA / NNPA data for this lender — asset quality is unscored "
+            "and must be verified manually before trusting the verdict."
+        )
+    evidence.insert(0, header)
 
     return ScorerResult(
         pillar=Pillar.FUNDAMENTALS,
@@ -150,6 +161,69 @@ def _score_profitability(
             s = max(0.0, v * 12)
         sub_scores.append(s)
         evidence.append(f"NIM = {v:.2f}% → {s:.0f}/100 (bank curve)")
+
+    if not sub_scores:
+        return None, []
+    return sum(sub_scores) / len(sub_scores), evidence
+
+
+def _score_asset_quality(
+    snap: BalanceSheetSnapshot,
+) -> tuple[float | None, list[str]]:
+    """Gross NPA %, net NPA %, and the 1y gross-NPA trend.
+
+    Thresholds hold across banking systems (gross NPA ≤ 1% is pristine
+    anywhere, > 6% is a problem book anywhere), so no market calibration.
+    """
+    sub_scores: list[float] = []
+    evidence: list[str] = []
+
+    if snap.gross_npa_pct is not None:
+        g = snap.gross_npa_pct
+        if g <= 1.0:
+            s = 100.0
+        elif g <= 2.0:
+            s = 100.0 - (g - 1.0) * 20.0  # 100 → 80
+        elif g <= 3.5:
+            s = 80.0 - (g - 2.0) * (25.0 / 1.5)  # 80 → 55
+        elif g <= 6.0:
+            s = 55.0 - (g - 3.5) * 12.0  # 55 → 25
+        elif g <= 10.0:
+            s = 25.0 - (g - 6.0) * 5.0  # 25 → 5
+        else:
+            s = 0.0
+        sub_scores.append(s)
+        evidence.append(f"Gross NPA = {g:.2f}% → {s:.0f}/100")
+
+    if snap.net_npa_pct is not None:
+        n = snap.net_npa_pct
+        if n <= 0.3:
+            s = 100.0
+        elif n <= 0.75:
+            s = 100.0 - (n - 0.3) * (20.0 / 0.45)  # 100 → 80
+        elif n <= 1.5:
+            s = 80.0 - (n - 0.75) * (25.0 / 0.75)  # 80 → 55
+        elif n <= 3.0:
+            s = 55.0 - (n - 1.5) * 20.0  # 55 → 25
+        elif n <= 5.0:
+            s = 25.0 - (n - 3.0) * 10.0  # 25 → 5
+        else:
+            s = 0.0
+        sub_scores.append(s)
+        evidence.append(f"Net NPA = {n:.2f}% → {s:.0f}/100")
+
+    if snap.gross_npa_delta_1y_pct_points is not None:
+        d = snap.gross_npa_delta_1y_pct_points
+        if d <= -0.5:
+            s, note = 85.0, "improving"
+        elif d < 0.25:
+            s, note = 70.0, "stable"
+        elif d <= 1.0:
+            s, note = 40.0, "deteriorating"
+        else:
+            s, note = 10.0, "sharply deteriorating"
+        sub_scores.append(s)
+        evidence.append(f"Gross NPA change (1y) = {d:+.2f}pts → {s:.0f}/100 ({note})")
 
     if not sub_scores:
         return None, []
@@ -238,64 +312,14 @@ def _score_franchise(
     return sum(sub_scores) / len(sub_scores), evidence
 
 
-def _score_governance(
-    snap: BalanceSheetSnapshot,
-) -> tuple[float | None, list[str]]:
-    """Governance proxy for banks.
-
-    Most Indian private banks have zero promoter holding (institutional
-    shareholding via mutuals / FIIs / insurers), so the industrial
-    promoter-holding curve is inappropriate. Here:
-      - pledge clean (95 if 0, scaled down otherwise),
-      - promoter holding at 0% is treated as *neutral* (70) rather than
-        penalising as it would in the industrial rubric.
-
-    Claude's leadership judgment is where the real governance score
-    lives; this sub-score mainly keeps the weighted sum sane.
-    """
-    sub_scores: list[float] = []
-    evidence: list[str] = []
-
-    if snap.pledge_pct is not None:
-        p = snap.pledge_pct
-        if p == 0:
-            s = 95.0
-        elif p <= 5:
-            s = 70.0
-        elif p <= 10:
-            s = 45.0
-        elif p <= 25:
-            s = 20.0
-        else:
-            s = 0.0
-        sub_scores.append(s)
-        evidence.append(f"Promoter pledge = {p:.1f}% → {s:.0f}/100")
-
-    if snap.promoter_holding is not None:
-        h = snap.promoter_holding
-        if h == 0:
-            # Institutional ownership is normal for private banks — no penalty.
-            s = 70.0
-            note = "(institutional — normal for a private bank)"
-        elif h >= 40:
-            s = 90.0
-            note = "(concentrated promoter — PSU / family / founder-led)"
-        else:
-            s = 75.0
-            note = "(mixed ownership)"
-        sub_scores.append(s)
-        evidence.append(
-            f"Promoter holding = {h:.1f}% → {s:.0f}/100 {note}"
-        )
-
-    if not sub_scores:
-        return None, []
-    return sum(sub_scores) / len(sub_scores), evidence
-
-
+# Governance is the shared ownership sub-score — the same neutral-centred
+# logic as the industrial rubric, so a widely-held private bank isn't
+# penalised for having no controlling shareholder. Claude's leadership
+# judgment is where the real governance read lives.
 _SUB_SCORERS: dict[BankComponent, _SubScorerFn] = {
     BankComponent.PROFITABILITY: _score_profitability,
+    BankComponent.ASSET_QUALITY: _score_asset_quality,
     BankComponent.GROWTH: _score_growth,
     BankComponent.FRANCHISE: _score_franchise,
-    BankComponent.GOVERNANCE: _score_governance,
+    BankComponent.GOVERNANCE: ownership.score,
 }

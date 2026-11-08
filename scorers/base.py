@@ -1,4 +1,4 @@
-"""Shared scoring types: `Verdict`, `Pillar`, `ScorerResult`, `StockScore`.
+"""Shared scoring types: `Verdict`, `Pillar`, `Gate`, `ScorerResult`, `StockScore`.
 
 Design notes:
   - `Verdict` and `Pillar` are `StrEnum`s. Each member IS a string (subclass
@@ -33,9 +33,16 @@ class Verdict(StrEnum):
 
 class Pillar(StrEnum):
     FUNDAMENTALS = "fundamentals"
+    VALUATION = "valuation"
     LEADERSHIP = "leadership"
     PROSPECTS = "prospects"
     NEWS = "news"
+
+
+class Gate(StrEnum):
+    """Composite-level caps applied after the weighted pillar blend."""
+
+    INTEGRITY_VETO = "integrity_veto"
 
 
 # ── Verdict banding ──────────────────────────────────────────────────────────
@@ -80,7 +87,7 @@ class ScorerResult:
 
 @dataclass(slots=True)
 class StockScore:
-    """Final blended score across all four pillars."""
+    """Final blended score across all five pillars."""
 
     ticker: str
     leadership_score: float
@@ -91,9 +98,12 @@ class StockScore:
     verdict: Verdict
     confidence: float
     data_completeness_pct: float
+    valuation_score: float = 50.0  # neutral for rows cached before the pillar existed
     evidence: dict[Pillar, list[str]] = field(default_factory=dict)
     last_updated: str = ""
     low_confidence: bool = False
+    # Composite-level caps that fired after the weighted blend.
+    gates_applied: list[Gate] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.last_updated:

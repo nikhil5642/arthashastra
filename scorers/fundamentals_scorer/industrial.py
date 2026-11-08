@@ -5,7 +5,8 @@ Weights:
     profitability          20   ROE / ROCE / ROA
     growth                 15   3y revenue + PAT CAGR
     earnings_quality       15   OCF/PAT + FCF/PAT
-    promoter               15   holding + pledge
+    ownership              15   pledge + insider stake change + holding
+                                (shared with the bank rubric — ownership.py)
 
 The balance-sheet bucket is itself a weighted blend of five ratios:
 D/E 30% + interest coverage 25% + current ratio 15% + quick ratio 15%
@@ -19,10 +20,12 @@ Vetoes and caps (applied after the weighted sum):
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import StrEnum
 
 from data_sources.fundamentals_source import BalanceSheetSnapshot
 from scorers.base import Pillar, ScorerResult
+from scorers.fundamentals_scorer import ownership
 
 
 class IndustrialComponent(StrEnum):
@@ -37,7 +40,7 @@ class IndustrialComponent(StrEnum):
     PROFITABILITY = "profitability"
     GROWTH = "growth"
     EARNINGS_QUALITY = "earnings_quality"
-    PROMOTER = "promoter"
+    OWNERSHIP = "ownership"
 
 
 # ── Weights + growth-deceleration ceilings ──────────────────────────────────
@@ -47,7 +50,7 @@ _COMPONENT_WEIGHTS: dict[IndustrialComponent, int] = {
     IndustrialComponent.PROFITABILITY: 20,
     IndustrialComponent.GROWTH: 15,
     IndustrialComponent.EARNINGS_QUALITY: 15,
-    IndustrialComponent.PROMOTER: 15,
+    IndustrialComponent.OWNERSHIP: 15,
 }
 
 # Growth-deceleration ceilings — applied only when BOTH revenue and PAT
@@ -121,7 +124,7 @@ def _apply_pledge_veto(
 def _apply_growth_cap(
     snap: BalanceSheetSnapshot, score_so_far: float, evidence: list[str]
 ) -> float:
-    cap = _growth_deceleration_cap(snap)
+    cap = growth_deceleration_cap(snap)
     if cap is None:
         return score_so_far
     cap_pct, cap_score = cap
@@ -138,10 +141,14 @@ def _apply_growth_cap(
     return cap_score
 
 
-def _growth_deceleration_cap(
+def growth_deceleration_cap(
     snap: BalanceSheetSnapshot,
 ) -> tuple[float, float] | None:
-    """Return (threshold_pct, score_cap) when both CAGRs are below a threshold."""
+    """(threshold_pct, score_cap) when both 3y CAGRs are below a threshold, else None.
+
+    Public because the valuation pillar's value-trap guard and the backtest
+    suites use the very same definition of "slow grower".
+    """
     rev = snap.rev_3y_cagr
     pat = snap.pat_3y_cagr
     if rev is None or pat is None:
@@ -358,49 +365,6 @@ def _score_earnings_quality(
     return sum(sub_scores) / len(sub_scores), evidence
 
 
-def _score_promoter(
-    snap: BalanceSheetSnapshot,
-) -> tuple[float | None, list[str]]:
-    sub_scores: list[float] = []
-    evidence: list[str] = []
-
-    if snap.promoter_holding is not None:
-        h = snap.promoter_holding
-        if h >= 60:
-            s = 100.0
-        elif h >= 50:
-            s = 85.0 + (h - 50) * 1.5
-        elif h >= 40:
-            s = 65.0 + (h - 40) * 2.0
-        elif h >= 25:
-            s = 40.0 + (h - 25) * (25.0 / 15)
-        else:
-            s = max(0.0, h * 1.6)
-        sub_scores.append(s)
-        evidence.append(f"Promoter holding = {h:.1f}% → {s:.0f}/100")
-
-    if snap.pledge_pct is not None:
-        p = snap.pledge_pct
-        if p == 0:
-            s = 100.0
-        elif p <= 5:
-            s = 80.0
-        elif p <= 10:
-            s = 50.0
-        elif p <= 25:
-            s = 20.0
-        else:
-            s = 0.0
-        sub_scores.append(s)
-        evidence.append(f"Promoter pledge = {p:.1f}% → {s:.0f}/100")
-
-    if not sub_scores:
-        return None, []
-    return sum(sub_scores) / len(sub_scores), evidence
-
-
-from collections.abc import Callable
-
 _SubScorerFn = Callable[[BalanceSheetSnapshot], tuple[float | None, list[str]]]
 
 _SUB_SCORERS: dict[IndustrialComponent, _SubScorerFn] = {
@@ -408,5 +372,5 @@ _SUB_SCORERS: dict[IndustrialComponent, _SubScorerFn] = {
     IndustrialComponent.PROFITABILITY: _score_profitability,
     IndustrialComponent.GROWTH: _score_growth,
     IndustrialComponent.EARNINGS_QUALITY: _score_earnings_quality,
-    IndustrialComponent.PROMOTER: _score_promoter,
+    IndustrialComponent.OWNERSHIP: ownership.score,
 }
