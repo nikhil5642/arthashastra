@@ -7,6 +7,7 @@ import pytest
 from scorers.base import StockScore
 from screener.dip_detector import (
     DEFAULT_MIN_COMPOSITE,
+    MIN_CLOSES_FOR_DIP,
     allowed_verdicts_from_min,
     check_dip,
     dip_rank_key,
@@ -37,11 +38,12 @@ def _score(
 
 def _prices(
     *,
-    current=70.0,
-    high=100.0,
-    low=65.0,
-    sma_50=85.0,
-    rsi=25.0,
+    current: float = 70.0,
+    high: float = 100.0,
+    low: float = 65.0,
+    sma_50: float | None = 85.0,
+    rsi: float = 25.0,
+    closes: int = 250,
 ) -> PriceSnapshot:
     return PriceSnapshot(
         ticker="TEST",
@@ -51,6 +53,7 @@ def _prices(
         sma_50=sma_50,
         sma_200=None,
         rsi14=rsi,
+        closes_count=closes,
     )
 
 
@@ -122,24 +125,56 @@ def test_blocked_ticker_short_circuits():
     assert any("RED_FLAG" in r for r in check.reasons)
 
 
-def test_divergence_bonus_upgrades_severity_to_urgent():
-    # 35% drawdown + fundamentals improving by 10 → URGENT.
+def test_earnings_divergence_upgrades_severity_to_urgent():
+    # 35% drawdown while the latest quarter's profit grew 25% YoY → URGENT.
     check = check_dip(
-        score=_score(composite=85, fundamentals=85),
+        score=_score(composite=85),
         prices=_prices(current=65, high=100, low=55, sma_50=85, rsi=25),
-        prior_fundamentals_score=70,
+        yoy_pat_growth=25.0,
+        yoy_revenue_growth=8.0,
     )
     assert check.qualifies
     assert check.dip is not None
     assert check.dip.divergence_bonus == 10
     assert check.dip.severity == "URGENT"
+    assert "earnings divergence" in check.dip.reason
+
+
+def test_no_divergence_when_revenue_shrinks():
+    """Profit up on shrinking revenue is cost-cutting, not a mispricing tell."""
+    check = check_dip(
+        score=_score(composite=85),
+        prices=_prices(current=65, high=100, low=55, sma_50=85, rsi=25),
+        yoy_pat_growth=25.0,
+        yoy_revenue_growth=-6.0,
+    )
+    assert check.dip is not None
+    assert check.dip.divergence_bonus == 0
+    assert check.dip.severity == "ALERT"
+
+
+def test_rejects_short_price_history():
+    """A '52-week high' from three months of closes is not a real drawdown."""
+    check = check_dip(score=_score(), prices=_prices(closes=MIN_CLOSES_FOR_DIP - 1))
+    assert not check.qualifies
+    assert any("daily closes" in r for r in check.reasons)
+
+
+def test_missing_sma_50_is_not_a_confirmation():
+    # Below a 50-day SMA can't be claimed without 50 closes; RSI alone isn't enough.
+    check = check_dip(
+        score=_score(),
+        prices=_prices(current=78, high=100, low=50, sma_50=None, rsi=25),
+    )
+    assert not check.qualifies
+    assert any("technical" in r for r in check.reasons)
 
 
 def test_dip_rank_key_prefers_urgent_and_divergence():
     urgent = check_dip(
-        score=_score(composite=80, fundamentals=80),
+        score=_score(composite=80),
         prices=_prices(current=60, high=100, low=55, sma_50=85, rsi=20),
-        prior_fundamentals_score=60,
+        yoy_pat_growth=30.0,
     ).dip
     alert = check_dip(
         score=_score(composite=80), prices=_prices()

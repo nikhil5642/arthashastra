@@ -10,9 +10,8 @@ structure the Financial Profile table uses):
 
 from __future__ import annotations
 
-from datetime import date as _date
-
-from data_sources.fundamentals_source import BalanceSheetSnapshot
+from data_sources.fundamentals_source import BalanceSheetSnapshot, pct_change_by_date
+from reports.formatting import format_money
 
 
 # ── Multi-year ratio trend (ROCE / OPM / Borrowings 3y Δ) ────────────────────
@@ -43,7 +42,11 @@ def append_multi_year_trend_rows(
                 ),
             )
         )
-    if snap.borrowings_delta_3y_pct is not None:
+    if snap.borrowings_went_from_zero:
+        trend_rows.append(
+            ("Borrowings 3y change", "from zero to debt  ·  ↑ debt-expanding")
+        )
+    elif snap.borrowings_delta_3y_pct is not None:
         trend_rows.append(
             ("Borrowings 3y change", _borrowings_delta_string(snap.borrowings_delta_3y_pct))
         )
@@ -71,8 +74,6 @@ def _trend_summary(series: list[float], *, unit: str, precision: int) -> str:
 
 
 def _borrowings_delta_string(delta: float) -> str:
-    if delta == float("inf"):
-        return "+∞% (went from zero to debt)  ·  ↑ debt-expanding"
     delta_str = f"{delta:+.1f}% over 3 years"
     if delta > 10:
         arrow = "↑ debt-expanding"
@@ -89,24 +90,28 @@ def _borrowings_delta_string(delta: float) -> str:
 def append_shareholding_trend_rows(
     rows: list[tuple[str, str, str]], snap: BalanceSheetSnapshot
 ) -> None:
-    """Smart-money / domestic-money tape — the classic re-rating tell.
+    """Ownership tape — insider stake, institutional flows, retail count.
 
-    FII ≤ −2pts YoY + DII ≥ +2pts YoY is the classic "smart money
-    exiting, domestic money accumulating" pattern (HDFCBANK post-merger).
+    Rows appear only for the series a source actually published: screener
+    (Indian listings) gives a quarterly promoter / FII / DII / public split;
+    elsewhere only the latest insider and institutional percentages exist.
+    FII ≤ −2pts YoY + DII ≥ +2pts YoY is the classic "foreign money exiting,
+    domestic money accumulating" pattern (HDFCBANK post-merger).
     """
-    if not snap.shareholding_dates:
-        return
-
     sh_rows: list[tuple[str, str]] = []
 
-    latest_promoter = _latest_pct(snap.promoter_holding_trend)
-    if latest_promoter is not None:
+    latest_insider = _latest_pct(snap.insider_holding_trend)
+    if latest_insider is not None:
         sh_rows.append(
             (
-                "Promoter",
-                f"{latest_promoter}{_delta_pts_string(snap.promoter_delta_1y_pct_points)}",
+                "Insider / promoter",
+                f"{latest_insider}{_delta_pts_string(snap.insider_delta_1y_pct_points)}",
             )
         )
+    elif snap.insider_holding is not None:
+        sh_rows.append(("Insider / promoter", f"{snap.insider_holding:.2f}%"))
+    if snap.institutional_holding is not None and not snap.fii_holding_trend:
+        sh_rows.append(("Institutions", f"{snap.institutional_holding:.2f}%"))
 
     latest_fii = _latest_pct(snap.fii_holding_trend)
     if latest_fii is not None:
@@ -175,12 +180,14 @@ def append_quarter_rows(
         section_label="Quarterly revenue",
         values=snap.quarterly_revenue,
         dates=snap.quarterly_dates,
+        currency=snap.financial_currency,
     )
     _append_quarterly_series(
         rows,
         section_label="Quarterly PAT",
         values=snap.quarterly_pat,
         dates=snap.quarterly_dates,
+        currency=snap.financial_currency,
     )
 
 
@@ -190,73 +197,28 @@ def _append_quarterly_series(
     section_label: str,
     values: list[float],
     dates: list[str],
+    currency: str,
 ) -> None:
     """Append up to 4 quarter rows with QoQ + YoY annotations.
 
     `values` and `dates` are most-recent-first (index 0 = latest quarter).
-    QoQ and YoY lookups are *date-aware* so a gap in the series (yfinance
-    occasionally drops a middle quarter for recent IPOs) doesn't misalign
-    the comparison: for each quarter we look up the entry whose date is
-    ~90 days earlier (QoQ) or ~365 days earlier (YoY) and show an em-dash
-    when the counterpart is missing.
+    QoQ and YoY lookups are *date-aware* (`pct_change_by_date`, shared
+    with the adapters) so a gap in the series doesn't misalign the
+    comparison: each quarter is compared with the entry dated ~90 days
+    (QoQ) or ~365 days (YoY) earlier, with an em-dash when there is none.
     """
     if not values or not dates:
         return
     n = min(4, len(values), len(dates))
     for i in range(n):
         section = section_label if i == 0 else ""
-        cr_value = values[i] / 1e7
-        qoq = _pct_change_by_date(
+        qoq = pct_change_by_date(
             values, dates, current_idx=i, days_ago=90, tolerance=30
         )
-        yoy = _pct_change_by_date(
+        yoy = pct_change_by_date(
             values, dates, current_idx=i, days_ago=365, tolerance=45
         )
         qoq_str = f"{qoq:+.1f}%" if qoq is not None else "—"
         yoy_str = f"{yoy:+.1f}%" if yoy is not None else "—"
-        value_str = f"₹{cr_value:,.0f} Cr  ·  QoQ {qoq_str}  ·  YoY {yoy_str}"
+        value_str = f"{format_money(values[i], currency)}  ·  QoQ {qoq_str}  ·  YoY {yoy_str}"
         rows.append((section, dates[i], value_str))
-
-
-def _pct_change_by_date(
-    values: list[float],
-    dates: list[str],
-    *,
-    current_idx: int,
-    days_ago: int,
-    tolerance: int,
-) -> float | None:
-    """Find the entry whose date is roughly `days_ago` before `dates[current_idx]`.
-
-    Returns None when no counterpart falls within ±`tolerance` days of
-    the target, when either endpoint is missing, or when the past value
-    is zero or negative.
-    """
-    if current_idx >= len(values) or current_idx >= len(dates):
-        return None
-    current = values[current_idx]
-    if current is None:
-        return None
-    try:
-        current_date = _date.fromisoformat(dates[current_idx])
-    except (TypeError, ValueError):
-        return None
-
-    best_idx: int | None = None
-    best_gap: int = tolerance + 1
-    for j in range(current_idx + 1, len(dates)):
-        try:
-            past_date = _date.fromisoformat(dates[j])
-        except (TypeError, ValueError):
-            continue
-        actual_delta = (current_date - past_date).days
-        gap = abs(actual_delta - days_ago)
-        if gap < best_gap:
-            best_gap = gap
-            best_idx = j
-    if best_idx is None:
-        return None
-    past = values[best_idx]
-    if past is None or past <= 0:
-        return None
-    return (current - past) / past * 100

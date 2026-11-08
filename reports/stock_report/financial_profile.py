@@ -5,9 +5,10 @@ Dispatches based on `snap.is_bank`:
   - Industrial: margin stack, cost mix, working-capital days, asset mix,
     multi-year trend, shareholding trend, quarterly rows.
   - Bank / NBFC: spread & fees (NIM, NII, non-interest income),
-    profitability (ROE/ROA), balance sheet (deposits / borrowings /
-    CD ratio), multi-year trend, shareholding trend, quarterly rows,
-    and a "Missing" note for metrics screener doesn't expose.
+    asset quality (gross / net NPA with YoY change), profitability
+    (ROE/ROA), balance sheet (deposits / borrowings / CD ratio),
+    multi-year trend, shareholding trend, quarterly rows, and a
+    "Missing" note for metrics the sources don't expose.
 
 Both variants share the trend + quarterly rows defined in `trends.py`
 so that downstream rendering is consistent.
@@ -19,6 +20,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from data_sources.fundamentals_source import BalanceSheetSnapshot
+from reports.formatting import format_money
 from reports.stock_report.trends import (
     append_multi_year_trend_rows,
     append_quarter_rows,
@@ -143,20 +145,47 @@ def _bank_rows(snap: BalanceSheetSnapshot) -> list[tuple[str, str, str]]:
     rows: list[tuple[str, str, str]] = []
 
     _append_spread_and_fees(rows, snap)
+    _append_asset_quality(rows, snap)
     _append_bank_profitability(rows, snap)
     _append_bank_balance_sheet(rows, snap)
     append_multi_year_trend_rows(rows, snap)
     append_shareholding_trend_rows(rows, snap)
     append_quarter_rows(rows, snap)
 
-    rows.append(
-        (
-            "Missing",
-            "GNPA / NNPA / CASA / CRAR",
-            "screener does not expose — assess in Claude leadership pillar",
+    if snap.gross_npa_pct is None and snap.net_npa_pct is None:
+        rows.append(
+            ("Missing", "GNPA / NNPA", "no NPA data for this lender — verify manually")
         )
+    rows.append(
+        ("Missing", "CASA / CRAR", "not exposed by the data sources — verify manually")
     )
     return rows
+
+
+def _append_asset_quality(
+    rows: list[tuple[str, str, str]], snap: BalanceSheetSnapshot
+) -> None:
+    inner: list[tuple[str, str]] = []
+    if snap.gross_npa_pct is not None:
+        inner.append(
+            (
+                "Gross NPA",
+                f"{snap.gross_npa_pct:.2f}%{_yoy_pts(snap.gross_npa_delta_1y_pct_points)}",
+            )
+        )
+    if snap.net_npa_pct is not None:
+        inner.append(
+            (
+                "Net NPA",
+                f"{snap.net_npa_pct:.2f}%{_yoy_pts(snap.net_npa_delta_1y_pct_points)}",
+            )
+        )
+    for i, (label, val) in enumerate(inner):
+        rows.append(("Asset quality" if i == 0 else "", label, val))
+
+
+def _yoy_pts(delta: float | None) -> str:
+    return "" if delta is None else f"  ({delta:+.2f}pts YoY)"
 
 
 def _append_spread_and_fees(
@@ -165,15 +194,18 @@ def _append_spread_and_fees(
     inner: list[tuple[str, str]] = []
     if snap.nim is not None:
         inner.append(("Net interest margin (NIM)", f"{snap.nim:.2f}%"))
-    if snap.net_interest_income_cr is not None:
+    if snap.net_interest_income is not None:
         inner.append(
-            ("Net interest income", f"₹{snap.net_interest_income_cr:,.0f} Cr")
+            (
+                "Net interest income",
+                format_money(snap.net_interest_income, snap.financial_currency),
+            )
         )
-    if snap.non_interest_income_cr is not None:
+    if snap.non_interest_income is not None:
         inner.append(
             (
                 "Non-interest income (fee/treasury)",
-                f"₹{snap.non_interest_income_cr:,.0f} Cr",
+                format_money(snap.non_interest_income, snap.financial_currency),
             )
         )
     if snap.non_interest_income_ratio is not None:
@@ -202,10 +234,15 @@ def _append_bank_balance_sheet(
     rows: list[tuple[str, str, str]], snap: BalanceSheetSnapshot
 ) -> None:
     inner: list[tuple[str, str]] = []
-    if snap.deposits_cr is not None:
-        inner.append(("Deposits", f"₹{snap.deposits_cr:,.0f} Cr"))
-    if snap.borrowings_cr is not None:
-        inner.append(("Borrowings (ex-deposits)", f"₹{snap.borrowings_cr:,.0f} Cr"))
+    if snap.deposits is not None:
+        inner.append(("Deposits", format_money(snap.deposits, snap.financial_currency)))
+    if snap.borrowings is not None:
+        inner.append(
+            (
+                "Borrowings (ex-deposits)",
+                format_money(snap.borrowings, snap.financial_currency),
+            )
+        )
     if snap.credit_deposit_ratio is not None:
         label = "Credit-Deposit ratio"
         val = f"{snap.credit_deposit_ratio:.1f}%"

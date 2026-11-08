@@ -2,9 +2,9 @@
 
 `render_stock_report` is the only public function callers should use.
 It composes the header panel, the optional business-summary panel, the
-Financial Profile panel, the four pillar sections, and the composite
-verdict box — then writes a Markdown mirror to disk if `output_dir` is
-given.
+Financial Profile panel, the data-quality panel, the four pillar sections,
+and the composite verdict box (with any gates that fired) — then writes a
+Markdown mirror to disk if `output_dir` is given.
 """
 
 from __future__ import annotations
@@ -12,16 +12,21 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.panel import Panel
+from rich.text import Text
 
 from data_sources.fundamentals_source import BalanceSheetSnapshot
 from reports.formatting import (
+    GATE_LABELS,
     evidence_table,
+    format_money,
+    format_price,
     make_console,
     section_panel,
     verdict_text,
 )
+from reports.stock_report.data_quality import data_quality_panel, data_quality_rows
 from reports.stock_report.financial_profile import (
     financial_profile_panel,
     profile_rows,
@@ -31,14 +36,12 @@ from reports.stock_report.header import (
     valuation_parts_for,
 )
 from scorers.base import Pillar, StockScore
+from scorers.composite_scorer import PILLAR_WEIGHTS
 
-# Composite blend: fundamentals is the heaviest pillar (rebalanced from
-# leadership 40 / fundamentals 30 after the expanded BS + P&L coverage).
-PILLAR_WEIGHTS_PCT: tuple[tuple[Pillar, int], ...] = (
-    (Pillar.FUNDAMENTALS, 40),
-    (Pillar.LEADERSHIP, 30),
-    (Pillar.PROSPECTS, 15),
-    (Pillar.NEWS, 15),
+# Section order and weights come from the composite itself, so the report
+# can never disagree with the formula.
+PILLAR_WEIGHTS_PCT: tuple[tuple[Pillar, int], ...] = tuple(
+    (pillar, round(weight * 100)) for pillar, weight in PILLAR_WEIGHTS.items()
 )
 
 
@@ -70,6 +73,10 @@ def render_stock_report(
     if profile is not None:
         console.print(profile)
 
+    quality = data_quality_panel(snap)
+    if quality is not None:
+        console.print(quality)
+
     for pillar, weight in PILLAR_WEIGHTS_PCT:
         evidence = score.evidence.get(pillar, [])
         score_val = getattr(score, f"{pillar}_score")
@@ -83,9 +90,13 @@ def render_stock_report(
         )
 
     console.print()
+    verdict_body = Group(
+        verdict_text(score.verdict, score.confidence),
+        *(Text(GATE_LABELS[gate], style="bold red") for gate in score.gates_applied),
+    )
     console.print(
         Panel(
-            verdict_text(score.verdict, score.confidence),
+            verdict_body,
             title=f"Composite {score.composite}/100",
             title_align="left",
             border_style="bold",
@@ -113,16 +124,25 @@ def _render_markdown(snap: BalanceSheetSnapshot, score: StockScore) -> str:
         + (" | **LOW CONFIDENCE**" if score.low_confidence else ""),
         "",
     ]
+    for gate in score.gates_applied:
+        lines.append(f"> **{GATE_LABELS[gate]}**")
+    if score.gates_applied:
+        lines.append("")
     if snap.sector:
         lines.append(f"- Sector/Industry: {snap.sector} / {snap.industry}")
+    if snap.exchange or snap.country:
+        lines.append(f"- Listing: {snap.exchange or '—'} · {snap.country or '—'}")
     if snap.current_price is not None:
-        lines.append(f"- Current price: ₹{snap.current_price:,.2f}")
+        lines.append(f"- Current price: {format_price(snap.current_price, snap.currency)}")
     if snap.high_52w is not None and snap.low_52w is not None:
         lines.append(
-            f"- 52w range: ₹{snap.low_52w:,.2f} – ₹{snap.high_52w:,.2f}"
+            f"- 52w range: {format_price(snap.low_52w, snap.currency)} – "
+            f"{format_price(snap.high_52w, snap.currency)}"
         )
-    if snap.market_cap_cr is not None:
-        lines.append(f"- Market cap: ₹{snap.market_cap_cr:,.0f} Cr")
+    if snap.market_cap is not None:
+        lines.append(
+            f"- Market cap: {format_money(snap.market_cap, snap.market_cap_currency)}"
+        )
     vparts = valuation_parts_for(snap)
     if vparts:
         lines.append("- Valuation: " + "  ·  ".join(vparts))
@@ -139,6 +159,12 @@ def _render_markdown(snap: BalanceSheetSnapshot, score: StockScore) -> str:
                 lines.append(f"**{section}**")
                 current_section = section
             lines.append(f"- {metric}: {value}")
+        lines.append("")
+
+    quality_rows = data_quality_rows(snap)
+    if quality_rows:
+        lines.append("## Data quality")
+        lines.extend(f"- {row}" for row in quality_rows)
         lines.append("")
 
     for pillar, weight in PILLAR_WEIGHTS_PCT:

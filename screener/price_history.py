@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from types import TracebackType
 
 log = logging.getLogger(__name__)
 
@@ -24,11 +25,12 @@ log = logging.getLogger(__name__)
 class PriceSnapshot:
     ticker: str
     current_price: float
-    high_52w: float
+    high_52w: float  # over the available window, at most 252 closes
     low_52w: float
-    sma_50: float
-    sma_200: float | None
+    sma_50: float | None  # None until there are 50 closes
+    sma_200: float | None  # None until there are 200 closes
     rsi14: float
+    closes_count: int  # how much history the stats above were built from
 
 
 class PriceHistoryStore:
@@ -58,7 +60,12 @@ class PriceHistoryStore:
     def __enter__(self) -> "PriceHistoryStore":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self.close()
 
     def load_rows(
@@ -95,24 +102,21 @@ class PriceHistoryStore:
         return row[0] if row else None
 
     def snapshot(self, ticker: str) -> PriceSnapshot | None:
-        """Return a PriceSnapshot built from at least 15 real daily closes."""
-        closes = self.closes(ticker, limit=260)
-        if len(closes) < 15:
-            return None
-        last = closes[-1]
-        window_52w = closes[-252:] if len(closes) >= 252 else closes
-        sma_50_closes = closes[-50:] if len(closes) >= 50 else closes
-        sma_50 = _sma(sma_50_closes)
-        sma_200 = _sma(closes[-200:]) if len(closes) >= 200 else None
-        return PriceSnapshot(
-            ticker=ticker.upper(),
-            current_price=last,
-            high_52w=max(window_52w),
-            low_52w=min(window_52w),
-            sma_50=sma_50,
-            sma_200=sma_200,
-            rsi14=rsi14(closes),
+        """PriceSnapshot from the stored closes — see `snapshot_from_closes`."""
+        return snapshot_from_closes(ticker, self.closes(ticker, limit=SNAPSHOT_WINDOW))
+
+    def tickers(self) -> list[str]:
+        cur = self._conn.execute("SELECT DISTINCT ticker FROM prices ORDER BY ticker")
+        return [row[0] for row in cur.fetchall()]
+
+    def rename_ticker(self, old: str, new: str) -> int:
+        """Re-key every row of `old` to `new` (used by the ticker-ID migration)."""
+        cur = self._conn.execute(
+            "UPDATE OR REPLACE prices SET ticker = ? WHERE ticker = ?",
+            (new.upper(), old.upper()),
         )
+        self._conn.commit()
+        return cur.rowcount or 0
 
     def delete(self, ticker: str) -> int:
         cur = self._conn.execute(
@@ -120,6 +124,35 @@ class PriceHistoryStore:
         )
         self._conn.commit()
         return cur.rowcount or 0
+
+
+SNAPSHOT_WINDOW = 260  # a year of trading days plus a little slack
+MIN_SNAPSHOT_CLOSES = 15
+
+
+def snapshot_from_closes(ticker: str, closes: list[float]) -> PriceSnapshot | None:
+    """Price stats from the newest `SNAPSHOT_WINDOW` closes (oldest first).
+
+    Shared by the live store and the backtester, so both judge a dip the
+    same way. Each moving average is only reported once there is enough
+    history to compute it honestly — a "50-day SMA" over 20 closes is a
+    20-day SMA wearing a misleading label. Callers that need a full year
+    of range (the dip detector) gate on `closes_count`.
+    """
+    window = closes[-SNAPSHOT_WINDOW:]
+    if len(window) < MIN_SNAPSHOT_CLOSES:
+        return None
+    window_52w = window[-252:]
+    return PriceSnapshot(
+        ticker=ticker.upper(),
+        current_price=window[-1],
+        high_52w=max(window_52w),
+        low_52w=min(window_52w),
+        sma_50=_sma(window[-50:]) if len(window) >= 50 else None,
+        sma_200=_sma(window[-200:]) if len(window) >= 200 else None,
+        rsi14=rsi14(window),
+        closes_count=len(window),
+    )
 
 
 def rsi14(closes: list[float]) -> float:

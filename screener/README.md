@@ -7,8 +7,8 @@ history, produces buy-the-dip signals.
 
 | Module | Purpose |
 |---|---|
-| `price_history.py` | `PriceHistoryStore` — SQLite wrapper over `data_cache/prices.db`. One row per `(ticker, date)`. Exposes `snapshot(ticker)` returning a real `PriceSnapshot` with SMA(50/200) and Wilder RSI14. `rsi14()` is a standalone function for pure unit tests. |
-| `dip_detector.py` | `check_dip()` — multi-gate buy-the-dip logic. Gates: quality (composite + verdict), drawdown ≥ 20% from 52w high, ≥ 2 technical confirmations (below 50DMA, RSI < 40, near 52w low), not on the blocked-ticker list. Returns a `DipCheck` containing a `DipSignal` when all gates pass. |
+| `price_history.py` | `PriceHistoryStore` — SQLite wrapper over `data_cache/prices.db`, one row per `(ticker, date)` in the listing's trading currency. `snapshot(ticker)` returns a real `PriceSnapshot` with Wilder RSI14, SMA50 / SMA200 only once there are 50 / 200 closes, and `closes_count`. |
+| `dip_detector.py` | `check_dip()` — multi-gate buy-the-dip logic. Gates: not blocked (integrity veto / red flag), quality (composite + verdict), at least 120 daily closes, drawdown ≥ 20% from the 52w high, ≥ 2 technical confirmations (below 50DMA, RSI < 40, near 52w low). Earnings divergence (latest-quarter PAT ≥ +15% YoY, revenue not shrinking) adds a ranking bonus and, with a ≥ 30% drawdown, URGENT severity. |
 
 ## Rules
 
@@ -20,5 +20,5 @@ history, produces buy-the-dip signals.
   a "N skipped — run refresh" warning rather than silently filtering
   them out.
 - **`check_dip` is pure** — no file or network I/O. It takes a
-  `StockScore` + `PriceSnapshot` and returns a verdict. All persistence
-  happens in the calling layer (`reports/picks_report.py`).
+  `StockScore` + `PriceSnapshot` (+ cached YoY growth) and returns a
+  verdict. All persistence happens in `fundamental_engine/commands/pick.py`.

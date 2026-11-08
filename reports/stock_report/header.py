@@ -10,23 +10,25 @@ from __future__ import annotations
 from rich.panel import Panel
 
 from data_sources.fundamentals_source import BalanceSheetSnapshot
+from reports.formatting import format_money, format_price
 from scorers.base import StockScore
 
 
 def header_panel(snap: BalanceSheetSnapshot, score: StockScore) -> Panel:
     name = snap.company_name or snap.ticker
+    listing = " · ".join(part for part in (snap.exchange, snap.country) if part)
     sector = f"{snap.sector or '—'} / {snap.industry or '—'}"
-    price = f"₹{snap.current_price:,.2f}" if snap.current_price else "—"
-    hi = f"₹{snap.high_52w:,.2f}" if snap.high_52w else "—"
-    lo = f"₹{snap.low_52w:,.2f}" if snap.low_52w else "—"
-    mcap = f"₹{snap.market_cap_cr:,.0f} Cr" if snap.market_cap_cr else "—"
+    price = format_price(snap.current_price, snap.currency)
+    hi = format_price(snap.high_52w, snap.currency)
+    lo = format_price(snap.low_52w, snap.currency)
+    mcap = format_money(snap.market_cap, snap.market_cap_currency)
 
     low_conf_tag = " [yellow](LOW CONFIDENCE)[/yellow]" if score.low_confidence else ""
     source_tag = snap.source or "live"
 
     lines = [
         f"[bold]{score.ticker}[/bold] — {name}",
-        f"[dim]{sector}[/dim]",
+        f"[dim]{sector}{f'  ·  {listing}' if listing else ''}[/dim]",
         f"Price: {price}  ·  52w: {lo} – {hi}  ·  Market cap: {mcap}",
     ]
 
@@ -52,9 +54,11 @@ def valuation_parts_for(snap: BalanceSheetSnapshot) -> list[str]:
     parts: list[str] = []
     if snap.pe_ratio is not None:
         parts.append(f"P/E {snap.pe_ratio:.1f}")
-    pb = _price_to_book(snap)
+    pb = snap.price_to_book if snap.price_to_book is not None else _price_to_book(snap)
     if pb is not None:
         parts.append(f"P/B {pb:.2f}")
+    if snap.fcf_yield is not None:
+        parts.append(f"FCF yield {snap.fcf_yield:.2f}%")
     if snap.dividend_yield is not None:
         parts.append(f"Div yield {snap.dividend_yield:.2f}%")
     return parts
@@ -68,7 +72,7 @@ def analyst_parts_for(snap: BalanceSheetSnapshot) -> list[str]:
     """
     parts: list[str] = []
     if snap.analyst_target_mean is not None:
-        target = f"target ₹{snap.analyst_target_mean:,.0f}"
+        target = f"target {format_price(snap.analyst_target_mean, snap.currency)}"
         if snap.current_price and snap.current_price > 0:
             upside = (
                 (snap.analyst_target_mean - snap.current_price)
