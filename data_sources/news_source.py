@@ -1,26 +1,32 @@
-"""News source — live RSS fetching, per-company queries.
+"""News source — live Google News RSS, one query per company.
 
-Two fetch modes:
-    1. fetch_for_company(company_name) — Google News RSS search scoped to one
-       company. Every returned item is tagged to that ticker. No alias
-       resolver needed; the query itself scopes the results.
-    2. fetch_market_news() — general Indian market RSS aggregation for the
-       market brief. Not ticker-tagged; Claude reads and judges relevance
-       in the /market-brief skill.
+`fetch_for_company(company_name)` searches Google News for one company, in
+any market, through a single global English edition — the same query
+shape for Microsoft, Tencent, or Reliance. Every returned item is tagged
+to that ticker; the exact-phrase query itself scopes the results, so no
+alias resolver is needed. For companies with thin English coverage the
+`/analyse-stock` skill tells Claude to search in the local language too.
 
 Items run through a keyword gate (MATERIAL_KEYWORDS) to mark material events
-vs fluff. Sentiment scoring is a Claude responsibility in the skill.
+vs fluff. Categories are checked in severity order — governance before
+earnings — so "regulator probes Q4 results" is tagged governance, the
+category that drives the news-pillar clamp. Keywords match at word starts
+("pledge" catches "pledged", "ed raid" can't fire inside "listed raid").
+Sentiment scoring is a Claude responsibility in the skill.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import TypedDict
 from urllib.parse import quote_plus
+
+from data_sources.names import news_query_name
 
 log = logging.getLogger(__name__)
 
@@ -47,56 +53,55 @@ class NewsCategory(StrEnum):
     the lowercased labels downstream code already expects.
     """
 
-    EARNINGS = "earnings"
     GOVERNANCE = "governance"
-    CORPORATE_ACTION = "corporate_action"
-    PROMOTER = "promoter"
     RATING = "rating"
+    INSIDER = "insider"
     LEADERSHIP = "leadership"
+    CORPORATE_ACTION = "corporate_action"
+    EARNINGS = "earnings"
 
 
+# One universal keyword set for every market, ordered by severity: the
+# first matching category wins, so a headline that mentions both a probe
+# and quarterly results is tagged governance. Regulator names cover the
+# largest markets; the generic terms ("probe", "enforcement", "fraud")
+# catch the rest, and Claude judges every item in the skill anyway.
 MATERIAL_KEYWORDS: dict[NewsCategory, tuple[str, ...]] = {
-    NewsCategory.EARNINGS: (
-        "earnings", "results", "quarterly", "q1 ", "q2 ", "q3 ", "q4 ",
-        "fy result", "profit", "revenue",
-    ),
     NewsCategory.GOVERNANCE: (
-        "sebi", "fraud", "auditor", "scam", "investigation",
-        "enforcement directorate", "ed raid",
+        "fraud", "scam", "probe", "investigation", "enforcement", "regulator",
+        "securities and exchange commission", "sec charges", "sebi", "csrc",
+        "enforcement directorate", "ed raid", "money laundering", "antitrust",
+        "auditor", "restatement", "whistleblower", "class action", "sanctions",
+    ),
+    NewsCategory.RATING: (
+        "downgrade", "upgrade", "rating action", "credit rating", "default",
+    ),
+    NewsCategory.INSIDER: (
+        "pledge", "promoter", "insider", "stake sale", "sells stake",
+        "bulk deal", "block deal",
+    ),
+    NewsCategory.LEADERSHIP: (
+        "ceo", "chief executive", "cfo", "chairman", "resignation", "resigned",
+        "appointed", "stepped down", "steps down",
     ),
     NewsCategory.CORPORATE_ACTION: (
-        "merger", "acquisition", "takeover", "buyback", "dividend",
-        "demerger", "spin-off",
+        "merger", "acquisition", "acquire", "takeover", "buyback", "dividend",
+        "demerger", "spin-off", "delisting",
     ),
-    NewsCategory.PROMOTER: ("pledge", "promoter", "insider trading", "bulk deal"),
-    NewsCategory.RATING: ("downgrade", "upgrade", "rating action", "default"),
-    NewsCategory.LEADERSHIP: (
-        "ceo", "chairman", "resignation", "resigned", "appointed",
-        "stepped down",
+    NewsCategory.EARNINGS: (
+        "earnings", "results", "quarterly", "q1", "q2", "q3", "q4",
+        "fy result", "profit", "revenue", "guidance",
     ),
 }
 
-GOOGLE_NEWS_RSS = (
-    "https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
-)
+_MATERIAL_PATTERNS: dict[NewsCategory, re.Pattern[str]] = {
+    category: re.compile(r"\b(?:" + "|".join(map(re.escape, keywords)) + ")")
+    for category, keywords in MATERIAL_KEYWORDS.items()
+}
 
-MARKET_RSS_FEEDS: tuple[tuple[str, str], ...] = (
-    (
-        "Economic Times Markets",
-        "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
-    ),
-    (
-        "Moneycontrol Latest",
-        "https://www.moneycontrol.com/rss/latestnews.xml",
-    ),
-    (
-        "Moneycontrol Business",
-        "https://www.moneycontrol.com/rss/business.xml",
-    ),
-    (
-        "Google News India Stocks",
-        "https://news.google.com/rss/search?q=nse+bse+stocks+india&hl=en-IN&gl=IN&ceid=IN:en",
-    ),
+# One global English edition for every company, whatever its market.
+GOOGLE_NEWS_RSS = (
+    "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 )
 
 
@@ -117,8 +122,8 @@ class NewsItem:
 
 def classify_material(text: str) -> tuple[bool, str]:
     lower = text.lower()
-    for category, keywords in MATERIAL_KEYWORDS.items():
-        if any(k in lower for k in keywords):
+    for category, pattern in _MATERIAL_PATTERNS.items():
+        if pattern.search(lower):
             return True, category
     return False, ""
 
@@ -133,8 +138,9 @@ class NewsSource:
     ) -> list[NewsItem]:
         """Fetch news items for one company via a Google News RSS query.
 
-        The query is quoted to match the canonical name exactly, so a fetch
-        for 'Reliance Industries' will not return 'Reliance Power' items.
+        The query is the exact-phrase form of the name with legal suffixes
+        dropped (`news_query_name`): "Reliance Industries Limited" →
+        "Reliance Industries", which still won't match 'Reliance Power'.
         """
         if not company_name:
             return []
@@ -144,7 +150,7 @@ class NewsSource:
             company_name,
             within_days,
         )
-        query = quote_plus(f'"{company_name}"')
+        query = quote_plus(f'"{news_query_name(company_name)}"')
         url = GOOGLE_NEWS_RSS.format(query=query)
 
         loop = asyncio.get_running_loop()
@@ -154,29 +160,6 @@ class NewsSource:
 
         ticker_upper = ticker.strip().upper() or company_name.upper()
         return self._build_items(raw, ticker_upper, within_days)
-
-    async def fetch_market_news(self, *, within_days: int = 7) -> list[NewsItem]:
-        """Fetch general Indian market news across RSS feeds."""
-        log.info(
-            "news: live market fetch (%d feeds, window=%dd)",
-            len(MARKET_RSS_FEEDS),
-            within_days,
-        )
-        loop = asyncio.get_running_loop()
-        raw_groups = await asyncio.gather(
-            *(
-                loop.run_in_executor(None, _fetch_feed_sync, url, source)
-                for source, url in MARKET_RSS_FEEDS
-            ),
-            return_exceptions=True,
-        )
-        raw: list[FeedEntry] = []
-        for group in raw_groups:
-            if isinstance(group, Exception):
-                log.warning("market news fetch error: %s", group)
-                continue
-            raw.extend(group)
-        return self._build_items(raw, ticker="", within_days=within_days)
 
     def _build_items(
         self,

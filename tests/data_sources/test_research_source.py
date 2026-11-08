@@ -99,12 +99,67 @@ async def test_research_without_brave_key_only_uses_wikipedia(monkeypatch):
     def fake_wiki(name: str) -> tuple[str, str]:
         return ("Bio", "http://wiki/x")
 
-    # Don't replace brave — let the real one run; it returns [] when api_key is ""
-    bundle = await ResearchSource(brave_api_key="").research("X", "X")
-    # Wikipedia is live here, so either it finds something or not — we
-    # just monkeypatch it to be safe:
+    # Brave stays real: with an empty key it returns [] without any HTTP call.
     monkeypatch.setattr(research_source, "_fetch_wikipedia_sync", fake_wiki)
     bundle = await ResearchSource(brave_api_key="").research("X", "X")
     assert bundle.wikipedia_summary == "Bio"
     assert bundle.web_hits == []
     assert bundle.sources == ["wikipedia"]
+
+
+def test_wikipedia_page_is_trimmed_and_missing_pages_are_empty(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    pages = {
+        "Satya Nadella": SimpleNamespace(
+            exists=lambda: True, summary="CEO of Microsoft. " * 400,
+            fullurl="https://en.wikipedia.org/wiki/Satya_Nadella",
+        ),
+        "Nobody": SimpleNamespace(exists=lambda: False),
+    }
+
+    class FakeWikipedia:
+        def __init__(self, user_agent: str, language: str) -> None:
+            assert language == "en"
+
+        def page(self, name: str):
+            if name == "Broken":
+                raise ConnectionError("down")
+            return pages[name]
+
+    monkeypatch.setitem(sys.modules, "wikipediaapi", SimpleNamespace(Wikipedia=FakeWikipedia))
+    summary, url = research_source._fetch_wikipedia_sync("Satya Nadella")
+    assert len(summary) == 2500 and url.endswith("Satya_Nadella")
+    assert research_source._fetch_wikipedia_sync("Nobody") == ("", "")
+    assert research_source._fetch_wikipedia_sync("Broken") == ("", "")
+
+
+async def test_brave_search_maps_results_and_survives_errors(monkeypatch):
+    import httpx
+
+    real = httpx.AsyncClient  # capture once: re-installing must not stack mocks
+
+    def install(handler):
+        class Client(real):
+            def __init__(self, *args, **kwargs):
+                kwargs["transport"] = httpx.MockTransport(handler)
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(research_source.httpx, "AsyncClient", Client)
+
+    def ok(request: httpx.Request) -> httpx.Response:
+        assert request.headers["X-Subscription-Token"] == "key"
+        assert '"Lisa Su"' in request.url.params["q"]
+        return httpx.Response(200, json={"web": {"results": [
+            {"title": "Lisa Su", "url": "https://x/1", "description": "AMD CEO"},
+        ]}})
+
+    install(ok)
+    assert await research_source._fetch_brave_search("Lisa Su", "AMD", "key") == [
+        {"title": "Lisa Su", "url": "https://x/1", "snippet": "AMD CEO"}
+    ]
+
+    install(lambda request: httpx.Response(500))
+    assert await research_source._fetch_brave_search("Lisa Su", "", "key") == []
+    assert await research_source._fetch_brave_search("Lisa Su", "", "") == []

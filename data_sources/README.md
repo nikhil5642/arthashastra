@@ -2,7 +2,7 @@
 
 Live data adapters — every module here is the **only** place in the
 project that talks to an external API. No synthetic data, no fixtures,
-no hardcoded ticker or company lists.
+no hardcoded ticker, company, or market lists.
 
 This is the **lowest non-leaf layer** in the architecture: it depends
 only on `signals/` (shared infra) and nothing else. Run `grep -rhE
@@ -14,85 +14,113 @@ to confirm — it must always come back empty.
 ```
 data_sources/
 ├── fundamentals_source/     # split by responsibility
-│   ├── __init__.py          #   public API re-exports
-│   ├── snapshot.py          #   BalanceSheetSnapshot dataclass
-│   │                        #   + SnapshotFields TypedDict (adapter builder shape)
-│   │                        #   + SCORED_FIELDS + is_bank_snapshot
-│   │                        #   + PeerRecord / DocumentRecord aliases
+│   ├── __init__.py          #   public API only
+│   ├── snapshot.py          #   BalanceSheetSnapshot + SnapshotFields TypedDict
+│   │                        #   + DataConflict + SCORED_FIELDS + is_bank_snapshot
 │   ├── source.py            #   FundamentalsSource facade + merge rules + _SCREENER_WINS
-│   ├── yfinance_adapter.py  #   yfinance fetcher + section fillers
-│   │                        #   (pandas.DataFrame / yfinance.Ticker types via TYPE_CHECKING)
-│   ├── screener_adapter.py  #   screener.in fetcher + section parsers + appliers
-│   │                        #   (selectolax HTMLParser type via TYPE_CHECKING)
-│   └── primitives.py        #   parse helpers + _drop_ttm + _screener_cagr
+│   │                        #   + provenance (field_sources) + conflict detection
+│   ├── yfinance_adapter.py  #   global baseline: every listing on any exchange
+│   ├── screener_adapter.py  #   screener.in — Indian (.NS / .BO) listings only
+│   ├── sec_adapter.py       #   SEC EDGAR — US filers, ~18 years of first-filed 10-K values
+│   ├── valuation.py         #   P/E, earnings / FCF yield, P/B, P/E history (live + backtest)
+│   ├── history.py           #   point-in-time snapshots for backtests + SEC EPS rebasing
+│   └── primitives.py        #   parse helpers + period alignment + date-matched YoY
+├── price_series.py          # PriceSeries — split-adjusted closes + date lookups
+├── fx_source.py             # live FX via Yahoo pairs + minor units (GBp, ZAc, ILA)
+├── names.py                 # company-name cleaning for search-style queries
 ├── research_source.py       # Wikipedia API + Brave Search + WebHit TypedDict
 └── news_source.py           # Google News RSS + FeedEntry TypedDict + NewsCategory enum
 ```
 
-## Type-safety contract for this layer
+## Market independence
 
-- **No `typing.Any` anywhere.** The adapter builder dict is typed as
-  `SnapshotFields` (a `TypedDict(total=False)` mirroring the
-  `BalanceSheetSnapshot` fields). Every `_fill_*` / `_apply_*` /
-  `_parse_*` helper signature takes `SnapshotFields` not
-  `dict[str, Any]`. Typos in keys surface at edit time.
-- **External library objects are forward-referenced.** pandas
-  `DataFrame | None`, yfinance `Ticker`, selectolax `HTMLParser` —
-  all via `if TYPE_CHECKING: from ... import ...` blocks so there's
-  zero runtime import cost.
-- **RSS entries are typed as `FeedEntry`** (not `dict[str, Any]`),
-  web search results as `WebHit`.
-- **`ResearchBundle.to_dict()` / `NewsItem.to_dict()` / `BalanceSheetSnapshot.to_dict()`**
-  return `dict[str, object]`, not `dict[str, Any]` — callers at the
-  JSON boundary must narrow explicitly.
+- **Tickers are Yahoo symbols** — `MSFT`, `RELIANCE.NS`, `0700.HK`,
+  `7203.T`. Adapters take them as-is; no market is ever assumed.
+- **Sources select themselves by coverage.** yfinance answers for
+  every listing; `screener_adapter.covers(symbol)` is true only for
+  `.NS` / `.BO`, and for anything else the adapter returns nothing
+  without a request. No code anywhere branches on a market.
+- **Listing identity is live.** Exchange, trading currency
+  (`currency`), and reporting currency (`financial_currency`) come from
+  Yahoo's metadata per security. They differ for ADRs and many Hong
+  Kong listings (Tencent trades in HKD, reports in CNY), and London
+  quotes in pence (`GBp`) while its market cap is in pounds — see
+  `fx_source.major_unit`.
+- **Every monetary field is an absolute amount.** Screener's crore
+  figures are multiplied out at parse time; market cap is in the major
+  unit of the trading currency; statement amounts (quarterly revenue /
+  PAT, bank deposits, NII) are in the reporting currency.
+- **Valuation never mixes currencies.** `valuation.apply_valuation`
+  divides a price by a statement amount (FCF per share, book per share,
+  past EPS) only when the trading currency's major unit equals the
+  reporting currency; an ADR keeps only the source's published P/E.
+- **Every per-share number is on today's share basis.** Closes are
+  split-adjusted but not dividend-adjusted (`auto_adjust=False`, Yahoo's
+  "Close"): dividend adjustment would quietly shrink every past price
+  and P/E. screener and Yahoo already restate past EPS for later splits
+  and bonus issues; SEC's first-filed EPS is rebased in
+  `history.rebase_sec_eps` by every split after its filing date (Apple's
+  FY2013 $39.75 → $1.42). Shares are net income ÷ EPS of the same fiscal
+  year (`latest_annual_period`).
+- **News uses one global English edition.** The query is the
+  company's everyday name (`names.news_query_name`), so "Reliance
+  Industries Limited" searches as "Reliance Industries".
 
-## Modules
+## Point-in-time history (backtests)
 
-| Module | External source | What it returns |
-|---|---|---|
-| `fundamentals_source/` | yfinance (`.history()`, `.balance_sheet`, `.income_stmt`, `.cashflow`, `.quarterly_income_stmt`, `.info`) + screener.in HTML scrape | `BalanceSheetSnapshot` — 14 scored ratios, full **Financial Profile** (margin stack, cost mix, working-capital days, asset composition, quarterly trend, multi-year ratio trends, shareholding trend), bank-specific fields (NIM, NII, CD ratio) populated when the snapshot is a bank, the yfinance analyst bundle (target + recommendation), and full raw section dumps (`raw_profit_loss`, `raw_balance_sheet`, …) keyed by screener row label for ad-hoc downstream queries |
-| `research_source.py` | Wikipedia (`wikipedia-api`) + Brave Search API (optional, requires `BRAVE_API_KEY`) | `ResearchBundle` — biography text + web hit snippets for a leader |
-| `news_source.py` | Google News RSS per-company queries + market-wide RSS (ET, Moneycontrol) | `NewsItem` list with a keyword-based `is_material` gate |
+`history.fetch_statement_history(symbol)` gathers the full daily price
+history (yfinance: split-adjusted closes for valuation, total-return
+closes for returns, and the split events), annual statement frames (SEC
+for US filers, else yfinance), and screener's tables (Indian listings).
+`history.snapshot_as_of(history, day)` rebuilds the snapshot from only
+the fiscal years that ended at least `reporting_lag_days` (default 90)
+before `day`, by running the same appliers / fillers as the live path —
+so backtest and live scoring share every formula — and prices it at the
+last close known that evening. SEC values are first-filed, so
+restatements never leak backwards. The backtest suites that consume
+this live in the root `backtests/` folder.
 
-## Conventions for this layer
+## Reliability rules for this layer
+
+- **No silent defaults.** A value the source didn't publish stays
+  absent. (Pledge used to default to 0% because screener has no pledge
+  row, which scored every company "clean".)
+- **NaN / inf never pass the merge.** `_parse_float` / `_parse_pct`
+  reject non-finite text, yfinance's CAGR skips NaN endpoints, and
+  `_drop_non_finite` strips both adapters' outputs before merging.
+- **One period per ratio.** Inputs to a ratio come from the same column
+  (`_latest_aligned`) or the same fiscal-year label across tables
+  (`_value_at_label`): OCF/PAT, ROA, NIM, margins, and coverage never
+  pair TTM with annual or FY profit with half-year assets.
+- **One definition per metric.** Interest coverage is core operating
+  EBIT / interest on both sources (screener: operating profit −
+  depreciation; yfinance: Operating Income). Negative coverage is kept —
+  a core operating loss is known-bad, not missing.
+- **Quarterly series stay aligned.** A quarter is kept only when every
+  series has it, and YoY growth is matched by date, not position.
+- **Disagreements are recorded, not hidden.** When both adapters answer
+  a scored field and differ materially, the merge keeps the preferred
+  source and logs a `DataConflict`; `field_sources` names the source of
+  every populated field.
+- **Bank asset quality.** Screener's bank quarterly table carries Gross /
+  Net NPA %. Banks report them standalone only, so when the
+  consolidated table's NPA cells are empty the adapter reads the
+  standalone page.
+
+## Conventions
 
 - **Every public async method is mockable at the submodule level.**
-  Tests monkeypatch adapter functions on the submodules where they
-  live — `yfinance_adapter._fetch_yfinance_sync` and
-  `screener_adapter._fetch_screener_in`. `source.py` imports the
-  adapter *modules* (not functions) so attribute lookups are deferred
-  to call time, making monkeypatching actually take effect.
-- **No upward imports.** `data_sources/` must not import from
-  `scorers/`, `screener/`, `reports/`, or `fundamental_engine/`.
-  yfinance-symbol formatting (`_yf_symbol`) is a private helper inside
-  `yfinance_adapter.py` — it used to reach into `fundamental_engine.
-  ticker.yf_symbol` which was a layering violation; fixed now.
-- **Screener.in is authoritative for every Indian-specific ratio it exposes** —
-  D/E (from the `Borrowings` row, not yfinance's lease-inflated "Total Debt"),
-  interest coverage, operating/net/tax margins, OCF/PAT, FCF/PAT, working-
-  capital days, 3y CAGRs, and the full quarterly trend. yfinance fills gaps
-  (current/quick ratio, net debt / EBITDA, price history, sector/industry).
-- **TTM column is trimmed before computing any CAGR.** Screener appends a
-  `TTM` column to the P&L which mixes a partial fiscal year with a rolling
-  12-month window. `_drop_ttm(headers, values)` removes it so the 3y window
-  uses the last full annual point. Latest-value metrics (margins, interest
-  coverage, tax rate) still use TTM since it's the most recent period.
-- **Bank / NBFC row labels.** Banks use the singular "Borrowing" instead of
-  "Borrowings+", and their operating-profit row is called "Financing Profit"
-  (which is often negative by construction). `_apply_balance_sheet` now
-  accepts both labels.
-- **Cell-position alignment.** `_parse_section` pads missing cells with
-  `None` so row positions map 1-to-1 with headers, which means dropping
-  a column by name (e.g. TTM) doesn't shift the CAGR window.
-- **Quarterly values are stored in rupees regardless of source.** yfinance
-  publishes rupees directly; screener publishes crores and we multiply by
-  `1e7` at parse time so the downstream report renderer (which divides by
-  `1e7` for Cr display) works identically for both paths.
-- **Interest coverage requires EBIT > 0.** A loss-making company has no
-  coverage regardless of the numeric ratio; we drop the field entirely.
-- **Timestamps are parsed to naive UTC** everywhere in `news_source`
-  so the window filter behaves identically regardless of the host
-  machine's local timezone.
-- **Graceful degradation:** if one adapter fails, the other still
-  populates what it can. The `source` field on the snapshot records
-  which adapters contributed.
+  Tests monkeypatch `yfinance_adapter._fetch_yfinance_sync`,
+  `screener_adapter._fetch_screener_in`, and
+  `fx_source._fetch_major_rate_sync`. `source.py` imports the adapter
+  *modules* so attribute lookups happen at call time.
+- **Screener is authoritative where it has coverage** — D/E (from
+  `Borrowings`, not yfinance's lease-inflated "Total Debt"), ROE / ROCE,
+  margins, OCF/PAT, FCF/PAT, working-capital days, 3y CAGRs, quarters.
+  See `_SCREENER_WINS`.
+- **TTM is trimmed before any CAGR** (`_drop_ttm`); latest-value metrics
+  still use TTM.
+- **Bank / NBFC row labels.** Banks use "Borrowing" (singular) and
+  "Financing Profit"; the parser accepts both shapes.
+- **This layer never reads environment variables** — keys such as
+  `BRAVE_API_KEY` are passed in from `AnalystConfig`.

@@ -7,25 +7,39 @@ directly for pure-logic checks, or monkeypatch `_fetch_yfinance_sync` and
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from data_sources.fundamentals_source import (
+    SCORED_FIELDS,
     BalanceSheetSnapshot,
     FetchResult,
     FundamentalsSource,
-    SCORED_FIELDS,
-    _apply_balance_sheet,
-    _apply_profit_loss,
-    _drop_ttm,
-    _latest,
-    _merge,
-    _parse_float,
-    _parse_pct,
-    _screener_cagr,
-    _source_tag,
-)
-from data_sources.fundamentals_source import (
+    latest_yoy_growth,
+    pct_change_by_date,
     screener_adapter,
     yfinance_adapter,
 )
+from data_sources.fundamentals_source.primitives import (
+    _drop_ttm,
+    _latest,
+    _latest_aligned,
+    _parse_float,
+    _parse_pct,
+    _screener_cagr,
+    _value_at_label,
+)
+from data_sources.fundamentals_source.screener_adapter import (
+    _apply_asset_quality,
+    _apply_balance_sheet,
+    _apply_cash_flow,
+    _apply_derived,
+    _apply_profit_loss,
+    _apply_quarters,
+)
+from data_sources.fundamentals_source.source import _drop_non_finite, _merge, _source_tag
+
+if TYPE_CHECKING:
+    from selectolax.parser import HTMLParser
 
 
 def test_balance_sheet_snapshot_defaults():
@@ -70,12 +84,12 @@ def test_parse_float_handles_commas():
 
 def test_merge_prefers_screener_for_roe_roce():
     yf = {"roe": 10.0, "roce": 12.0, "debt_to_equity": 0.5}
-    sc = {"roe": 8.4, "roce": 9.7, "promoter_holding": 50.0}
+    sc = {"roe": 8.4, "roce": 9.7, "insider_holding": 50.0}
     merged = _merge(yf, sc)
     assert merged["roe"] == 8.4  # screener wins
     assert merged["roce"] == 9.7  # screener wins
     assert merged["debt_to_equity"] == 0.5  # yfinance only
-    assert merged["promoter_holding"] == 50.0  # screener only
+    assert merged["insider_holding"] == 50.0  # screener only
 
 
 def test_source_tag_variants():
@@ -113,9 +127,9 @@ async def test_fetch_merges_mocked_sources(monkeypatch):
         return {
             "roe": 18.5,
             "roce": 22.0,
-            "promoter_holding": 48.0,
+            "insider_holding": 48.0,
             "pledge_pct": 0.0,
-            "market_cap_cr": 10000.0,
+            "market_cap": 10000.0,
             "company_name": "Test Industries Limited (Consolidated)",
         }
 
@@ -129,7 +143,7 @@ async def test_fetch_merges_mocked_sources(monkeypatch):
     assert snap.roe == 18.5  # screener wins
     assert snap.debt_to_equity == 0.4  # yfinance only
     assert snap.current_price == 1500.0
-    assert snap.promoter_holding == 48.0
+    assert snap.insider_holding == 48.0
     assert snap.source == "yfinance+screener"
     assert snap.data_completeness_pct == 100.0
     assert snap.field_sources["roe"] == "screener"
@@ -157,7 +171,7 @@ async def test_fetch_handles_yfinance_exception(monkeypatch):
         raise RuntimeError("rate limited")
 
     async def fake_screener(ticker: str) -> dict:
-        return {"roe": 15.0, "roce": 18.0, "promoter_holding": 50.0}
+        return {"roe": 15.0, "roce": 18.0, "insider_holding": 50.0}
 
     monkeypatch.setattr(yfinance_adapter, "_fetch_yfinance_sync", boom)
     monkeypatch.setattr(screener_adapter, "_fetch_screener_in", fake_screener)
@@ -272,6 +286,8 @@ def test_apply_profit_loss_drops_ttm_before_cagr_but_uses_ttm_for_margins():
             "sales": [1000.0, 1200.0, 1500.0, 1800.0, 2000.0],
             "operating profit": [100.0, 130.0, 170.0, 220.0, 260.0],
             "interest": [10.0, 12.0, 14.0, 18.0, 20.0],
+            "depreciation": [20.0, 25.0, 30.0, 35.0, 40.0],
+            "other income": [5.0, 5.0, 5.0, 5.0, 900.0],  # one-off gain in TTM
             "net profit": [80.0, 100.0, 130.0, 160.0, 180.0],
             "tax %": [25.0, 25.0, 25.0, 25.0, 25.0],
         },
@@ -280,8 +296,12 @@ def test_apply_profit_loss_drops_ttm_before_cagr_but_uses_ttm_for_margins():
     assert out["rev_3y_cagr"] == 21.64
     # Latest margins come from TTM row.
     assert out["operating_margin"] == 13.0  # 260 / 2000
-    assert out["interest_coverage"] == 13.0  # 260 / 20
     assert out["net_margin"] == 9.0  # 180 / 2000
+    # Coverage uses core EBIT — (operating profit 260 − depreciation 40) / 20 —
+    # so the one-off "other income" can't inflate it.
+    assert out["interest_coverage"] == 11.0
+    # The latest *annual* column, not TTM, names the fiscal year.
+    assert out["latest_annual_period"] == "2025-03-31"
 
 
 def test_apply_profit_loss_no_ttm_uses_all_annual_points():
@@ -299,3 +319,280 @@ def test_apply_profit_loss_no_ttm_uses_all_annual_points():
     # 100 → 800 over 3 years ⇒ 100% CAGR.
     assert out["rev_3y_cagr"] == 100.0
     assert out["pat_3y_cagr"] == 100.0
+
+
+# ── Reliability fixes (2026-11 audit) ─────────────────────────────────────────
+
+
+def _html(body: str) -> "HTMLParser":
+    from selectolax.parser import HTMLParser
+
+    return HTMLParser(f"<html><body>{body}</body></html>")
+
+
+def test_shareholding_without_pledge_row_leaves_pledge_unknown():
+    """Screener has no pledge row; absence must stay None, never become 0%."""
+    tree = _html(
+        '<section id="shareholding"><div id="quarterly-shp"><table>'
+        "<thead><tr><th></th><th>Jun 2026</th><th>Sep 2026</th></tr></thead>"
+        "<tbody><tr><td>Promoters +</td><td>50.10%</td><td>50.20%</td></tr>"
+        "<tr><td>FIIs +</td><td>20.00%</td><td>19.50%</td></tr></tbody>"
+        "</table></div></section>"
+    )
+    out: dict = {}
+    screener_adapter._parse_shareholding(tree, out)
+    assert out["insider_holding"] == 50.2
+    assert "pledge_pct" not in out
+
+
+def test_top_ratios_high_low_reads_both_number_spans():
+    tree = _html(
+        '<ul id="top-ratios"><li><span class="name">High / Low</span>'
+        '<span class="value">₹ <span class="number">1,612</span> / '
+        '<span class="number">1,152</span></span></li></ul>'
+    )
+    out: dict = {}
+    screener_adapter._parse_top_ratios(tree, out)
+    assert out["high_52w"] == 1612.0
+    assert out["low_52w"] == 1152.0
+
+
+def test_parsers_treat_nan_and_inf_text_as_missing():
+    assert _parse_float("nan") is None
+    assert _parse_pct("inf%") is None
+
+
+def test_drop_non_finite_removes_nan_and_inf():
+    clean = _drop_non_finite(
+        {"roe": float("nan"), "roa": float("inf"), "roce": 12.0}, label="test"
+    )
+    assert clean == {"roce": 12.0}
+
+
+async def test_fetch_never_lets_nan_reach_the_snapshot(monkeypatch):
+    def fake_yf_sync(ticker: str):
+        return ({"pat_3y_cagr": float("nan"), "roe": 15.0}, [])
+
+    async def fake_screener(ticker: str) -> dict:
+        return {}
+
+    monkeypatch.setattr(yfinance_adapter, "_fetch_yfinance_sync", fake_yf_sync)
+    monkeypatch.setattr(screener_adapter, "_fetch_screener_in", fake_screener)
+
+    snap = await FundamentalsSource().fetch("TEST")
+    assert snap.pat_3y_cagr is None
+    assert snap.roe == 15.0
+
+
+async def test_fetch_records_source_conflicts_and_full_provenance(monkeypatch):
+    """The Saatvik case: yfinance's lease-inflated D/E vs screener's borrowings."""
+
+    def fake_yf_sync(ticker: str):
+        return ({"debt_to_equity": 1.49, "roe": 18.0, "sector": "Energy"}, [])
+
+    async def fake_screener(ticker: str) -> dict:
+        return {"debt_to_equity": 0.52, "roe": 18.4, "company_name": "Test Ltd"}
+
+    monkeypatch.setattr(yfinance_adapter, "_fetch_yfinance_sync", fake_yf_sync)
+    monkeypatch.setattr(screener_adapter, "_fetch_screener_in", fake_screener)
+
+    snap = await FundamentalsSource().fetch("TEST")
+    assert snap.debt_to_equity == 0.52  # screener still wins
+    [conflict] = snap.data_conflicts  # ROE 18.0 vs 18.4 is within tolerance
+    assert conflict.field_name == "debt_to_equity"
+    assert conflict.chosen_source == "screener"
+    assert conflict.other_value == 1.49
+    # Provenance covers every populated field, not just the scored ones.
+    assert snap.field_sources["sector"] == "yfinance"
+    assert snap.field_sources["company_name"] == "screener"
+
+
+def test_latest_aligned_takes_the_newest_column_shared_by_all_rows():
+    # TTM interest is missing, so PBT must come from the same annual column.
+    assert _latest_aligned([10.0, 20.0, 30.0], [1.0, 2.0, None]) == (20.0, 2.0)
+    assert _latest_aligned([1.0], None) is None
+
+
+def test_value_at_label_matches_columns_across_tables():
+    assert _value_at_label(["Mar 2024", "Mar 2025"], [1.0, 2.0], "Mar 2025") == 2.0
+    assert _value_at_label(["Mar 2024"], [1.0], "Mar 2025") is None
+
+
+def test_cash_flow_ratio_uses_profit_of_the_same_fiscal_year():
+    """P&L already shows FY26; the cash-flow table only reaches FY25."""
+    out: dict = {}
+    _apply_cash_flow(
+        out,
+        cf_headers=["Mar 2024", "Mar 2025"],
+        cf_rows={"cash from operating activity": [90.0, 120.0]},
+        pl_headers=["Mar 2024", "Mar 2025", "Mar 2026", "TTM"],
+        pl_rows={"net profit": [80.0, 100.0, 200.0, 210.0]},
+    )
+    assert out["ocf_to_pat"] == 1.2  # FY25 OCF 120 / FY25 profit 100
+
+
+def test_roa_divides_by_assets_at_the_same_year_end():
+    """The balance sheet's newest column is a half-year; ROA must skip it."""
+    out: dict = {}
+    _apply_derived(
+        out,
+        bs_headers=["Mar 2025", "Sep 2025"],
+        bs_rows={"total assets": [1000.0, 5000.0]},
+        pl_headers=["Mar 2025", "TTM"],
+        pl_rows={"net profit": [100.0, 130.0]},
+    )
+    assert out["roa"] == 10.0
+
+
+def test_quarters_stay_aligned_when_one_row_has_a_hole():
+    out: dict = {}
+    _apply_quarters(
+        out,
+        headers=["Sep 2025", "Dec 2025", "Mar 2026", "Jun 2026", "Sep 2026"],
+        rows={
+            "sales": [100.0, 110.0, 120.0, 130.0, 150.0],
+            "net profit": [10.0, None, 12.0, 13.0, 15.0],
+        },
+    )
+    # Dec 2025 has no profit, so it is dropped from all three series.
+    assert out["quarterly_dates"] == ["2026-09-30", "2026-06-30", "2026-03-31", "2025-09-30"]
+    assert len(out["quarterly_revenue"]) == len(out["quarterly_pat"]) == 4
+    # YoY is matched by date: Sep 2026 vs Sep 2025.
+    assert out["latest_yoy_revenue_growth"] == 50.0
+    assert out["latest_yoy_pat_growth"] == 50.0
+
+
+def test_asset_quality_reads_npa_rows_with_yoy_change():
+    out: dict = {}
+    _apply_asset_quality(
+        out,
+        {
+            "gross npa %": [1.8, 1.7, 1.6, 1.5, 1.4],
+            "net npa %": [0.5, 0.45, 0.42, 0.4, 0.38],
+        },
+    )
+    assert out["gross_npa_pct"] == 1.4
+    assert out["gross_npa_delta_1y_pct_points"] == -0.4
+    assert out["net_npa_pct"] == 0.38
+    assert out["net_npa_delta_1y_pct_points"] == -0.12
+
+
+def test_borrowings_from_zero_sets_a_flag_instead_of_infinity():
+    out: dict = {}
+    screener_adapter._apply_multi_year_trends(
+        out,
+        bs_headers=["Mar 2022", "Mar 2023", "Mar 2024", "Mar 2025"],
+        bs_rows={"borrowings": [0.0, 0.0, 10.0, 50.0]},
+        pl_headers=[],
+        pl_rows={},
+        r_rows={},
+    )
+    assert out["borrowings_went_from_zero"] is True
+    assert "borrowings_delta_3y_pct" not in out
+
+
+def test_yfinance_cagr_skips_a_nan_endpoint():
+    import pandas as pd
+
+    df = pd.DataFrame(
+        {"FY25": [200.0], "FY24": [150.0], "FY23": [120.0], "FY22": [float("nan")]},
+        index=["Total Revenue"],
+    )
+    assert yfinance_adapter._compute_cagr(df, ("Total Revenue",), years=3) is None
+
+
+def test_yfinance_quarterly_series_drop_misaligned_columns():
+    import pandas as pd
+
+    cols = pd.to_datetime(["2026-09-30", "2026-06-30", "2026-03-31"])
+    q_is = pd.DataFrame(
+        [[150.0, 130.0, 120.0], [15.0, float("nan"), 12.0]],
+        index=["Total Revenue", "Net Income"],
+        columns=cols,
+    )
+    revenue, pat, dates = yfinance_adapter._extract_quarterly_series(q_is)
+    assert dates == ["2026-09-30", "2026-03-31"]
+    assert revenue == [150.0, 120.0]
+    assert pat == [15.0, 12.0]
+
+
+def test_pct_change_by_date_ignores_position_gaps():
+    values = [150.0, 120.0, 100.0]
+    dates = ["2026-09-30", "2026-03-31", "2025-09-30"]
+    assert latest_yoy_growth(values, dates) == 50.0
+    assert pct_change_by_date(values, dates, current_idx=0, days_ago=90, tolerance=30) is None
+
+
+def test_core_operating_loss_keeps_a_negative_coverage():
+    """Dropping the field would hide the problem; a negative value scores 0."""
+    out: dict = {}
+    _apply_profit_loss(
+        out,
+        headers=["Mar 2026"],
+        rows={
+            "sales": [1000.0],
+            "operating profit": [180.0],
+            "depreciation": [200.0],
+            "interest": [30.0],
+        },
+    )
+    assert out["interest_coverage"] == -0.67
+
+
+# ── yfinance metadata for global listings ─────────────────────────────────────
+
+
+def test_listing_metadata_keeps_currency_case_and_reporting_currency():
+    out: dict = {}
+    yfinance_adapter._fill_listing(
+        out,
+        {"fullExchangeName": "LSE", "currency": "GBp", "financialCurrency": "USD",
+         "marketCap": 210817236992},
+    )
+    assert out == {
+        "exchange": "LSE",
+        "currency": "GBp",  # pence — must not be upper-cased to GBP
+        "financial_currency": "USD",
+        "market_cap": 210817236992.0,
+    }
+
+
+def test_ownership_percentages_come_from_yahoo_fractions():
+    out: dict = {}
+    yfinance_adapter._fill_ownership(
+        out, {"heldPercentInsiders": 0.0009, "heldPercentInstitutions": 0.7565}
+    )
+    assert out == {"insider_holding": 0.09, "institutional_holding": 75.65}
+
+
+def test_book_value_is_dropped_when_currencies_differ():
+    """Alibaba's ADR trades in USD but reports in CNY: P/B would be nonsense."""
+    adr: dict = {}
+    yfinance_adapter._fill_valuation(
+        adr, {"trailingPE": 17.2, "bookValue": 432.1, "currency": "USD", "financialCurrency": "CNY"}
+    )
+    assert "book_value_per_share" not in adr
+    assert adr["pe_ratio"] == 17.2
+
+    samsung: dict = {}
+    yfinance_adapter._fill_valuation(
+        samsung,
+        {"bookValue": 57000.0, "currency": "KRW", "financialCurrency": "KRW",
+         "trailingAnnualDividendYield": 0.0185},
+    )
+    assert samsung["book_value_per_share"] == 57000.0
+    assert samsung["dividend_yield"] == 1.85
+
+
+def test_yfinance_symbol_is_never_rewritten():
+    assert yfinance_adapter._yf_symbol(" googl ") == "GOOGL"
+    assert yfinance_adapter._yf_symbol("005930.ks") == "005930.KS"
+
+
+async def test_screener_is_never_called_for_non_indian_listings(monkeypatch):
+    async def boom(*_):
+        raise AssertionError("screener must not be fetched for a US listing")
+
+    monkeypatch.setattr(screener_adapter, "_fetch_html_tree", boom)
+    assert await screener_adapter._fetch_screener_in("MSFT") == {}
+    assert await screener_adapter.fetch_tables("7203.T") == {}

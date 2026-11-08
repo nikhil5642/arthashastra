@@ -1,4 +1,10 @@
-"""screener.in adapter — authoritative source for Indian-specific ratios.
+"""screener.in adapter — authoritative source for Indian listings.
+
+Only NSE / BSE listings (`.NS` / `.BO` Yahoo symbols) are fetched; for any
+other security this adapter returns nothing without making a request, so
+the pipeline stays market-independent and screener simply adds depth
+where it has coverage. Screener publishes amounts in crores; every
+monetary field is converted to plain rupees here.
 
 The screener.in HTML has a fixed set of tables per company::
 
@@ -33,12 +39,18 @@ from data_sources.fundamentals_source.primitives import (
     HTTP_TIMEOUT_SECONDS,
     SCREENER_BASE_URL,
     SCREENER_USER_AGENT,
+    _annual_headers,
     _drop_ttm,
     _latest,
+    _latest_aligned,
+    _latest_and_yoy_delta,
+    _latest_with_label,
     _parse_float,
     _parse_pct,
     _screener_cagr,
     _screener_month_to_iso,
+    _value_at_label,
+    latest_yoy_growth,
 )
 from data_sources.fundamentals_source.snapshot import (
     DocumentRecord,
@@ -53,6 +65,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Screener covers Indian listings only; these are their Yahoo suffixes.
+_SCREENER_SUFFIXES: tuple[str, ...] = (".NS", ".BO")
+RUPEES_PER_CRORE = 1e7
+
 # Screener tables come out as (headers, {row_label: [v0, …, vN | None]})
 # where None marks a missing / non-numeric cell. Callers preserve column
 # alignment by using positional indexing into the values list.
@@ -62,80 +78,136 @@ SectionRows = dict[str, list[float | None]]
 # ── Public entry point ───────────────────────────────────────────────────────
 
 
-async def _fetch_screener_in(ticker: str) -> SnapshotFields:
-    tree = await _fetch_html_tree(ticker)
-    if tree is None:
-        return SnapshotFields()
+def covers(symbol: str) -> bool:
+    """True for NSE / BSE listings — the only securities screener knows."""
+    return symbol.strip().upper().endswith(_SCREENER_SUFFIXES)
 
-    out: SnapshotFields = SnapshotFields()
+
+def screener_code(symbol: str) -> str:
+    """'RELIANCE.NS' → 'RELIANCE' (screener's URL slug)."""
+    return symbol.strip().upper().rsplit(".", 1)[0]
+
+
+async def _fetch_screener_in(symbol: str) -> SnapshotFields:
+    if not covers(symbol):
+        return SnapshotFields()
+    ticker = screener_code(symbol)
+    page = await _fetch_html_tree(ticker)
+    if page is None:
+        return SnapshotFields()
+    tree, is_consolidated = page
+
+    out: SnapshotFields = SnapshotFields(currency="INR", financial_currency="INR")
 
     _parse_top_ratios(tree, out)
     _parse_h1(tree, out)
     _parse_shareholding(tree, out)
 
-    # Parse each numeric table once and fan out. (headers, rows) tuples
+    # Parse each table exactly once and fan out. (headers, rows) tuples
     # preserve column alignment so _drop_ttm can trim by position.
     bs_headers, bs_rows = _parse_section(tree, "balance-sheet")
     pl_headers, pl_rows = _parse_section(tree, "profit-loss")
     cf_headers, cf_rows = _parse_section(tree, "cash-flow")
     r_headers, r_rows = _parse_section(tree, "ratios")
+    q_headers, q_rows = _parse_section(tree, "quarters")
+    sh_headers, sh_rows = _parse_shareholding_table(tree)
 
     _apply_balance_sheet(out, bs_headers, bs_rows)
     _apply_profit_loss(out, pl_headers, pl_rows)
-    _apply_cash_flow(out, cf_rows, pl_headers, pl_rows)
+    _apply_cash_flow(out, cf_headers, cf_rows, pl_headers, pl_rows)
     _apply_ratios(out, r_rows)
-    _apply_quarters(tree, out)
-    _apply_derived(out, bs_rows, pl_headers, pl_rows)
-    _apply_bank_metrics(out, bs_rows, pl_headers, pl_rows)
+    _apply_quarters(out, q_headers, q_rows)
+    _apply_asset_quality(out, q_rows)
+    _apply_derived(out, bs_headers, bs_rows, pl_headers, pl_rows)
+    _apply_bank_metrics(out, bs_headers, bs_rows, pl_headers, pl_rows)
     _apply_multi_year_trends(out, bs_headers, bs_rows, pl_headers, pl_rows, r_rows)
-    _apply_shareholding_trend(tree, out)
+    _apply_shareholding_trend(out, sh_headers, sh_rows)
     _apply_raw_dumps(
         out,
         pl_headers, pl_rows,
         bs_headers, bs_rows,
         cf_headers, cf_rows,
         r_headers, r_rows,
-        tree,
+        q_headers, q_rows,
+        sh_headers, sh_rows,
     )
     _apply_peers(tree, out)
     _apply_documents(tree, out)
     _apply_analysis_text(tree, out)
 
+    # Banks report NPAs on a standalone basis only: the consolidated
+    # quarterly table carries the rows with every cell empty.
+    if out.get("is_bank") and "gross_npa_pct" not in out and is_consolidated:
+        standalone = await _fetch_page(f"{SCREENER_BASE_URL}/{ticker.upper()}/")
+        if standalone is not None:
+            _, standalone_quarters = _parse_section(standalone, "quarters")
+            _apply_asset_quality(out, standalone_quarters)
+
     return out
 
 
-async def _fetch_html_tree(ticker: str) -> "HTMLParser | None":
-    """Fetch the screener.in company page and return a parsed tree, or None."""
-    urls = [
-        f"{SCREENER_BASE_URL}/{ticker.upper()}/consolidated/",
-        f"{SCREENER_BASE_URL}/{ticker.upper()}/",
-    ]
-    headers = {"User-Agent": SCREENER_USER_AGENT}
+# A table as parsed: (column headers, {row label: values aligned to headers}).
+Table = tuple[list[str], dict[str, list[float | None]]]
 
-    resp = None
-    for url in urls:
-        try:
-            async with httpx.AsyncClient(
-                timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=True
-            ) as client:
-                resp = await client.get(url, headers=headers)
-            if resp.status_code == 200:
-                break
-        except Exception as e:
-            log.warning("screener.in fetch error (%s): %s", url, e)
-            continue
+HISTORY_SECTIONS: tuple[str, ...] = (
+    "profit-loss",
+    "balance-sheet",
+    "cash-flow",
+    "ratios",
+    "quarters",
+)
 
-    if resp is None or resp.status_code != 200:
-        status = resp.status_code if resp is not None else "no response"
-        log.warning("screener.in returned %s for %s", status, ticker)
+
+async def fetch_tables(symbol: str) -> dict[str, Table]:
+    """Every table on the company page, for point-in-time backtests.
+
+    Keys are the section ids in HISTORY_SECTIONS plus "shareholding".
+    Empty for listings screener doesn't cover.
+    """
+    if not covers(symbol):
+        return {}
+    page = await _fetch_html_tree(screener_code(symbol))
+    if page is None:
+        return {}
+    tree, _ = page
+    tables = {section: _parse_section(tree, section) for section in HISTORY_SECTIONS}
+    tables["shareholding"] = _parse_shareholding_table(tree)
+    return tables
+
+
+async def _fetch_html_tree(ticker: str) -> "tuple[HTMLParser, bool] | None":
+    """Fetch the company page → (parsed tree, is_consolidated), or None.
+
+    The consolidated view is preferred; companies without consolidated
+    accounts fall back to the standalone page.
+    """
+    consolidated = await _fetch_page(f"{SCREENER_BASE_URL}/{ticker.upper()}/consolidated/")
+    if consolidated is not None:
+        return consolidated, True
+    standalone = await _fetch_page(f"{SCREENER_BASE_URL}/{ticker.upper()}/")
+    if standalone is not None:
+        return standalone, False
+    log.warning("screener.in has no page for %s", ticker)
+    return None
+
+
+async def _fetch_page(url: str) -> "HTMLParser | None":
+    """GET one screener page and parse it; None on any failure."""
+    try:
+        async with httpx.AsyncClient(
+            timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=True
+        ) as client:
+            resp = await client.get(url, headers={"User-Agent": SCREENER_USER_AGENT})
+    except Exception as e:
+        log.warning("screener.in fetch error (%s): %s", url, e)
         return None
-
+    if resp.status_code != 200:
+        return None
     try:
         from selectolax.parser import HTMLParser
     except ImportError:
         log.warning("selectolax not installed — screener parsing skipped")
         return None
-
     return HTMLParser(resp.text)
 
 
@@ -160,9 +232,9 @@ def _parse_top_ratios(tree: "HTMLParser", out: SnapshotFields) -> None:
             if v is not None:
                 out["roe"] = v
         elif "market cap" in name:
-            v = _parse_float(raw)
+            v = _parse_float(raw)  # published in ₹ crore
             if v is not None:
-                out["market_cap_cr"] = v
+                out["market_cap"] = v * RUPEES_PER_CRORE
         elif "current price" in name:
             v = _parse_float(raw)
             if v is not None:
@@ -184,10 +256,12 @@ def _parse_top_ratios(tree: "HTMLParser", out: SnapshotFields) -> None:
             if v is not None and v >= 0:
                 out["debt_to_equity"] = v
         elif "high / low" in name:
-            parts = [p.strip() for p in raw.split("/")]
-            if len(parts) == 2:
-                hi = _parse_float(parts[0])
-                lo = _parse_float(parts[1])
+            # Two `.number` spans ("1,612" / "1,152"); `val_el` is only the
+            # first, so read them both explicitly.
+            numbers = item.css(".number")
+            if len(numbers) >= 2:
+                hi = _parse_float(numbers[0].text(strip=True))
+                lo = _parse_float(numbers[1].text(strip=True))
                 if hi is not None:
                     out["high_52w"] = hi
                 if lo is not None:
@@ -220,11 +294,13 @@ def _parse_shareholding(tree: "HTMLParser", out: SnapshotFields) -> None:
         if latest is None:
             continue
         if label.startswith("promoter") and "pledge" not in label:
-            out["promoter_holding"] = latest
+            out["insider_holding"] = latest  # the promoter group is the insider bloc
         elif "pledge" in label:
             out["pledge_pct"] = latest
-    if "promoter_holding" in out and "pledge_pct" not in out:
-        out["pledge_pct"] = 0.0
+    # No pledge default. Screener's shareholding tables carry no pledge row
+    # (verified 2026-11-08), so absence means "unknown", not "0% pledged".
+    # Defaulting to 0.0 used to hand every company a clean-pledge score and
+    # made the pledge veto impossible to trigger.
 
 
 # ── Generic section parser ───────────────────────────────────────────────────
@@ -281,23 +357,23 @@ def _apply_balance_sheet(
     headers: list[str],
     rows: dict[str, list[float | None]],
 ) -> None:
-    if not rows:
-        return
+    """D/E = borrowings / (equity capital + reserves), all from one column."""
     # Screener uses "Borrowings+" for most companies and bare "Borrowing"
     # for banks / NBFCs. Also fall back to "total debt" for good measure.
-    borrowings = _latest(
-        rows.get("borrowings")
-        or rows.get("borrowing")
-        or rows.get("total debt")
+    borrowings_row = (
+        rows.get("borrowings") or rows.get("borrowing") or rows.get("total debt")
     )
-    equity_capital = _latest(rows.get("equity capital"))
-    reserves = _latest(rows.get("reserves"))
-
-    equity = None
-    if equity_capital is not None and reserves is not None:
-        equity = equity_capital + reserves
-
-    if borrowings is not None and equity is not None and equity > 0:
+    equity_parts = _latest_aligned(rows.get("equity capital"), rows.get("reserves"))
+    if equity_parts is not None:
+        out["shareholders_equity"] = sum(equity_parts) * RUPEES_PER_CRORE
+    aligned = _latest_aligned(
+        borrowings_row, rows.get("equity capital"), rows.get("reserves")
+    )
+    if aligned is None:
+        return
+    borrowings, equity_capital, reserves = aligned
+    equity = equity_capital + reserves
+    if equity > 0:
         out["debt_to_equity"] = round(borrowings / equity, 3)
 
 
@@ -306,42 +382,62 @@ def _apply_profit_loss(
     headers: list[str],
     rows: dict[str, list[float | None]],
 ) -> None:
+    """Margins, interest coverage, tax rate, 3y CAGRs, latest fiscal year.
+
+    Latest-value metrics use the newest column (TTM when present), with
+    numerator and denominator always taken from that same column. CAGRs
+    drop TTM first so the 3-year window spans whole fiscal years.
+    """
     if not rows:
         return
 
     sales = rows.get("sales") or rows.get("revenue")
-    operating_profit = rows.get("operating profit")
-    interest = rows.get("interest")
     net_profit = rows.get("net profit")
-    tax_pct = rows.get("tax %")
-    expenses = rows.get("expenses")
 
-    latest_sales = _latest(sales)
-    latest_op = _latest(operating_profit)
-    latest_int = _latest(interest)
-    latest_np = _latest(net_profit)
-    latest_tax = _latest(tax_pct)
+    operating_margin = _pct_of(rows.get("operating profit"), sales)
+    if operating_margin is not None:
+        out["operating_margin"] = operating_margin
+    net_margin = _pct_of(net_profit, sales)
+    if net_margin is not None:
+        out["net_margin"] = net_margin
+    expense_ratio = _pct_of(rows.get("expenses"), sales)
+    if expense_ratio is not None:
+        out["cogs_to_revenue"] = expense_ratio
 
-    if latest_op is not None and latest_int is not None and latest_int > 0:
-        out["interest_coverage"] = round(latest_op / latest_int, 2)
+    # Interest coverage on CORE operating EBIT — (operating profit −
+    # depreciation) / interest — the same definition as the yfinance path
+    # (Operating Income / interest expense). Screener's operating profit
+    # alone is pre-depreciation and flatters D&A-heavy businesses; PBT
+    # includes "other income", where one-off gains land (TMPV's FY26
+    # demerger gain turned 5.7× into 27×). A negative value is kept: a
+    # core operating loss is known-bad coverage, not missing data.
+    aligned = _latest_aligned(
+        rows.get("operating profit"), rows.get("depreciation"), rows.get("interest")
+    )
+    if aligned is not None:
+        operating_profit, depreciation, interest = aligned
+        if interest > 0:
+            core_ebit = operating_profit - depreciation
+            out["interest_coverage"] = round(core_ebit / interest, 2)
 
-    if latest_sales is not None and latest_sales > 0:
-        if latest_op is not None:
-            out["operating_margin"] = round(latest_op / latest_sales * 100, 2)
-        if latest_np is not None:
-            out["net_margin"] = round(latest_np / latest_sales * 100, 2)
-        if expenses:
-            latest_exp = _latest(expenses)
-            if latest_exp is not None:
-                out.setdefault(
-                    "cogs_to_revenue",
-                    round(latest_exp / latest_sales * 100, 2),
-                )
-
+    latest_tax = _latest(rows.get("tax %"))
     if latest_tax is not None and 0 <= latest_tax <= 100:
         out["tax_rate"] = latest_tax
 
-    # CAGRs: drop TTM column first so the 3y window uses actual fiscal years.
+    annual = _annual_headers(headers)
+    if annual:
+        period = _screener_month_to_iso(annual[-1])
+        if period:
+            out["latest_annual_period"] = period
+        # The latest fiscal year's profit, never TTM: valuation pairs it with
+        # that same year's EPS to get the share count.
+        annual_profit = _value_at_label(headers, net_profit, annual[-1])
+        if annual_profit is not None:
+            out["net_income"] = annual_profit * RUPEES_PER_CRORE
+    eps_history = _annual_eps(annual, _drop_ttm(headers, rows.get("eps in rs")))
+    if eps_history:
+        out["eps_history"] = eps_history
+
     cagr = _screener_cagr(_drop_ttm(headers, sales), years=3)
     if cagr is not None:
         out["rev_3y_cagr"] = cagr
@@ -350,26 +446,78 @@ def _apply_profit_loss(
         out["pat_3y_cagr"] = cagr
 
 
+def _annual_eps(
+    annual_headers: list[str], eps_row: list[float | None]
+) -> dict[str, float]:
+    """{fiscal-year end (ISO): EPS} — screener's EPS row is already per share, in ₹."""
+    history: dict[str, float] = {}
+    for header, eps in zip(annual_headers, eps_row):
+        period = _screener_month_to_iso(header)
+        if period is not None and eps is not None:
+            history[period] = eps
+    return history
+
+
+def _pct_of(
+    part: list[float | None] | None, whole: list[float | None] | None
+) -> float | None:
+    """`part / whole × 100` from the newest column where both exist."""
+    aligned = _latest_aligned(part, whole)
+    if aligned is None:
+        return None
+    numerator, denominator = aligned
+    if denominator <= 0:
+        return None
+    return round(numerator / denominator * 100, 2)
+
+
 def _apply_cash_flow(
     out: SnapshotFields,
+    cf_headers: list[str],
     cf_rows: dict[str, list[float | None]],
     pl_headers: list[str],
     pl_rows: dict[str, list[float | None]],
 ) -> None:
+    """OCF/PAT and FCF/PAT, each against net profit of the SAME fiscal year.
+
+    Matching by column label (not "latest of each table") matters right
+    after results season, when the P&L can already show a fiscal year the
+    cash-flow table hasn't caught up with.
+    """
     if not cf_rows:
         return
-    ocf = _latest(cf_rows.get("cash from operating activity"))
-    fcf = _latest(cf_rows.get("free cash flow"))
-
-    # Compare against the latest *annual* net profit, not TTM — cash-flow
-    # rows are annual, so mixing periods would distort OCF/PAT and FCF/PAT.
+    annual_headers = _annual_headers(pl_headers)
     annual_np = _drop_ttm(pl_headers, pl_rows.get("net profit"))
-    net_profit = _latest(annual_np)
 
-    if ocf is not None and net_profit is not None and net_profit > 0:
-        out["ocf_to_pat"] = round(ocf / net_profit, 3)
-    if fcf is not None and net_profit is not None and net_profit > 0:
-        out["fcf_to_pat"] = round(fcf / net_profit, 3)
+    ocf = _cash_to_profit(
+        cf_headers, cf_rows.get("cash from operating activity"), annual_headers, annual_np
+    )
+    if ocf is not None:
+        out["ocf_to_pat"] = ocf
+    fcf = _cash_to_profit(
+        cf_headers, cf_rows.get("free cash flow"), annual_headers, annual_np
+    )
+    if fcf is not None:
+        out["fcf_to_pat"] = fcf
+    latest_fcf = _latest_with_label(cf_headers, cf_rows.get("free cash flow"))
+    if latest_fcf is not None:
+        out["free_cash_flow"] = latest_fcf[1] * RUPEES_PER_CRORE
+
+
+def _cash_to_profit(
+    cf_headers: list[str],
+    cash_row: list[float | None] | None,
+    pl_headers: list[str],
+    net_profit_row: list[float | None],
+) -> float | None:
+    latest = _latest_with_label(cf_headers, cash_row)
+    if latest is None:
+        return None
+    label, cash = latest
+    profit = _value_at_label(pl_headers, net_profit_row, label)
+    if profit is None or profit <= 0:
+        return None
+    return round(cash / profit, 3)
 
 
 def _apply_ratios(
@@ -392,62 +540,111 @@ def _apply_ratios(
         out["cash_conversion_cycle_days"] = ccc
 
 
-def _apply_quarters(tree: "HTMLParser", out: SnapshotFields) -> None:
-    headers, rows = _parse_section(tree, "quarters")
+def _apply_quarters(
+    out: SnapshotFields,
+    headers: list[str],
+    rows: dict[str, list[float | None]],
+) -> None:
+    """Quarterly revenue + PAT (newest-first) with date-matched YoY growth.
+
+    A quarter is kept only when every available series has a value for
+    it, so `quarterly_revenue[i]`, `quarterly_pat[i]` and
+    `quarterly_dates[i]` always describe the same quarter.
+    """
     sales = rows.get("sales") or rows.get("revenue")
     net_profit = rows.get("net profit")
     if not sales and not net_profit:
         return
 
-    # Screener publishes in crores, yfinance in rupees. Normalise both
-    # upstream paths to rupees so downstream display code (which divides
-    # by 1e7 for Cr) works identically regardless of which source won.
-    def cr_to_inr(vals: list[float | None]) -> list[float]:
-        return [(v * 1e7) for v in vals if v is not None]
+    revenue: list[float] = []
+    pat: list[float] = []
+    dates: list[str] = []
+    for i, header in enumerate(headers):
+        quarter_end = _screener_month_to_iso(header)
+        if quarter_end is None:
+            continue
+        sale = _cell(sales, i)
+        profit = _cell(net_profit, i)
+        if (sales and sale is None) or (net_profit and profit is None):
+            continue
+        dates.append(quarter_end)
+        if sale is not None:
+            revenue.append(sale * RUPEES_PER_CRORE)
+        if profit is not None:
+            pat.append(profit * RUPEES_PER_CRORE)
 
-    # Oldest → newest in screener, we want most-recent-first.
-    if sales:
-        out["quarterly_revenue"] = list(reversed(cr_to_inr(sales)))
-    if net_profit:
-        out["quarterly_pat"] = list(reversed(cr_to_inr(net_profit)))
+    # Screener lists oldest → newest; the snapshot stores newest-first.
+    revenue.reverse()
+    pat.reverse()
+    dates.reverse()
 
-    if headers:
-        iso_dates = [d for d in (_screener_month_to_iso(h) for h in headers) if d]
-        if iso_dates:
-            n = max(
-                len(out.get("quarterly_revenue", [])),
-                len(out.get("quarterly_pat", [])),
-            )
-            out["quarterly_dates"] = list(reversed(iso_dates))[:n]
+    if dates:
+        out["quarterly_dates"] = dates
+    if revenue:
+        out["quarterly_revenue"] = revenue
+        growth = latest_yoy_growth(revenue, dates)
+        if growth is not None:
+            out["latest_yoy_revenue_growth"] = growth
+    if pat:
+        out["quarterly_pat"] = pat
+        growth = latest_yoy_growth(pat, dates)
+        if growth is not None:
+            out["latest_yoy_pat_growth"] = growth
 
-    rev = out.get("quarterly_revenue") or []
-    if len(rev) >= 5 and rev[4] > 0:
-        out["latest_yoy_revenue_growth"] = round(
-            (rev[0] - rev[4]) / rev[4] * 100, 2
-        )
-    pat = out.get("quarterly_pat") or []
-    if len(pat) >= 5 and pat[4] > 0:
-        out["latest_yoy_pat_growth"] = round(
-            (pat[0] - pat[4]) / pat[4] * 100, 2
-        )
+
+def _cell(row: list[float | None] | None, i: int) -> float | None:
+    return row[i] if row and i < len(row) else None
+
+
+def _apply_asset_quality(
+    out: SnapshotFields,
+    q_rows: dict[str, list[float | None]],
+) -> None:
+    """Bank asset quality from the quarterly table's NPA rows.
+
+    Screener's bank quarterly results carry `Gross NPA %` and `Net NPA %`
+    rows (verified on HDFCBANK, 2026-11-08). Industrials have neither, so
+    this is a no-op for them.
+    """
+    gross, gross_delta = _latest_and_yoy_delta(q_rows.get("gross npa %"))
+    net, net_delta = _latest_and_yoy_delta(q_rows.get("net npa %"))
+    if gross is not None:
+        out["gross_npa_pct"] = gross
+        if gross_delta is not None:
+            out["gross_npa_delta_1y_pct_points"] = gross_delta
+    if net is not None:
+        out["net_npa_pct"] = net
+        if net_delta is not None:
+            out["net_npa_delta_1y_pct_points"] = net_delta
 
 
 def _apply_derived(
     out: SnapshotFields,
+    bs_headers: list[str],
     bs_rows: dict[str, list[float | None]],
     pl_headers: list[str],
     pl_rows: dict[str, list[float | None]],
 ) -> None:
-    """Cross-section derivations that need both balance sheet and P&L."""
-    total_assets = _latest(bs_rows.get("total assets"))
-    annual_np = _drop_ttm(pl_headers, pl_rows.get("net profit"))
-    latest_np = _latest(annual_np)
-    if total_assets is not None and latest_np is not None and total_assets > 0:
-        out["roa"] = round(latest_np / total_assets * 100, 2)
+    """ROA = latest annual net profit / total assets at that same year-end.
+
+    The balance sheet often carries a newer half-year column (e.g. "Sep
+    2025"), so "latest of each table" would divide FY profit by mid-year
+    assets. Matching on the fiscal-year label avoids that.
+    """
+    latest = _latest_with_label(
+        _annual_headers(pl_headers), _drop_ttm(pl_headers, pl_rows.get("net profit"))
+    )
+    if latest is None:
+        return
+    label, net_profit = latest
+    total_assets = _value_at_label(bs_headers, bs_rows.get("total assets"), label)
+    if total_assets is not None and total_assets > 0:
+        out["roa"] = round(net_profit / total_assets * 100, 2)
 
 
 def _apply_bank_metrics(
     out: SnapshotFields,
+    bs_headers: list[str],
     bs_rows: dict[str, list[float | None]],
     pl_headers: list[str],
     pl_rows: dict[str, list[float | None]],
@@ -474,59 +671,89 @@ def _apply_bank_metrics(
 
     out["is_bank"] = True
 
-    latest_revenue = _latest(_drop_ttm(pl_headers, pl_rows.get("revenue")))
-    latest_interest = _latest(_drop_ttm(pl_headers, pl_rows.get("interest")))
-    latest_other = _latest(_drop_ttm(pl_headers, pl_rows.get("other income")))
-
-    total_assets = _latest(bs_rows.get("total assets"))
     deposits = _latest(bs_rows.get("deposits"))
     borrowings = _latest(
         bs_rows.get("borrowings")
         or bs_rows.get("borrowing")
         or bs_rows.get("total debt")
     )
-    investments = _latest(bs_rows.get("investments"))
-    fixed_assets = _latest(bs_rows.get("fixed assets"))
-
     if deposits is not None:
-        out["deposits_cr"] = round(deposits, 0)
+        out["deposits"] = deposits * RUPEES_PER_CRORE
     if borrowings is not None:
-        out["borrowings_cr"] = round(borrowings, 0)
+        out["borrowings"] = borrowings * RUPEES_PER_CRORE
 
-    nii: float | None = None
-    if latest_revenue is not None and latest_interest is not None:
-        nii = latest_revenue - latest_interest
-        out["net_interest_income_cr"] = round(nii, 0)
+    _apply_bank_spread(out, bs_headers, bs_rows, pl_headers, pl_rows)
+    _apply_credit_deposit_ratio(out, bs_rows)
+
+
+def _apply_bank_spread(
+    out: SnapshotFields,
+    bs_headers: list[str],
+    bs_rows: dict[str, list[float | None]],
+    pl_headers: list[str],
+    pl_rows: dict[str, list[float | None]],
+) -> None:
+    """NII, NIM, and non-interest income for the latest full fiscal year."""
+    annual_headers = _annual_headers(pl_headers)
+    latest = _latest_with_label(
+        annual_headers, _drop_ttm(pl_headers, pl_rows.get("revenue"))
+    )
+    if latest is None:
+        return
+    label, interest_earned = latest
+    interest_expended = _value_at_label(
+        annual_headers, _drop_ttm(pl_headers, pl_rows.get("interest")), label
+    )
+    if interest_expended is None:
+        return
+    nii = interest_earned - interest_expended
+    out["net_interest_income"] = nii * RUPEES_PER_CRORE
 
     # NIM uses Total Assets as the denominator — a real bank analyst uses
     # average interest-earning assets, but screener doesn't split those.
-    if nii is not None and total_assets is not None and total_assets > 0:
+    total_assets = _value_at_label(bs_headers, bs_rows.get("total assets"), label)
+    if total_assets is not None and total_assets > 0:
         out["nim"] = round(nii / total_assets * 100, 2)
 
     # Non-interest income: only meaningful for banks where fees / treasury
     # are a real franchise axis. NBFCs book fee income inside the "revenue"
     # row, so screener's "other income" is essentially a rounding line
     # (often negligible or negative). Skip the ratio when structurally absent.
-    if latest_other is not None and nii is not None and nii > 0:
-        out["non_interest_income_cr"] = round(latest_other, 0)
-        if (nii + latest_other) > 0 and abs(latest_other) / nii >= 0.02:
-            out["non_interest_income_ratio"] = round(
-                latest_other / (nii + latest_other) * 100, 2
-            )
+    other = _value_at_label(
+        annual_headers, _drop_ttm(pl_headers, pl_rows.get("other income")), label
+    )
+    if other is not None and nii > 0:
+        out["non_interest_income"] = other * RUPEES_PER_CRORE
+        if (nii + other) > 0 and abs(other) / nii >= 0.02:
+            out["non_interest_income_ratio"] = round(other / (nii + other) * 100, 2)
 
-    # Credit-Deposit ratio ≈ (Total Assets − Investments − Fixed Assets) /
-    # Deposits. Not surgical (includes some non-loan assets) but close
-    # enough to flag the >100% CD ratio stress which is what matters.
-    if (
-        total_assets is not None
-        and investments is not None
-        and deposits is not None
-        and deposits > 0
-    ):
-        net_loans = total_assets - investments
-        if fixed_assets is not None:
-            net_loans -= fixed_assets
-        out["credit_deposit_ratio"] = round(net_loans / deposits * 100, 1)
+
+def _apply_credit_deposit_ratio(
+    out: SnapshotFields, bs_rows: dict[str, list[float | None]]
+) -> None:
+    """CD ratio ≈ (Total Assets − Investments − Fixed Assets) / Deposits.
+
+    Not surgical (includes some non-loan assets such as cash) but close
+    enough to flag the >100% CD-ratio stress that matters. All inputs come
+    from the same balance-sheet column.
+    """
+    total_assets = bs_rows.get("total assets")
+    investments = bs_rows.get("investments")
+    deposits = bs_rows.get("deposits")
+    fixed_assets = bs_rows.get("fixed assets")
+
+    with_fixed = _latest_aligned(total_assets, investments, deposits, fixed_assets)
+    if with_fixed is not None:
+        assets, invested, deposit_base, fixed = with_fixed
+        net_loans = assets - invested - fixed
+    else:
+        without_fixed = _latest_aligned(total_assets, investments, deposits)
+        if without_fixed is None:
+            return
+        assets, invested, deposit_base = without_fixed
+        net_loans = assets - invested
+    if deposit_base > 0:
+        out["credit_deposit_ratio"] = round(net_loans / deposit_base * 100, 1)
 
 
 def _apply_multi_year_trends(
@@ -567,11 +794,13 @@ def _apply_multi_year_trends(
         if trend:
             out["operating_margin_annual_trend"] = trend
 
-    # Borrowings trajectory — is debt expanding or shrinking?
-    borrowings_series = (
-        bs_rows.get("borrowings")
-        or bs_rows.get("borrowing")
-        or bs_rows.get("total debt")
+    # Borrowings trajectory — is debt expanding or shrinking? Fiscal-year
+    # columns only: a trailing half-year balance sheet ("Sep 2025") would
+    # turn the "3-year" change into a 2.5-year one.
+    borrowings_series = _fiscal_year_values(
+        bs_headers,
+        bs_rows.get("borrowings") or bs_rows.get("borrowing") or bs_rows.get("total debt"),
+        fiscal_years=set(_annual_headers(pl_headers)),
     )
     if borrowings_series:
         clean = [v for v in borrowings_series if v is not None]
@@ -585,41 +814,42 @@ def _apply_multi_year_trends(
                         (latest - three_years_ago) / three_years_ago * 100, 1
                     )
                 elif latest > 0:
-                    out["borrowings_delta_3y_pct"] = float("inf")
+                    # A % change from zero is undefined — flag it instead.
+                    out["borrowings_went_from_zero"] = True
                 else:
                     out["borrowings_delta_3y_pct"] = 0.0
 
 
-def _apply_shareholding_trend(tree: "HTMLParser", out: SnapshotFields) -> None:
-    """Parse the quarterly shareholding pattern table.
+def _fiscal_year_values(
+    headers: list[str],
+    values: list[float | None] | None,
+    *,
+    fiscal_years: set[str],
+) -> list[float | None]:
+    """Values under fiscal-year column labels only (all of them if unknown)."""
+    if not values:
+        return []
+    if not fiscal_years:
+        return values
+    return [v for header, v in zip(headers, values) if header in fiscal_years]
 
-    Screener's `#shareholding > #quarterly-shp > table` has up to 12
-    quarters of Promoter / FII / DII / Public / Government /
-    Number-of-shareholders rows. The YoY deltas in these lines are the
-    cleanest "smart money vs domestic money" tape we get from the
-    standard screener page — watch for FII exit + DII accumulation
-    (classic re-rating warning) and promoter buying/selling (insider
-    conviction signal).
+
+def _parse_shareholding_table(
+    tree: "HTMLParser",
+) -> tuple[list[str], dict[str, list[float | None]]]:
+    """Parse `#shareholding > #quarterly-shp > table` → (headers, rows).
+
+    Same positional contract as `_parse_section`. Cells are "N.NN%" except
+    the number-of-shareholders row, which is a plain comma-separated count.
     """
     sh_el = tree.css_first("#shareholding")
-    if sh_el is None:
-        return
-    q_el = sh_el.css_first("#quarterly-shp")
-    if q_el is None:
-        return
-    tbl = q_el.css_first("table")
+    q_el = sh_el.css_first("#quarterly-shp") if sh_el is not None else None
+    tbl = q_el.css_first("table") if q_el is not None else None
     if tbl is None:
-        return
+        return [], {}
 
     raw_headers = [th.text(strip=True) for th in tbl.css("thead th")]
     headers = [h for h in raw_headers if h]
-    if not headers:
-        return
-
-    iso_dates: list[str] = []
-    for h in headers:
-        iso = _screener_month_to_iso(h)
-        iso_dates.append(iso if iso else h)
 
     rows: dict[str, list[float | None]] = {}
     for row in tbl.css("tbody tr"):
@@ -636,14 +866,35 @@ def _apply_shareholding_trend(tree: "HTMLParser", out: SnapshotFields) -> None:
             if not text or text == "--":
                 values.append(None)
                 continue
-            # Shareholding cells are "N.NN%"; number of shareholders is a
-            # raw comma-separated integer.
             parsed = _parse_pct(text)
             if parsed is None:
                 parsed = _parse_float(text)
             values.append(parsed)
         if any(v is not None for v in values):
             rows[label] = values
+    return headers, rows
+
+
+def _apply_shareholding_trend(
+    out: SnapshotFields,
+    headers: list[str],
+    rows: dict[str, list[float | None]],
+) -> None:
+    """Derive the quarterly shareholding trend + 1y deltas.
+
+    Up to 12 quarters of Promoter / FII / DII / Public / Government /
+    Number-of-shareholders rows. The YoY deltas are the cleanest "smart
+    money vs domestic money" tape the standard screener page offers —
+    watch for FII exit + DII accumulation (classic re-rating warning) and
+    promoter buying/selling (insider conviction signal).
+    """
+    if not headers:
+        return
+
+    iso_dates: list[str] = []
+    for h in headers:
+        iso = _screener_month_to_iso(h)
+        iso_dates.append(iso if iso else h)
 
     def _reverse_clean(series: list[float | None] | None) -> list[float]:
         if not series:
@@ -654,7 +905,7 @@ def _apply_shareholding_trend(tree: "HTMLParser", out: SnapshotFields) -> None:
     if iso_dates:
         out["shareholding_dates"] = list(reversed(iso_dates))
 
-    out["promoter_holding_trend"] = _reverse_clean(rows.get("promoters"))
+    out["insider_holding_trend"] = _reverse_clean(rows.get("promoters"))
     out["fii_holding_trend"] = _reverse_clean(rows.get("fiis"))
     out["dii_holding_trend"] = _reverse_clean(rows.get("diis"))
     out["public_holding_trend"] = _reverse_clean(rows.get("public"))
@@ -674,8 +925,8 @@ def _apply_shareholding_trend(tree: "HTMLParser", out: SnapshotFields) -> None:
 
     out["fii_delta_1y_pct_points"] = _delta_1y_pts(out["fii_holding_trend"])
     out["dii_delta_1y_pct_points"] = _delta_1y_pts(out["dii_holding_trend"])
-    out["promoter_delta_1y_pct_points"] = _delta_1y_pts(
-        out["promoter_holding_trend"]
+    out["insider_delta_1y_pct_points"] = _delta_1y_pts(
+        out["insider_holding_trend"]
     )
     out["num_shareholders_delta_1y_pct"] = _delta_1y_pct(
         out["num_shareholders_trend"]
@@ -691,7 +942,8 @@ def _apply_raw_dumps(
     bs_headers: list[str], bs_rows: dict[str, list[float | None]],
     cf_headers: list[str], cf_rows: dict[str, list[float | None]],
     r_headers: list[str], r_rows: dict[str, list[float | None]],
-    tree: "HTMLParser",
+    q_headers: list[str], q_rows: dict[str, list[float | None]],
+    sh_headers: list[str], sh_rows: dict[str, list[float | None]],
 ) -> None:
     """Store every parsed row verbatim so future questions don't re-scrape.
 
@@ -707,46 +959,11 @@ def _apply_raw_dumps(
     out["raw_cash_flow_headers"] = cf_headers
     out["raw_ratios"] = r_rows
     out["raw_ratios_headers"] = r_headers
-
-    q_headers, q_rows = _parse_section(tree, "quarters")
     out["raw_quarters"] = q_rows
     out["raw_quarters_headers"] = q_headers
-
-    sh_el = tree.css_first("#shareholding")
-    if sh_el is None:
-        return
-    q_sh = sh_el.css_first("#quarterly-shp")
-    if q_sh is None:
-        return
-    tbl = q_sh.css_first("table")
-    if tbl is None:
-        return
-
-    raw_headers = [th.text(strip=True) for th in tbl.css("thead th")]
-    headers = [h for h in raw_headers if h]
-    out["raw_shareholding_headers"] = headers
-    rows: dict[str, list[float | None]] = {}
-    for row in tbl.css("tbody tr"):
-        cells = row.css("td")
-        if not cells:
-            continue
-        raw_label = cells[0].text(strip=True)
-        if not raw_label:
-            continue
-        label = raw_label.lower().rstrip("+").strip()
-        values: list[float | None] = []
-        for c in cells[1:]:
-            text = c.text(strip=True)
-            if not text or text == "--":
-                values.append(None)
-                continue
-            v = _parse_pct(text)
-            if v is None:
-                v = _parse_float(text)
-            values.append(v)
-        if any(v is not None for v in values):
-            rows[label] = values
-    out["raw_shareholding_quarterly"] = rows
+    if sh_headers or sh_rows:
+        out["raw_shareholding_headers"] = sh_headers
+        out["raw_shareholding_quarterly"] = sh_rows
 
 
 def _apply_peers(tree: "HTMLParser", out: SnapshotFields) -> None:

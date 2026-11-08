@@ -1,6 +1,7 @@
 """`BalanceSheetSnapshot` — the canonical output shape of the fundamentals
-fetch + the sector-detection helper (`is_bank_snapshot`) that routes a
-snapshot to the industrial or bank rubric downstream.
+fetch + the rubric router (`is_bank_snapshot`) that sends a snapshot to
+the industrial or bank rubric downstream, + `DataConflict`, the record of
+two sources disagreeing about one field.
 
 Everything in this module is pure data: no I/O, no parsing, no fetching.
 """
@@ -10,6 +11,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from typing import TypedDict
+
+from data_sources.fx_source import major_unit
 
 # Public row aliases for the nested JSON blobs the snapshot carries.
 # Both are deliberately loose — screener's peer table and documents
@@ -34,32 +37,83 @@ SCORED_FIELDS: tuple[str, ...] = (
     "pat_3y_cagr",
     "ocf_to_pat",
     "fcf_to_pat",
-    "promoter_holding",
+    "insider_holding",
     "pledge_pct",
 )
 
 
-# ── Sector routing ───────────────────────────────────────────────────────────
+# ── Rubric routing (structure first, sector strings second) ──────────────────
 
-# Primary signal is `snap.is_bank` (set by the screener parser when the P&L
-# has the bank row shape). These strings are the fallback for snapshots where
-# that flag didn't fire — e.g. yfinance-only fetches or when screener failed.
-_BANK_SECTOR_KEYWORDS: tuple[str, ...] = (
+# Sector / industry strings that mark a company as *some kind* of financial.
+# On their own they are not enough to pick the bank rubric — see below.
+_FINANCIAL_SECTOR_KEYWORDS: tuple[str, ...] = (
     "bank",
     "nbfc",
     "insurance",
     "asset management",
     "financial services",
     "capital markets",
+    "credit services",
+    "mortgage",
 )
 
 
 def is_bank_snapshot(snap: "BalanceSheetSnapshot") -> bool:
-    """Shared sector check used by scorer, CLI, and report layers."""
+    """Should this snapshot be scored on the bank rubric?
+
+    Shared by the scorer, CLI, and report layers.
+
+    1. `snap.is_bank` — screener saw the bank / NBFC P&L shape (interest
+       income, interest expense, financing profit or deposits). Authoritative.
+    2. A financial sector string alone is NOT enough. Payment networks,
+       exchanges, asset managers, brokers and rating agencies all carry
+       Yahoo's "Financial Services" sector but run ordinary asset-light
+       P&Ls and publish balance sheets with a current-assets /
+       current-liabilities split — so a populated `current_ratio` means
+       "score on the industrial rubric".
+    3. Financial sector + no current-ratio split (Yahoo's bank / insurer
+       statement template, or no yfinance data at all) → bank rubric.
+    """
     if snap.is_bank:
         return True
     haystack = f"{snap.sector or ''} {snap.industry or ''}".lower()
-    return any(kw in haystack for kw in _BANK_SECTOR_KEYWORDS)
+    if not any(kw in haystack for kw in _FINANCIAL_SECTOR_KEYWORDS):
+        return False
+    return snap.current_ratio is None
+
+
+# ── Source disagreement record ───────────────────────────────────────────────
+
+
+@dataclass(slots=True)
+class DataConflict:
+    """Two adapters reported materially different values for one field.
+
+    The merge still picks `chosen_source` by the normal precedence rules;
+    this record exists so the disagreement is visible in the report
+    instead of being resolved silently.
+    """
+
+    field_name: str
+    chosen_source: str
+    chosen_value: float
+    other_source: str
+    other_value: float
+    rel_diff_pct: float
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> "DataConflict | None":
+        try:
+            return cls(
+                field_name=str(data["field_name"]),
+                chosen_source=str(data["chosen_source"]),
+                chosen_value=float(data["chosen_value"]),  # type: ignore[arg-type]
+                other_source=str(data["other_source"]),
+                other_value=float(data["other_value"]),  # type: ignore[arg-type]
+                rel_diff_pct=float(data["rel_diff_pct"]),  # type: ignore[arg-type]
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
 
 
 # ── The snapshot itself ──────────────────────────────────────────────────────
@@ -90,18 +144,38 @@ class BalanceSheetSnapshot:
     ocf_to_pat: float | None = None
     fcf_to_pat: float | None = None
 
-    # ── Scored: promoter ─────────────────────────────────────────────────────
-    promoter_holding: float | None = None
+    # ── Scored: ownership ────────────────────────────────────────────────────
+    # % held by insiders: the promoter group for Indian listings (screener),
+    # officers / founders / controlling parents elsewhere (Yahoo).
+    insider_holding: float | None = None
     pledge_pct: float | None = None
 
-    # ── Price context ────────────────────────────────────────────────────────
+    # ── Listing identity ─────────────────────────────────────────────────────
+    exchange: str = ""  # e.g. "NasdaqGS", "NSE", "HKSE"
+    currency: str = ""  # trading currency: prices, market cap, targets
+    financial_currency: str = ""  # reporting currency: every statement amount
+
+    # ── Price context (trading currency) ─────────────────────────────────────
     current_price: float | None = None
     high_52w: float | None = None
     low_52w: float | None = None
-    market_cap_cr: float | None = None
+    market_cap: float | None = None  # absolute amount, not crores / millions
     pe_ratio: float | None = None
     book_value_per_share: float | None = None
     dividend_yield: float | None = None
+
+    # ── Valuation inputs (reporting currency) ───────────────────────────────
+    eps_history: dict[str, float] = field(default_factory=dict)  # FY end (ISO) → diluted EPS
+    net_income: float | None = None  # latest full fiscal year, absolute
+    free_cash_flow: float | None = None  # latest full fiscal year, absolute
+    shareholders_equity: float | None = None  # latest balance sheet, absolute
+
+    # ── Valuation ratios (set by valuation.apply_valuation) ──────────────────
+    # Only computed when price and statements share a currency.
+    earnings_yield: float | None = None  # %, 100 / P/E
+    fcf_yield: float | None = None  # %, free cash flow per share / price
+    price_to_book: float | None = None
+    pe_history: list[float] = field(default_factory=list)  # P/E at past FY ends, oldest first
 
     # ── Financial profile: margins ───────────────────────────────────────────
     gross_margin: float | None = None
@@ -126,22 +200,29 @@ class BalanceSheetSnapshot:
     # ── Bank-specific metrics (populated only for banks / NBFCs) ─────────────
     # NIM = (Interest Income − Interest Expense) / Total Assets. Closer to
     # reality than (NII / average interest-earning assets) but uses only what
-    # screener exposes so no cross-period mismatch.
+    # screener exposes so no cross-period mismatch. Amounts are absolute, in
+    # the reporting currency.
     nim: float | None = None  # %
-    net_interest_income_cr: float | None = None  # ₹ Cr (annual, latest FY)
-    non_interest_income_cr: float | None = None  # ₹ Cr — fee + treasury
+    net_interest_income: float | None = None  # latest full fiscal year
+    non_interest_income: float | None = None  # fee + treasury
     non_interest_income_ratio: float | None = None  # % of total income
-    deposits_cr: float | None = None
-    borrowings_cr: float | None = None
+    deposits: float | None = None
+    borrowings: float | None = None
     credit_deposit_ratio: float | None = None
     is_bank: bool = False
+    # Asset quality — latest quarter, from screener's bank quarterly table.
+    gross_npa_pct: float | None = None  # % of gross advances
+    net_npa_pct: float | None = None  # % of net advances
+    gross_npa_delta_1y_pct_points: float | None = None  # + = deteriorating
+    net_npa_delta_1y_pct_points: float | None = None
 
     # ── Shareholding trend (quarterly, newest-first) ─────────────────────────
     # Captures the smart-money / domestic-money tug of war that often
     # explains why a name is trending up or down before the fundamentals
     # catch up. All series are aligned with `shareholding_dates`.
     shareholding_dates: list[str] = field(default_factory=list)
-    promoter_holding_trend: list[float] = field(default_factory=list)  # %
+    insider_holding_trend: list[float] = field(default_factory=list)  # %
+    institutional_holding: float | None = None  # latest %, all institutions
     fii_holding_trend: list[float] = field(default_factory=list)  # %
     dii_holding_trend: list[float] = field(default_factory=list)  # %
     public_holding_trend: list[float] = field(default_factory=list)  # %
@@ -149,7 +230,7 @@ class BalanceSheetSnapshot:
     # 1-year deltas (most-recent − 4 quarters back).
     fii_delta_1y_pct_points: float | None = None
     dii_delta_1y_pct_points: float | None = None
-    promoter_delta_1y_pct_points: float | None = None
+    insider_delta_1y_pct_points: float | None = None
     num_shareholders_delta_1y_pct: float | None = None
 
     # ── Multi-year ratio / P&L trend (oldest→newest, annual) ─────────────────
@@ -162,6 +243,9 @@ class BalanceSheetSnapshot:
     sales_annual_trend: list[float] = field(default_factory=list)
     borrowings_annual_trend: list[float] = field(default_factory=list)
     borrowings_delta_3y_pct: float | None = None  # + = debt grew, − = deleveraged
+    # Debt appeared from a zero base, so a % change is undefined. Replaces
+    # the old float('inf') sentinel, which isn't valid JSON.
+    borrowings_went_from_zero: bool = False
 
     # ── Full raw screener dump (everything we parsed, keyed by row label) ────
     # Each section is {row_label: [v0, ..., vN]} oldest→newest with None gaps.
@@ -211,7 +295,16 @@ class BalanceSheetSnapshot:
     sector: str = ""
     industry: str = ""
     source: str = "unknown"
+    # ISO date of the latest full fiscal year behind the annual ratios.
+    latest_annual_period: str = ""
+    # Every populated field → the adapter whose value the merge kept.
     field_sources: dict[str, str] = field(default_factory=dict)
+    data_conflicts: list[DataConflict] = field(default_factory=list)
+
+    @property
+    def market_cap_currency(self) -> str:
+        """Market cap is in the major unit even for pence-quoted listings."""
+        return major_unit(self.currency)[0]
 
     @property
     def data_completeness_pct(self) -> float:
@@ -229,6 +322,18 @@ class BalanceSheetSnapshot:
         }
         kwargs.setdefault("ticker", "")
         kwargs.setdefault("as_of_date", date.today().isoformat())
+        raw_conflicts = kwargs.get("data_conflicts")
+        conflicts: list[DataConflict] = []
+        if isinstance(raw_conflicts, list):
+            for row in raw_conflicts:
+                parsed = (
+                    row
+                    if isinstance(row, DataConflict)
+                    else DataConflict.from_dict(row) if isinstance(row, dict) else None
+                )
+                if parsed is not None:
+                    conflicts.append(parsed)
+        kwargs["data_conflicts"] = conflicts
         return cls(**kwargs)  # type: ignore[arg-type]
 
 
@@ -279,18 +384,33 @@ class SnapshotFields(TypedDict, total=False):
     ocf_to_pat: float | None
     fcf_to_pat: float | None
 
-    # Scored: promoter
-    promoter_holding: float | None
+    # Scored: ownership
+    insider_holding: float | None
     pledge_pct: float | None
+
+    # Listing identity
+    exchange: str
+    currency: str
+    financial_currency: str
 
     # Price context
     current_price: float | None
     high_52w: float | None
     low_52w: float | None
-    market_cap_cr: float | None
+    market_cap: float | None
     pe_ratio: float | None
     book_value_per_share: float | None
     dividend_yield: float | None
+
+    # Valuation inputs + ratios
+    eps_history: dict[str, float]
+    net_income: float | None
+    free_cash_flow: float | None
+    shareholders_equity: float | None
+    earnings_yield: float | None
+    fcf_yield: float | None
+    price_to_book: float | None
+    pe_history: list[float]
 
     # Financial profile: margins
     gross_margin: float | None
@@ -314,24 +434,29 @@ class SnapshotFields(TypedDict, total=False):
 
     # Bank-specific metrics
     nim: float | None
-    net_interest_income_cr: float | None
-    non_interest_income_cr: float | None
+    net_interest_income: float | None
+    non_interest_income: float | None
     non_interest_income_ratio: float | None
-    deposits_cr: float | None
-    borrowings_cr: float | None
+    deposits: float | None
+    borrowings: float | None
     credit_deposit_ratio: float | None
     is_bank: bool
+    gross_npa_pct: float | None
+    net_npa_pct: float | None
+    gross_npa_delta_1y_pct_points: float | None
+    net_npa_delta_1y_pct_points: float | None
 
     # Shareholding trend
     shareholding_dates: list[str]
-    promoter_holding_trend: list[float]
+    insider_holding_trend: list[float]
+    institutional_holding: float | None
     fii_holding_trend: list[float]
     dii_holding_trend: list[float]
     public_holding_trend: list[float]
     num_shareholders_trend: list[float]
     fii_delta_1y_pct_points: float | None
     dii_delta_1y_pct_points: float | None
-    promoter_delta_1y_pct_points: float | None
+    insider_delta_1y_pct_points: float | None
     num_shareholders_delta_1y_pct: float | None
 
     # Multi-year ratio / P&L trend
@@ -341,6 +466,7 @@ class SnapshotFields(TypedDict, total=False):
     sales_annual_trend: list[float]
     borrowings_annual_trend: list[float]
     borrowings_delta_3y_pct: float | None
+    borrowings_went_from_zero: bool
 
     # Full raw screener dump
     raw_profit_loss: dict[str, list[float | None]]
@@ -384,4 +510,5 @@ class SnapshotFields(TypedDict, total=False):
     sector: str
     industry: str
     source: str
+    latest_annual_period: str
     field_sources: dict[str, str]

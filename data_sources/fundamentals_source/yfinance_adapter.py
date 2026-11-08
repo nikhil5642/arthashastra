@@ -1,11 +1,11 @@
-"""yfinance adapter — fills the gaps screener.in doesn't expose.
+"""yfinance adapter — the global baseline for every listed equity.
 
-yfinance is the *fallback* for Indian equities: screener wins for every
-ratio it provides (see `_SCREENER_WINS` in source.py), but yfinance
-covers the holes — daily price history for the dip detector, current /
-quick ratios (screener's aggregated balance sheet doesn't split current
-vs non-current), net debt / EBITDA, and the sector / industry strings
-plus the analyst bundle.
+Every security, on any exchange Yahoo covers (US, India, China, Hong
+Kong, Japan, Europe, …), gets its snapshot from here. For Indian
+listings screener.in adds depth and wins on the ratios it publishes
+(see `_SCREENER_WINS` in source.py); yfinance still supplies the daily
+price history, current / quick ratios, net debt / EBITDA, sector /
+industry, currencies, ownership percentages, and the analyst bundle.
 
 `.info` and `.fast_info` are rate-limited in 2026 so we stick to the
 DataFrame accessors (`.history`, `.balance_sheet`, `.income_stmt`,
@@ -19,40 +19,37 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, TypeVar
 
+from data_sources.fundamentals_source.primitives import latest_yoy_growth
 from data_sources.fundamentals_source.snapshot import SnapshotFields
 
 if TYPE_CHECKING:
     # Forward references — only the type checker sees these. No runtime
     # import cost because `from __future__ import annotations` makes every
     # type hint a string that's only resolved by mypy / pyright.
-    from pandas import DataFrame
+    from pandas import DataFrame, Series
     from yfinance import Ticker
 
 log = logging.getLogger(__name__)
 
 PriceRow = tuple[str, float]
+SplitRow = tuple[str, float]  # (ISO date, ratio) — 4.0 for a 4-for-1 split
 
 _T = TypeVar("_T")
 
-_NSE_SUFFIX = ".NS"
-_BSE_SUFFIX = ".BO"
-
+TRADING_DAYS_PER_YEAR = 252
 
 def _yf_symbol(raw: str) -> str:
-    """Format a bare ticker as a yfinance symbol ('RELIANCE' → 'RELIANCE.NS').
+    """Canonical tickers ARE Yahoo symbols ('MSFT', 'RELIANCE.NS', '0700.HK').
 
-    Kept private to this adapter — the `.NS` / `.BO` suffix convention is
-    a yfinance implementation detail and shouldn't leak upward into the
-    orchestrator layer. (Previously this lived in `fundamental_engine.
-    ticker` which created a layering violation: a low-level data source
-    shouldn't depend on the high-level engine package.)
+    No market is ever assumed: a bare symbol means the US listing, exactly
+    as on Yahoo. (This used to append '.NS' to everything, which silently
+    turned every non-Indian ticker into a 404.)
     """
-    t = raw.strip().upper()
-    if t.endswith(_NSE_SUFFIX) or t.endswith(_BSE_SUFFIX):
-        return t
-    return f"{t}{_NSE_SUFFIX}"
+    return raw.strip().upper()
 
 
 # ── Public entry point ───────────────────────────────────────────────────────
@@ -82,8 +79,12 @@ def _fetch_yfinance_sync(
         log.warning("yfinance Ticker() failed for %s: %s", ticker, e)
         return SnapshotFields(), []
 
+    # Ten years of closes: the last year feeds the 52-week range and the dip
+    # detector; the rest prices each past fiscal year-end for P/E history.
+    # Split-adjusted only (auto_adjust=False → "Close"): dividend adjustment
+    # would shrink every past price, and with it every past P/E.
     hist: "DataFrame | None" = _safe(
-        lambda: t.history(period="1y", auto_adjust=True),
+        lambda: t.history(period="10y", auto_adjust=False),
         label=f"history {ticker}",
     )
     bs: "DataFrame | None" = _safe(
@@ -103,6 +104,8 @@ def _fetch_yfinance_sync(
     price_history: list[PriceRow] = []
 
     _fill_price_context(out, price_history, hist)
+    _fill_annual_period(out, is_)
+    _fill_eps_history(out, is_)
     _fill_balance_sheet_derived(out, bs)
     _fill_income_statement_derived(out, is_, bs)
     _fill_cash_flow_derived(out, cf, is_)
@@ -112,6 +115,62 @@ def _fetch_yfinance_sync(
     _fill_info_metadata(out, t, ticker)
 
     return out, price_history
+
+
+# ── Long history for backtests ───────────────────────────────────────────────
+
+
+@dataclass(slots=True)
+class YahooHistory:
+    """Everything a backtest needs from Yahoo for one listing.
+
+    Two price series, both on today's share basis: `prices` is adjusted for
+    splits only (what valuation ratios divide by EPS), `total_return` also
+    folds dividends back in (what an investor actually earned).
+    """
+
+    income: "DataFrame | None"
+    balance: "DataFrame | None"
+    cashflow: "DataFrame | None"
+    prices: list[PriceRow] = field(default_factory=list)  # oldest first
+    total_return: list[PriceRow] = field(default_factory=list)  # oldest first
+    splits: list[SplitRow] = field(default_factory=list)  # oldest first
+    metadata: SnapshotFields = field(default_factory=SnapshotFields)
+
+
+async def fetch_history_bundle(ticker: str) -> YahooHistory:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _fetch_history_bundle_sync, ticker)
+
+
+def _fetch_history_bundle_sync(ticker: str) -> YahooHistory:
+    """Max price history + splits + annual statements + listing metadata."""
+    empty = YahooHistory(income=None, balance=None, cashflow=None)
+    try:
+        import yfinance as yf
+    except ImportError:
+        log.warning("yfinance not installed")
+        return empty
+    try:
+        t: "Ticker" = yf.Ticker(_yf_symbol(ticker))
+    except Exception as e:
+        log.warning("yfinance Ticker() failed for %s: %s", ticker, e)
+        return empty
+
+    hist: "DataFrame | None" = _safe(
+        lambda: t.history(period="max", auto_adjust=False), label=f"max history {ticker}"
+    )
+    metadata = SnapshotFields()
+    _fill_info_metadata(metadata, t, ticker)
+    return YahooHistory(
+        income=_safe(lambda: t.income_stmt, label=f"income_stmt {ticker}"),
+        balance=_safe(lambda: t.balance_sheet, label=f"balance_sheet {ticker}"),
+        cashflow=_safe(lambda: t.cashflow, label=f"cashflow {ticker}"),
+        prices=_column_rows(hist, "Close"),
+        total_return=_column_rows(hist, "Adj Close"),
+        splits=[(day, ratio) for day, ratio in _column_rows(hist, "Stock Splits") if ratio > 0],
+        metadata=metadata,
+    )
 
 
 # ── Per-section fillers (keep _fetch_yfinance_sync readable) ─────────────────
@@ -127,15 +186,55 @@ def _fill_price_context(
     closes = hist["Close"].dropna()
     if len(closes) == 0:
         return
+    last_year = hist.iloc[-TRADING_DAYS_PER_YEAR:]
     out["current_price"] = float(closes.iloc[-1])
-    out["high_52w"] = float(hist["High"].max())
-    out["low_52w"] = float(hist["Low"].min())
-    for ts, close in closes.items():
-        try:
-            date_str = ts.date().isoformat() if hasattr(ts, "date") else str(ts)[:10]
-            price_history.append((date_str, float(close)))
-        except Exception:
+    out["high_52w"] = float(last_year["High"].max())
+    out["low_52w"] = float(last_year["Low"].min())
+    price_history.extend(_column_rows(hist, "Close"))
+
+
+def _column_rows(hist: "DataFrame | None", column: str) -> list[PriceRow]:
+    """(ISO date, value) for every non-missing value of a history column."""
+    if hist is None or column not in hist.columns:
+        return []
+    rows: list[PriceRow] = []
+    for ts, value in hist[column].dropna().items():
+        day = ts.date().isoformat() if hasattr(ts, "date") else str(ts)[:10]
+        rows.append((day, float(value)))
+    return rows
+
+
+def _fill_annual_period(
+    out: SnapshotFields, is_: "DataFrame | None"
+) -> None:
+    """Date of the newest annual income-statement column (iloc[0])."""
+    if is_ is None:
+        return
+    try:
+        if is_.empty:
+            return
+        newest = is_.columns[0]
+    except (AttributeError, IndexError):
+        return
+    if hasattr(newest, "date"):
+        out["latest_annual_period"] = newest.date().isoformat()
+
+
+def _fill_eps_history(out: SnapshotFields, is_: "DataFrame | None") -> None:
+    """{fiscal-year end (ISO): diluted EPS} from the annual income statement."""
+    if is_ is None:
+        return
+    for name in ("Diluted EPS", "Basic EPS"):
+        if name not in is_.index:
             continue
+        history: dict[str, float] = {}
+        for column, value in is_.loc[name].items():
+            eps = _finite_or_none(value)
+            if eps is not None and hasattr(column, "date"):
+                history[column.date().isoformat()] = eps
+        if history:
+            out["eps_history"] = history
+            return
 
 
 def _fill_balance_sheet_derived(
@@ -151,6 +250,8 @@ def _fill_balance_sheet_derived(
     )
     inventory = _bs_first(bs, ("Inventory",))
 
+    if equity is not None:
+        out["shareholders_equity"] = equity
     if total_debt is not None and equity is not None and equity > 0:
         out["debt_to_equity"] = round(total_debt / equity, 3)
 
@@ -171,7 +272,9 @@ def _fill_income_statement_derived(
     is_: "DataFrame | None",
     bs: "DataFrame | None",
 ) -> None:
-    ebit = _bs_first(is_, ("EBIT", "Operating Income"))
+    # Core operating EBIT — excludes other income and one-off gains, the
+    # same definition the screener path uses for interest coverage.
+    ebit = _bs_first(is_, ("Operating Income", "EBIT"))
     ebitda = _bs_first(is_, ("EBITDA", "Normalized EBITDA"))
     interest = _bs_first(is_, ("Interest Expense",))
     revenue = _bs_first(is_, ("Total Revenue", "Operating Revenue"))
@@ -205,9 +308,9 @@ def _fill_income_statement_derived(
         bs, ("Current Liabilities", "Total Current Liabilities")
     )
 
-    # Interest coverage is only meaningful when EBIT is positive — a loss-
-    # making company has no "coverage" regardless of the numeric ratio.
-    if ebit is not None and ebit > 0 and interest is not None and interest != 0:
+    # A negative value is kept on purpose: a core operating loss is
+    # known-bad coverage (scored 0), not missing data.
+    if ebit is not None and interest is not None and interest != 0:
         out["interest_coverage"] = round(ebit / abs(interest), 2)
 
     # Prefer direct Net Debt row; else compute from total_debt − cash.
@@ -219,6 +322,8 @@ def _fill_income_statement_derived(
     if computed_net_debt is not None and ebitda is not None and ebitda > 0:
         out["net_debt_to_ebitda"] = round(computed_net_debt / ebitda, 2)
 
+    if net_income is not None:
+        out["net_income"] = net_income
     if net_income is not None and equity is not None and equity > 0:
         out["roe"] = round(net_income / equity * 100, 2)
     if net_income is not None and total_assets is not None and total_assets > 0:
@@ -281,6 +386,8 @@ def _fill_cash_flow_derived(
     # (capex is a negative number in yfinance, so adding it subtracts).
     if fcf is None and ocf is not None and capex is not None:
         fcf = ocf + capex
+    if fcf is not None:
+        out["free_cash_flow"] = fcf
     if fcf is not None and net_income is not None and net_income > 0:
         out["fcf_to_pat"] = round(fcf / net_income, 3)
 
@@ -338,19 +445,18 @@ def _fill_quarterly_trend(
     out: SnapshotFields, q_is: "DataFrame | None"
 ) -> None:
     q_rev, q_pat, q_dates = _extract_quarterly_series(q_is)
+    if q_dates:
+        out["quarterly_dates"] = q_dates
     if q_rev:
         out["quarterly_revenue"] = q_rev
-        out["quarterly_dates"] = q_dates
+        growth = latest_yoy_growth(q_rev, q_dates)
+        if growth is not None:
+            out["latest_yoy_revenue_growth"] = growth
     if q_pat:
         out["quarterly_pat"] = q_pat
-    if len(q_rev) >= 5 and q_rev[4] > 0:
-        out["latest_yoy_revenue_growth"] = round(
-            (q_rev[0] - q_rev[4]) / q_rev[4] * 100, 2
-        )
-    if len(q_pat) >= 5 and q_pat[4] > 0:
-        out["latest_yoy_pat_growth"] = round(
-            (q_pat[0] - q_pat[4]) / q_pat[4] * 100, 2
-        )
+        growth = latest_yoy_growth(q_pat, q_dates)
+        if growth is not None:
+            out["latest_yoy_pat_growth"] = growth
 
 
 def _fill_info_metadata(
@@ -367,6 +473,9 @@ def _fill_info_metadata(
     out.setdefault("industry", info.get("industry") or "")
     out.setdefault("country", info.get("country") or "")
     out.setdefault("website", info.get("website") or "")
+    _fill_listing(out, info)
+    _fill_ownership(out, info)
+    _fill_valuation(out, info)
     fte = info.get("fullTimeEmployees")
     if fte is not None:
         try:
@@ -398,13 +507,72 @@ def _fill_info_metadata(
             pass
 
 
+def _fill_listing(out: SnapshotFields, info: dict[str, object]) -> None:
+    """Exchange, trading currency, reporting currency, market cap."""
+    exchange = info.get("fullExchangeName") or info.get("exchange")
+    if isinstance(exchange, str):
+        out["exchange"] = exchange
+    currency = info.get("currency")
+    if isinstance(currency, str):
+        out["currency"] = currency  # case matters: "GBp" is pence, not pounds
+    financial_currency = info.get("financialCurrency") or currency
+    if isinstance(financial_currency, str):
+        out["financial_currency"] = financial_currency
+    market_cap = _info_float(info, "marketCap")
+    if market_cap is not None and market_cap > 0:
+        out["market_cap"] = market_cap
+
+
+def _fill_ownership(out: SnapshotFields, info: dict[str, object]) -> None:
+    """Insider + institutional percentages (Yahoo publishes fractions)."""
+    insiders = _info_float(info, "heldPercentInsiders")
+    if insiders is not None:
+        out["insider_holding"] = round(insiders * 100, 2)
+    institutions = _info_float(info, "heldPercentInstitutions")
+    if institutions is not None:
+        out["institutional_holding"] = round(institutions * 100, 2)
+
+
+def _fill_valuation(out: SnapshotFields, info: dict[str, object]) -> None:
+    """P/E, dividend yield, and book value — only where currencies agree.
+
+    Per-share book value is in the *reporting* currency. For a cross-listing
+    such as an ADR (BABA trades in USD, reports in CNY) price / book would
+    mix currencies, so it is left out rather than shown wrong.
+    """
+    pe = _info_float(info, "trailingPE")
+    if pe is not None and pe > 0:
+        out["pe_ratio"] = round(pe, 2)
+    dividend_yield = _info_float(info, "trailingAnnualDividendYield")
+    if dividend_yield is not None:
+        out["dividend_yield"] = round(dividend_yield * 100, 2)
+    book_value = _info_float(info, "bookValue")
+    currency = info.get("currency")
+    if book_value is not None and currency == (info.get("financialCurrency") or currency):
+        out["book_value_per_share"] = book_value
+
+
+def _info_float(info: dict[str, object], key: str) -> float | None:
+    value = info.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    v = float(value)
+    return v if math.isfinite(v) else None
+
+
 # ── DataFrame helpers ────────────────────────────────────────────────────────
 
 
 def _extract_quarterly_series(
     q_is: "DataFrame | None",
 ) -> tuple[list[float], list[float], list[str]]:
-    """Return (revenue, net_income, date_iso) lists, most-recent-first."""
+    """Return aligned (revenue, net_income, date_iso) lists, newest-first.
+
+    A quarter is kept only when every available row has a finite value
+    for it, so index `i` means the same quarter in all three lists.
+    yfinance leaves NaN holes in different quarters for different rows,
+    and dropping them independently used to shift PAT against its dates.
+    """
     if q_is is None:
         return [], [], []
     try:
@@ -413,49 +581,55 @@ def _extract_quarterly_series(
     except Exception:
         return [], [], []
 
-    rev_row = None
-    pat_row = None
-    for name in ("Total Revenue", "Operating Revenue"):
-        if name in q_is.index:
-            rev_row = q_is.loc[name]
-            break
-    for name in ("Net Income", "Net Income Common Stockholders"):
-        if name in q_is.index:
-            pat_row = q_is.loc[name]
-            break
+    rev_row = _first_row(q_is, ("Total Revenue", "Operating Revenue"))
+    pat_row = _first_row(q_is, ("Net Income", "Net Income Common Stockholders"))
+    if rev_row is None:
+        return [], [], []
 
-    revenue_series: list[float] = []
-    pat_series: list[float] = []
+    revenue: list[float] = []
+    pat: list[float] = []
     dates: list[str] = []
+    for col in q_is.columns:
+        rev = _finite_or_none(rev_row.get(col))
+        profit = _finite_or_none(pat_row.get(col)) if pat_row is not None else None
+        if rev is None or (pat_row is not None and profit is None):
+            continue
+        revenue.append(rev)
+        if profit is not None:
+            pat.append(profit)
+        dates.append(col.date().isoformat() if hasattr(col, "date") else str(col)[:10])
+    return revenue, pat, dates
 
-    if rev_row is not None:
-        for col, val in rev_row.items():
-            try:
-                if val is None:
-                    continue
-                v = float(val)
-                if v != v:  # NaN
-                    continue
-                revenue_series.append(v)
-                dates.append(
-                    col.date().isoformat() if hasattr(col, "date") else str(col)[:10]
-                )
-            except (TypeError, ValueError):
-                continue
 
-    if pat_row is not None:
-        for col, val in pat_row.items():
-            try:
-                if val is None:
-                    continue
-                v = float(val)
-                if v != v:
-                    continue
-                pat_series.append(v)
-            except (TypeError, ValueError):
-                continue
+def _first_row(df: "DataFrame", candidates: tuple[str, ...]) -> "Series | None":
+    for name in candidates:
+        if name in df.index:
+            return df.loc[name]
+    return None
 
-    return revenue_series, pat_series, dates
+
+def _finite_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        v = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def _consecutive_years(columns: object, years: int) -> bool:
+    """True unless dated columns 0 and `years` are clearly not `years` apart.
+
+    Guards CAGRs on deep histories (SEC) with a missing fiscal year, where
+    "3 columns back" would silently be 4 years.
+    """
+    try:
+        newest, oldest = columns[0], columns[years]  # type: ignore[index]
+        span_years = (newest - oldest).days / 365.25
+    except (TypeError, AttributeError, IndexError):
+        return True  # undated columns: trust the positional window
+    return abs(span_years - years) <= 0.25
 
 
 def _safe(fn: Callable[[], _T], *, label: str) -> _T | None:
@@ -517,10 +691,15 @@ def _compute_cagr(
             continue
         try:
             series = df.loc[name]
-            if len(series) < years + 1:
+            if len(series) < years + 1 or not _consecutive_years(series.index, years):
                 continue
             current = float(series.iloc[0])
             past = float(series.iloc[years])
+            # yfinance often leaves the oldest annual column NaN for Indian
+            # and other non-US filers. NaN slips through `<= 0` checks and
+            # would score growth 0/100 while bypassing the growth veto.
+            if not (math.isfinite(current) and math.isfinite(past)):
+                continue
             if past <= 0 or current <= 0:
                 continue
             return round((((current / past) ** (1 / years)) - 1) * 100, 2)

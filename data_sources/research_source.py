@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from dataclasses import asdict, dataclass, field
 from typing import TypedDict
 
@@ -56,12 +55,10 @@ class ResearchBundle:
 
 
 class ResearchSource:
-    def __init__(self, *, brave_api_key: str | None = None) -> None:
-        self._brave_api_key = (
-            brave_api_key
-            if brave_api_key is not None
-            else os.environ.get("BRAVE_API_KEY", "")
-        )
+    """Pass `brave_api_key` from `AnalystConfig` — this layer never reads env vars."""
+
+    def __init__(self, *, brave_api_key: str = "") -> None:
+        self._brave_api_key = brave_api_key
 
     async def research(
         self, name: str, company_ticker: str = ""

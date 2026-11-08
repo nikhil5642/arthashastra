@@ -5,19 +5,27 @@ This is the only public entry point callers should use to build a
 merges their outputs, and constructs the final snapshot.
 
 Merge rules:
+  - Non-finite floats (NaN / inf) are dropped from both inputs before
+    anything else looks at them — a NaN that reaches a scorer slips past
+    every `<` / `>=` comparison.
   - For any field in `_SCREENER_WINS`, screener wins if it emitted a
     value (even over a populated yfinance value). This is because
     screener's definitions are the canonical ones for Indian equities:
-    "Borrowings" (not lease-inflated "Total Debt"), "Operating Profit"
-    (not yfinance's ebit variants), etc.
+    "Borrowings" (not lease-inflated "Total Debt"), etc.
   - For everything else, yfinance fills gaps: any field screener didn't
     provide falls back to yfinance's value.
+
+Provenance: `snap.field_sources` names the adapter behind every populated
+field, and `snap.data_conflicts` records each scored field where both
+adapters answered but disagreed materially — the merge still picks one,
+but the disagreement is surfaced instead of being resolved silently.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -27,9 +35,12 @@ from datetime import date
 from data_sources.fundamentals_source import screener_adapter, yfinance_adapter
 from data_sources.fundamentals_source.snapshot import (
     BalanceSheetSnapshot,
+    DataConflict,
     SCORED_FIELDS,
     SnapshotFields,
 )
+from data_sources.fundamentals_source.valuation import apply_valuation
+from data_sources.price_series import PriceSeries
 
 log = logging.getLogger(__name__)
 
@@ -49,9 +60,9 @@ _SCREENER_WINS: frozenset[str] = frozenset({
     "roe",
     "roce",
     "roa",
-    "promoter_holding",
+    "insider_holding",
     "pledge_pct",
-    "market_cap_cr",
+    "market_cap",
     "debt_to_equity",
     "interest_coverage",
     "ocf_to_pat",
@@ -68,6 +79,11 @@ _SCREENER_WINS: frozenset[str] = frozenset({
     "pe_ratio",
     "book_value_per_share",
     "dividend_yield",
+    # Valuation inputs from the statements screener authoritatively parses.
+    "eps_history",
+    "net_income",
+    "free_cash_flow",
+    "shareholders_equity",
     # yfinance occasionally drops a middle quarter for recent IPOs —
     # screener's per-company quarters table is more complete for India.
     "quarterly_revenue",
@@ -77,23 +93,27 @@ _SCREENER_WINS: frozenset[str] = frozenset({
     "latest_yoy_pat_growth",
     # Bank-specific metrics — always from screener's P&L / BS structure.
     "nim",
-    "net_interest_income_cr",
-    "non_interest_income_cr",
+    "net_interest_income",
+    "non_interest_income",
     "non_interest_income_ratio",
-    "deposits_cr",
-    "borrowings_cr",
+    "deposits",
+    "borrowings",
     "credit_deposit_ratio",
     "is_bank",
+    "gross_npa_pct",
+    "net_npa_pct",
+    "gross_npa_delta_1y_pct_points",
+    "net_npa_delta_1y_pct_points",
     # Shareholding trend (12 quarters of FII / DII / promoter / public).
     "shareholding_dates",
-    "promoter_holding_trend",
+    "insider_holding_trend",
     "fii_holding_trend",
     "dii_holding_trend",
     "public_holding_trend",
     "num_shareholders_trend",
     "fii_delta_1y_pct_points",
     "dii_delta_1y_pct_points",
-    "promoter_delta_1y_pct_points",
+    "insider_delta_1y_pct_points",
     "num_shareholders_delta_1y_pct",
     # Multi-year ratio / P&L trend series.
     "roce_annual_trend",
@@ -102,6 +122,9 @@ _SCREENER_WINS: frozenset[str] = frozenset({
     "sales_annual_trend",
     "borrowings_annual_trend",
     "borrowings_delta_3y_pct",
+    "borrowings_went_from_zero",
+    # Period of the annual statements behind the ratios screener supplies.
+    "latest_annual_period",
     # Full raw dumps — always from screener.
     "raw_profit_loss",
     "raw_profit_loss_headers",
@@ -119,6 +142,32 @@ _SCREENER_WINS: frozenset[str] = frozenset({
     "documents",
     "screener_analysis_text",
 })
+
+
+# ── Conflict detection thresholds ────────────────────────────────────────────
+#
+# A conflict needs BOTH a relative gap (≥ 25%) and an absolute gap above a
+# per-field floor, so two tiny numbers (D/E 0.02 vs 0.03) or two huge ones
+# (interest cover 80× vs 110×) don't drown the report in noise.
+
+_CONFLICT_REL_THRESHOLD = 0.25
+
+_CONFLICT_ABS_FLOOR: dict[str, float] = {
+    "debt_to_equity": 0.10,
+    "interest_coverage": 1.0,
+    "current_ratio": 0.15,
+    "quick_ratio": 0.15,
+    "net_debt_to_ebitda": 0.30,
+    "roe": 2.0,
+    "roce": 2.0,
+    "roa": 1.0,
+    "rev_3y_cagr": 2.0,
+    "pat_3y_cagr": 2.0,
+    "ocf_to_pat": 0.15,
+    "fcf_to_pat": 0.15,
+    "insider_holding": 1.0,
+    "pledge_pct": 1.0,
+}
 
 
 # ── Result + facade ──────────────────────────────────────────────────────────
@@ -171,6 +220,9 @@ class FundamentalsSource:
         else:
             screener_data = screener_result
 
+        yf_data = _drop_non_finite(yf_data, label="yfinance")
+        screener_data = _drop_non_finite(screener_data, label="screener")
+
         merged = _merge(yf_data, screener_data)
         merged["ticker"] = bare
         merged["as_of_date"] = date.today().isoformat()
@@ -180,10 +232,32 @@ class FundamentalsSource:
         kwargs = {k: v for k, v in merged.items() if k in allowed}
         snap = BalanceSheetSnapshot(**kwargs)
         snap.field_sources = _field_sources(yf_data, screener_data)
+        snap.data_conflicts = _detect_conflicts(yf_data, screener_data)
+        apply_valuation(snap, PriceSeries.from_rows(price_history))
         return FetchResult(snapshot=snap, price_history=price_history)
 
 
 # ── Merge helpers ────────────────────────────────────────────────────────────
+
+
+def _drop_non_finite(data: SnapshotFields, *, label: str) -> SnapshotFields:
+    """Remove NaN / inf scalars so they can never reach a scorer."""
+    clean: dict[str, object] = {}
+    for key, value in data.items():
+        if isinstance(value, float) and not math.isfinite(value):
+            log.debug("%s: dropped non-finite %s=%r", label, key, value)
+            continue
+        clean[key] = value
+    return clean  # type: ignore[return-value]
+
+
+def _screener_preferred(
+    key: str, screener_value: object, yf_value: object
+) -> bool:
+    """The single precedence rule shared by `_merge` and `_field_sources`."""
+    if screener_value is None:
+        return False
+    return key in _SCREENER_WINS or yf_value in (None, "")
 
 
 def _merge(
@@ -192,13 +266,7 @@ def _merge(
     """Combine yfinance + screener per `_SCREENER_WINS` precedence."""
     merged: SnapshotFields = dict(yf_data)  # type: ignore[assignment]
     for key, value in screener_data.items():
-        if value is None:
-            continue
-        if (
-            key in _SCREENER_WINS
-            or key not in merged
-            or merged[key] in (None, "")  # type: ignore[literal-required]
-        ):
+        if _screener_preferred(key, value, merged.get(key)):
             merged[key] = value  # type: ignore[literal-required]
     return merged
 
@@ -221,11 +289,58 @@ def _source_tag(
 def _field_sources(
     yf_data: SnapshotFields, screener_data: SnapshotFields
 ) -> dict[str, str]:
-    """Attribute each SCORED field to whichever adapter provided it."""
+    """Attribute every populated field to the adapter whose value was kept."""
     out: dict[str, str] = {}
-    for f in SCORED_FIELDS:
-        if f in screener_data and (f in _SCREENER_WINS or f not in yf_data):
-            out[f] = "screener"
-        elif f in yf_data:
-            out[f] = "yfinance"
+    for key in {**yf_data, **screener_data}:
+        sc_value = screener_data.get(key)
+        yf_value = yf_data.get(key)
+        if _screener_preferred(key, sc_value, yf_value) and _present(sc_value):
+            out[key] = "screener"
+        elif _present(yf_value):
+            out[key] = "yfinance"
     return out
+
+
+def _present(value: object) -> bool:
+    """Populated in a way worth attributing (not None / '' / empty container)."""
+    if value is None or value == "":
+        return False
+    if isinstance(value, (list, dict)) and not value:
+        return False
+    return True
+
+
+def _detect_conflicts(
+    yf_data: SnapshotFields, screener_data: SnapshotFields
+) -> list[DataConflict]:
+    """Scored fields where both adapters answered but disagree materially."""
+    conflicts: list[DataConflict] = []
+    for name in SCORED_FIELDS:
+        yf_value = yf_data.get(name)
+        sc_value = screener_data.get(name)
+        if not isinstance(yf_value, (int, float)) or not isinstance(
+            sc_value, (int, float)
+        ):
+            continue
+        a, b = float(yf_value), float(sc_value)
+        gap = abs(a - b)
+        if gap < _CONFLICT_ABS_FLOOR.get(name, 0.0):
+            continue
+        scale = max(abs(a), abs(b))
+        if scale == 0 or gap / scale < _CONFLICT_REL_THRESHOLD:
+            continue
+        if _screener_preferred(name, sc_value, yf_value):
+            chosen = ("screener", b, "yfinance", a)
+        else:
+            chosen = ("yfinance", a, "screener", b)
+        conflicts.append(
+            DataConflict(
+                field_name=name,
+                chosen_source=chosen[0],
+                chosen_value=chosen[1],
+                other_source=chosen[2],
+                other_value=chosen[3],
+                rel_diff_pct=round(gap / scale * 100, 1),
+            )
+        )
+    return conflicts
