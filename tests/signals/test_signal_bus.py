@@ -1,4 +1,4 @@
-"""Signal bus tests — shape parity with trading/feeds/signals.py plus analyst-specific types."""
+"""Signal bus tests — round trip, filtering, bounds, tolerant parsing."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ def test_emit_and_read_roundtrip(tmp_path: Path) -> None:
     sig = Signal(
         signal_type=SignalType.DIP_DETECTED,
         severity=Severity.ALERT,
-        ticker="RELIANCE",
+        ticker="MSFT",
         message="Drawdown 22% from 52w high; composite 82",
         data={"composite": 82, "drawdown_pct": 22.0},
     )
@@ -23,7 +23,7 @@ def test_emit_and_read_roundtrip(tmp_path: Path) -> None:
     only = read_back[0]
     assert only.signal_type == SignalType.DIP_DETECTED
     assert only.severity == Severity.ALERT
-    assert only.ticker == "RELIANCE"
+    assert only.ticker == "MSFT"
     assert only.data["composite"] == 82
     assert only.timestamp, "timestamp should be auto-populated"
 
@@ -42,12 +42,12 @@ def test_read_urgent_filters(tmp_path: Path) -> None:
 
 def test_read_for_ticker_is_case_insensitive(tmp_path: Path) -> None:
     bus = SignalBus(path=tmp_path / "signals.json")
-    bus.emit(Signal(SignalType.DIP_DETECTED, Severity.ALERT, "RELIANCE", "x"))
-    bus.emit(Signal(SignalType.DIP_DETECTED, Severity.ALERT, "TCS", "y"))
+    bus.emit(Signal(SignalType.DIP_DETECTED, Severity.ALERT, "MSFT", "x"))
+    bus.emit(Signal(SignalType.DIP_DETECTED, Severity.ALERT, "0700.HK", "y"))
 
-    assert len(bus.read_for_ticker("reliance")) == 1
-    assert len(bus.read_for_ticker("RELIANCE")) == 1
-    assert len(bus.read_for_ticker("HDFC")) == 0
+    assert len(bus.read_for_ticker("msft")) == 1
+    assert len(bus.read_for_ticker("MSFT")) == 1
+    assert len(bus.read_for_ticker("JPM")) == 0
 
 
 def test_max_signals_kept_is_enforced(tmp_path: Path) -> None:
@@ -86,3 +86,24 @@ def test_read_unread_filters_by_timestamp(tmp_path: Path) -> None:
     unread = bus.read_unread(last_read_ts="2026-03-01T00:00:00")
     assert len(unread) == 1
     assert unread[0].ticker == "Y"
+
+
+def test_corrupt_rows_are_skipped_not_fatal(tmp_path: Path) -> None:
+    path = tmp_path / "signals.json"
+    path.write_text(
+        '[{"signal_type": "NOT_A_TYPE", "severity": "INFO", "message": "x"},'
+        ' "not even an object",'
+        ' {"signal_type": "SCORE_UPDATED", "severity": "INFO", "ticker": "OK", "message": "y"}]'
+    )
+    bus = SignalBus(path=path)
+    assert [s.ticker for s in bus.read_all()] == ["OK"]
+
+
+def test_non_list_file_reads_as_empty(tmp_path: Path) -> None:
+    path = tmp_path / "signals.json"
+    path.write_text('{"oops": true}')
+    assert SignalBus(path=path).read_all() == []
+
+
+def test_severity_formats_as_its_value() -> None:
+    assert f"{Severity.URGENT}" == "URGENT"
