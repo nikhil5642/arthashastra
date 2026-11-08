@@ -18,7 +18,7 @@ from fundamental_engine.extended_score import ExtendedScore
 from fundamental_engine.judgments import Judgment, JudgmentStore, PillarJudgment
 
 
-def _fresh_snap(ticker: str = "RELIANCE") -> BalanceSheetSnapshot:
+def _fresh_snap(ticker: str = "MSFT") -> BalanceSheetSnapshot:
     return BalanceSheetSnapshot(
         ticker=ticker,
         as_of_date="2026-04-11",
@@ -29,16 +29,20 @@ def _fresh_snap(ticker: str = "RELIANCE") -> BalanceSheetSnapshot:
         rev_3y_cagr=14.0,
         pat_3y_cagr=12.0,
         ocf_to_pat=1.1,
-        promoter_holding=50.0,
+        insider_holding=50.0,
         pledge_pct=0.0,
-        current_price=1500.0,
-        high_52w=1800.0,
-        low_52w=1200.0,
-        market_cap_cr=100000.0,
-        company_name="Reliance Industries Limited",
-        sector="Energy",
-        industry="Oil & Gas",
-        source="yfinance+screener",
+        current_price=530.61,
+        high_52w=559.15,
+        low_52w=348.54,
+        market_cap=3.94e12,
+        exchange="NasdaqGS",
+        currency="USD",
+        financial_currency="USD",
+        country="United States",
+        company_name="Microsoft Corporation",
+        sector="Technology",
+        industry="Software - Infrastructure",
+        source="yfinance",
     )
 
 
@@ -61,9 +65,9 @@ async def test_analyse_ticker_without_judgment_uses_pending(
     snap = _fresh_snap()
     _install_fake_source(monkeypatch, snap, [("2026-04-01", 1500.0)])
 
-    result = await analyse_ticker("RELIANCE", data_cache_dir=tmp_path)
+    result = await analyse_ticker("MSFT", data_cache_dir=tmp_path)
     assert isinstance(result, AnalysisResult)
-    assert result.snapshot.ticker == "RELIANCE"
+    assert result.snapshot.ticker == "MSFT"
     assert result.score.fundamentals_score > 70  # deterministic strong fundamentals
     # Pending placeholders use neutral-prior 50 with zero completeness.
     assert result.score.leadership_score == 50.0
@@ -82,23 +86,23 @@ async def test_analyse_ticker_with_judgment_merges(
     store = JudgmentStore(tmp_path)
     store.save(
         Judgment(
-            ticker="RELIANCE",
+            ticker="MSFT",
             leadership=PillarJudgment(
                 score=82,
                 evidence=["Proven capital allocation"],
-                extras={"mode": "MULTI_GEN_FAMILY"},
+                extras={"mode": "PROFESSIONAL"},
             ),
             prospects=PillarJudgment(
-                score=78, evidence=["Strong moat in telecom and retail"]
+                score=78, evidence=["Strong moat in cloud and productivity software"]
             ),
             news=PillarJudgment(
                 score=68, evidence=["Positive Q4 results"]
             ),
-            leader_name="Mukesh Ambani",
+            leader_name="Satya Nadella",
         )
     )
 
-    result = await analyse_ticker("RELIANCE", data_cache_dir=tmp_path)
+    result = await analyse_ticker("MSFT", data_cache_dir=tmp_path)
     assert result.judgment is not None
     assert result.score.leadership_score == 82.0
     assert result.score.prospects_score == 78.0
@@ -131,20 +135,19 @@ def test_extended_score_captures_snapshot_metadata(tmp_path: Path):
     extended = ExtendedScore.from_analysis(result)
 
     # Typed-object access (the fields business logic uses).
-    assert extended.score.ticker == "RELIANCE"
-    assert extended.company_name == "Reliance Industries Limited"
-    assert extended.sector == "Energy"
-    assert extended.industry == "Oil & Gas"
-    assert extended.current_price == 1500.0
-    assert extended.high_52w == 1800.0
-    assert extended.low_52w == 1200.0
-    assert extended.market_cap_cr == 100000.0
-    assert extended.source == "yfinance+screener"
+    assert extended.score.ticker == "MSFT"
+    assert extended.company_name == "Microsoft Corporation"
+    assert extended.sector == "Technology"
+    assert extended.country == "United States"
+    assert extended.currency == "USD"
+    assert extended.current_price == 530.61
+    assert extended.market_cap == 3.94e12
+    assert extended.source == "yfinance"
 
     # Flat-dict serialization (the scores.json row shape).
     as_dict = extended.to_dict()
-    assert as_dict["ticker"] == "RELIANCE"
-    assert as_dict["company_name"] == "Reliance Industries Limited"
+    assert as_dict["ticker"] == "MSFT"
+    assert as_dict["company_name"] == "Microsoft Corporation"
     assert "composite" in as_dict
     assert "verdict" in as_dict
 
@@ -154,3 +157,23 @@ def test_extended_score_captures_snapshot_metadata(tmp_path: Path):
     assert reloaded.score.composite == extended.score.composite
     assert reloaded.score.verdict == extended.score.verdict
     assert reloaded.company_name == extended.company_name
+
+
+def test_integrity_veto_in_judgment_caps_the_composite(tmp_path: Path):
+    JudgmentStore(tmp_path).save(
+        Judgment(
+            ticker="MSFT",
+            leadership=PillarJudgment(score=30, evidence=["SEC charges over revenue recognition"]),
+            prospects=PillarJudgment(score=80),
+            news=PillarJudgment(score=60),
+            integrity_veto=True,
+        )
+    )
+    result = score_snapshot(_fresh_snap(), data_cache_dir=tmp_path)
+    assert result.score.composite <= 54.0
+    assert result.score.verdict == "AVOID"
+
+    # The gate survives the scores.json round trip, so `pick` can block it.
+    reloaded = ExtendedScore.from_dict(ExtendedScore.from_analysis(result).to_dict())
+    assert reloaded is not None
+    assert reloaded.score.gates_applied == result.score.gates_applied

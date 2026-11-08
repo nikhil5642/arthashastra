@@ -1,14 +1,16 @@
-"""Parse budget strings like '100000', '1L', '2.5L', '10k', '1 cr' → INR.
+"""Parse budget strings like '100000', '50k', '2.5m', '1L', '1 cr' → amount.
 
-Indian number notation uses a fixed set of magnitudes:
-    K     = thousand
-    Lakh  = 100,000           (also written `L` or `Lac`)
-    Crore = 10,000,000        (also written `Cr`)
+The amount is in the user's base currency (`BASE_CURRENCY`). Both
+international and Indian magnitudes are accepted, whatever the currency:
+    K       = thousand
+    M       = million         (also written `mn`)
+    B       = billion         (also written `bn`)
+    Lakh    = 100,000         (also written `L` or `Lac`)
+    Crore   = 10,000,000      (also written `Cr`)
 
 These are typed as a real `Magnitude` enum so downstream code can
-reason about them structurally. The string spellings a human might
-actually type ('l', 'lakh', 'lac', 'k', 'cr', 'crore') are only used
-as input-parser synonyms, mapped to the enum at the boundary.
+reason about them structurally. The spellings a human might type are
+only input-parser synonyms, mapped to the enum at the boundary.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from enum import Enum
 
 
 class Magnitude(float, Enum):
-    """Indian magnitude multipliers, typed so they can't be confused.
+    """Magnitude multipliers, typed so they can't be confused.
 
     `float` base class means arithmetic with Magnitude members works
     transparently: `100 * Magnitude.LAKH == 10_000_000.0`.
@@ -26,13 +28,21 @@ class Magnitude(float, Enum):
 
     K = 1_000.0
     LAKH = 100_000.0
+    MILLION = 1_000_000.0
     CRORE = 10_000_000.0
+    BILLION = 1_000_000_000.0
 
 
 # Free-form string spellings a human might type → the typed enum.
 # Keys are lowercased and space-stripped before lookup.
 _MAGNITUDE_SYNONYMS: dict[str, Magnitude] = {
     "k": Magnitude.K,
+    "m": Magnitude.MILLION,
+    "mn": Magnitude.MILLION,
+    "million": Magnitude.MILLION,
+    "b": Magnitude.BILLION,
+    "bn": Magnitude.BILLION,
+    "billion": Magnitude.BILLION,
     "l": Magnitude.LAKH,
     "lac": Magnitude.LAKH,
     "lakh": Magnitude.LAKH,
@@ -47,7 +57,7 @@ _BUDGET_RE = re.compile(rf"^(\d+(?:\.\d+)?)({_UNIT_ALTERNATION})?$")
 
 
 def parse_budget(raw: str) -> float | None:
-    """Return budget in INR as float, or None if unparseable."""
+    """Return the budget amount as a float, or None if unparseable."""
     s = raw.strip().lower().replace(",", "").replace(" ", "")
     if not s:
         return None

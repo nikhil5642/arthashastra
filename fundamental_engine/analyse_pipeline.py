@@ -27,6 +27,7 @@ from fundamental_engine.judgments import Judgment, JudgmentStore, PillarJudgment
 from scorers.base import Pillar, ScorerResult, StockScore
 from scorers.composite_scorer import blend, pending_judgment
 from scorers.fundamentals_scorer import score_fundamentals
+from scorers.valuation_scorer import score_valuation
 
 log = logging.getLogger(__name__)
 
@@ -82,10 +83,12 @@ def score_snapshot(
 
     score = blend(
         ticker=snap.ticker,
-        leadership=leadership_result,
         fundamentals=fundamentals_result,
+        valuation=score_valuation(snap),
+        leadership=leadership_result,
         prospects=prospects_result,
         news=news_result,
+        integrity_veto=judgment.integrity_veto if judgment else False,
     )
     return AnalysisResult(
         snapshot=snap,
@@ -93,14 +96,6 @@ def score_snapshot(
         judgment=judgment,
         price_history=list(price_history or []),
     )
-
-
-# `build_extended_score_dict` used to live here but was an untyped
-# `dict[str, Any]` factory that accepted `| Any` as a parameter — a
-# typed-interface smell. It's been replaced by `ExtendedScore.from_analysis`
-# in `fundamental_engine/extended_score.py`, which returns a typed object.
-# Call sites that need the JSON row shape should do
-# `ExtendedScore.from_analysis(result).to_dict()`.
 
 
 def _result_from_pillar(

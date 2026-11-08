@@ -21,6 +21,8 @@ import json
 import logging
 from pathlib import Path
 
+from signals.fileio import atomic_write_text, file_lock
+
 log = logging.getLogger(__name__)
 
 # Alias for "a row of arbitrary JSON" — what sits inside `scores.json`
@@ -60,17 +62,21 @@ class JsonStore:
         return parsed
 
     def write(self, data: JsonBlob) -> None:
-        self._path.write_text(json.dumps(data, indent=2, default=str))
+        atomic_write_text(self._path, json.dumps(data, indent=2, default=str))
 
     def upsert(self, key: str, value: object) -> None:
-        data = self.read()
-        data[key] = value
-        self.write(data)
+        # Read-modify-write under a lock: the engine and a CLI `analyse`
+        # can upsert different tickers into the same file concurrently.
+        with file_lock(self._path):
+            data = self.read()
+            data[key] = value
+            self.write(data)
 
     def get(self, key: str, default: object = None) -> object:
         return self.read().get(key, default)
 
     def delete(self, key: str) -> None:
-        data = self.read()
-        data.pop(key, None)
-        self.write(data)
+        with file_lock(self._path):
+            data = self.read()
+            data.pop(key, None)
+            self.write(data)

@@ -16,11 +16,10 @@ and downstream code works with typed `ExtendedScore` objects.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from data_sources.fundamentals_source import BalanceSheetSnapshot
-from scorers.base import Pillar, StockScore, Verdict
+from scorers.base import Gate, Pillar, StockScore, Verdict
 
 if TYPE_CHECKING:
     from fundamental_engine.analyse_pipeline import AnalysisResult
@@ -43,13 +42,25 @@ class ExtendedScore:
     current_price: float | None = None
     high_52w: float | None = None
     low_52w: float | None = None
-    market_cap_cr: float | None = None
+    market_cap: float | None = None  # absolute, in the major unit of `currency`
     source: str = "unknown"
+    exchange: str = ""
+    country: str = ""
+    currency: str = ""  # trading currency as Yahoo reports it ("USD", "GBp", …)
+    # Units of the base currency per one unit of `currency` at refresh time;
+    # None when no FX quote was available.
+    fx_rate_to_base: float | None = None
+    # Latest quarter vs the same quarter a year ago — lets `pick` spot
+    # "earnings still growing while the price fell" without a re-fetch.
+    latest_yoy_revenue_growth: float | None = None
+    latest_yoy_pat_growth: float | None = None
 
     # ── Constructors ────────────────────────────────────────────────────────
 
     @classmethod
-    def from_analysis(cls, result: "AnalysisResult") -> "ExtendedScore":
+    def from_analysis(
+        cls, result: "AnalysisResult", *, fx_rate_to_base: float | None = None
+    ) -> "ExtendedScore":
         """Wrap the output of `analyse_pipeline.analyse_ticker` for caching."""
         snap = result.snapshot
         return cls(
@@ -60,8 +71,14 @@ class ExtendedScore:
             current_price=snap.current_price,
             high_52w=snap.high_52w,
             low_52w=snap.low_52w,
-            market_cap_cr=snap.market_cap_cr,
+            market_cap=snap.market_cap,
             source=snap.source,
+            exchange=snap.exchange,
+            country=snap.country,
+            currency=snap.currency,
+            fx_rate_to_base=fx_rate_to_base,
+            latest_yoy_revenue_growth=snap.latest_yoy_revenue_growth,
+            latest_yoy_pat_growth=snap.latest_yoy_pat_growth,
         )
 
     @classmethod
@@ -90,6 +107,7 @@ class ExtendedScore:
                 fundamentals_score=_as_float(
                     data.get("fundamentals_score"), default=50.0
                 ),
+                valuation_score=_as_float(data.get("valuation_score"), default=50.0),
                 prospects_score=_as_float(data.get("prospects_score"), default=50.0),
                 news_score=_as_float(data.get("news_score"), default=50.0),
                 composite=_as_float(data["composite"], default=0.0),
@@ -100,6 +118,7 @@ class ExtendedScore:
                 ),
                 evidence=_parse_evidence(data.get("evidence")),
                 last_updated=_as_str(data.get("last_updated"), default=""),
+                gates_applied=_parse_gates(data.get("gates_applied")),
             )
         except (KeyError, ValueError, TypeError):
             return None
@@ -112,8 +131,16 @@ class ExtendedScore:
             current_price=_optional_float(data.get("current_price")),
             high_52w=_optional_float(data.get("high_52w")),
             low_52w=_optional_float(data.get("low_52w")),
-            market_cap_cr=_optional_float(data.get("market_cap_cr")),
+            market_cap=_market_cap(data),
             source=_as_str(data.get("source"), default="unknown"),
+            exchange=_as_str(data.get("exchange"), default=""),
+            country=_as_str(data.get("country"), default=""),
+            currency=_as_str(data.get("currency"), default=""),
+            fx_rate_to_base=_optional_float(data.get("fx_rate_to_base")),
+            latest_yoy_revenue_growth=_optional_float(
+                data.get("latest_yoy_revenue_growth")
+            ),
+            latest_yoy_pat_growth=_optional_float(data.get("latest_yoy_pat_growth")),
         )
 
     # ── Serialization ───────────────────────────────────────────────────────
@@ -136,11 +163,26 @@ class ExtendedScore:
                 "current_price": self.current_price,
                 "high_52w": self.high_52w,
                 "low_52w": self.low_52w,
-                "market_cap_cr": self.market_cap_cr,
+                "market_cap": self.market_cap,
                 "source": self.source,
+                "exchange": self.exchange,
+                "country": self.country,
+                "currency": self.currency,
+                "fx_rate_to_base": self.fx_rate_to_base,
+                "latest_yoy_revenue_growth": self.latest_yoy_revenue_growth,
+                "latest_yoy_pat_growth": self.latest_yoy_pat_growth,
             }
         )
         return d
+
+
+def _market_cap(data: dict[str, object]) -> float | None:
+    """Absolute market cap; rows cached before 2026-11 stored ₹ crore."""
+    absolute = _optional_float(data.get("market_cap"))
+    if absolute is not None:
+        return absolute
+    legacy_crore = _optional_float(data.get("market_cap_cr"))
+    return legacy_crore * 1e7 if legacy_crore is not None else None
 
 
 def _optional_float(v: object) -> float | None:
@@ -169,6 +211,19 @@ def _as_str(v: object, *, default: str) -> str:
     if isinstance(v, str):
         return v or default
     return str(v)
+
+
+def _parse_gates(raw: object) -> list[Gate]:
+    """A JSON list of gate names; unknown names are skipped, not fatal."""
+    if not isinstance(raw, list):
+        return []
+    gates: list[Gate] = []
+    for item in raw:
+        try:
+            gates.append(Gate(str(item)))
+        except ValueError:
+            continue
+    return gates
 
 
 def _parse_evidence(raw: object) -> dict[Pillar, list[str]]:

@@ -15,13 +15,18 @@ Format (one file per ticker):
     {
         "ticker": "RELIANCE",
         "leadership": {"score": 0-100, "mode": "FIRST_GEN|MULTI_GEN_FAMILY|PROFESSIONAL",
-                       "integrity_score": 0-100, "evidence": [...], "red_flags": [...]},
+                       "integrity_score": 0-100, "integrity_veto": false,
+                       "evidence": [...], "red_flags": [...]},
         "prospects":  {"score": 0-100, "evidence": [...]},
         "news":       {"score": 0-100, "evidence": [...], "material_negatives": [...]},
         "leader_name": "...",
         "updated_at": "ISO8601",
         "judged_by": "claude"
     }
+
+`leadership.integrity_veto: true` (or `"integrity_veto"` listed in
+`leadership.anchors_applied`) marks a fired integrity veto. The pipeline
+turns it into a composite-level gate, not just a low leadership score.
 """
 
 from __future__ import annotations
@@ -32,10 +37,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from signals.fileio import atomic_write_text
+
 log = logging.getLogger(__name__)
 
 
 _RESERVED_PILLAR_KEYS: frozenset[str] = frozenset({"score", "evidence"})
+
+INTEGRITY_VETO_KEY = "integrity_veto"
 
 
 @dataclass(slots=True)
@@ -90,15 +99,22 @@ class Judgment:
     leader_name: str = ""
     updated_at: str = ""
     judged_by: str = "claude"
+    # Only meaningful alongside a leadership pillar — see module docstring.
+    integrity_veto: bool = False
 
     def __post_init__(self) -> None:
         if not self.updated_at:
             self.updated_at = datetime.now().isoformat(timespec="seconds")
+        if self.leadership is None:
+            self.integrity_veto = False
 
     def to_dict(self) -> dict[str, object]:
+        leadership = self.leadership.to_dict() if self.leadership else None
+        if leadership is not None and self.integrity_veto:
+            leadership[INTEGRITY_VETO_KEY] = True
         return {
             "ticker": self.ticker,
-            "leadership": self.leadership.to_dict() if self.leadership else None,
+            "leadership": leadership,
             "prospects": self.prospects.to_dict() if self.prospects else None,
             "news": self.news.to_dict() if self.news else None,
             "leader_name": self.leader_name,
@@ -108,15 +124,27 @@ class Judgment:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "Judgment":
+        leadership_raw = _dict_field(data.get("leadership"))
         return cls(
             ticker=_str_field(data.get("ticker"), default=""),
-            leadership=PillarJudgment.from_dict(_dict_field(data.get("leadership"))),
+            leadership=PillarJudgment.from_dict(leadership_raw),
             prospects=PillarJudgment.from_dict(_dict_field(data.get("prospects"))),
             news=PillarJudgment.from_dict(_dict_field(data.get("news"))),
             leader_name=_str_field(data.get("leader_name"), default=""),
             updated_at=_str_field(data.get("updated_at"), default=""),
             judged_by=_str_field(data.get("judged_by"), default="claude"),
+            integrity_veto=_integrity_veto_flag(leadership_raw),
         )
+
+
+def _integrity_veto_flag(leadership: dict[str, object] | None) -> bool:
+    """True when the leadership block records a fired integrity veto."""
+    if not leadership:
+        return False
+    if leadership.get(INTEGRITY_VETO_KEY) is True:
+        return True
+    anchors = leadership.get("anchors_applied")
+    return isinstance(anchors, list) and INTEGRITY_VETO_KEY in anchors
 
 
 def _str_field(v: object, *, default: str) -> str:
@@ -159,7 +187,7 @@ class JudgmentStore:
 
     def save(self, judgment: Judgment) -> Path:
         fp = self.path_for(judgment.ticker)
-        fp.write_text(json.dumps(judgment.to_dict(), indent=2, default=str))
+        atomic_write_text(fp, json.dumps(judgment.to_dict(), indent=2, default=str))
         return fp
 
     def list_tickers(self) -> list[str]:

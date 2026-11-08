@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 
+from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
@@ -23,9 +24,13 @@ from fundamental_engine.dip_candidate import DipCandidateRecord
 from fundamental_engine.extended_score import ExtendedScore
 from fundamental_engine.universe import load_dip_candidates, load_scores
 from reports.formatting import make_console
+from scorers.base import Gate
 from signals.signal_bus import Signal, SignalBus, SignalType
 
 log = logging.getLogger(__name__)
+
+# Cached rows older than this should be refreshed before acting on them.
+STALE_AFTER = timedelta(days=2)
 
 
 def run_brief_command() -> int:
@@ -38,23 +43,27 @@ def run_brief_command() -> int:
     bus = SignalBus(path=cache_dir / "signals.json")
     signals = bus.read_all()
 
-    sector_counter = Counter(
+    sector_counter: Counter[str] = Counter(
         extended.sector
         for extended in scores.values()
         if extended.sector and extended.sector != "Unknown"
     )
 
-    red_flags = [
-        s for s in signals if s.signal_type == SignalType.LEADERSHIP_RED_FLAG
-    ]
+    red_flags = _red_flag_lines(scores, signals)
     score_updates = [s for s in signals if s.signal_type == SignalType.SCORE_UPDATED]
+    stale = _stale_tickers(scores)
 
+    stale_note = (
+        f"  ·  [yellow]Stale (> {STALE_AFTER.days}d): {len(stale)}[/yellow]"
+        if stale
+        else ""
+    )
     console.print(
         Panel(
             f"[bold]Market brief — {datetime.now().strftime('%Y-%m-%d %H:%M')}[/bold]\n"
             f"Cached universe: {len(scores)} tickers  ·  "
             f"Dip candidates: {len(dip_candidates)}  ·  "
-            f"Signals logged: {len(signals)}",
+            f"Signals logged: {len(signals)}{stale_note}",
             title_align="left",
         )
     )
@@ -64,12 +73,13 @@ def run_brief_command() -> int:
     _render_sector_coverage(console, sector_counter)
     _render_red_flags(console, red_flags)
     _render_score_updates(console, score_updates)
+    _render_stale(console, stale)
 
     reports_dir = cache_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     fp = reports_dir / f"brief_{datetime.now().strftime('%Y-%m-%d')}.md"
     fp.write_text(
-        _render_markdown(scores, dip_candidates, red_flags, sector_counter)
+        _render_markdown(scores, dip_candidates, red_flags, sector_counter, stale)
     )
     console.print(f"\n[dim]Report saved: {fp}[/dim]")
 
@@ -81,11 +91,46 @@ def run_brief_command() -> int:
     return 0
 
 
+# ── Derived views ───────────────────────────────────────────────────────────
+
+
+def _red_flag_lines(
+    scores: dict[str, ExtendedScore], signals: list[Signal]
+) -> list[str]:
+    """Integrity vetoes from cached scores + LEADERSHIP_RED_FLAG signals."""
+    lines = [
+        f"{ticker}: integrity veto in cached judgment — composite capped"
+        for ticker, extended in sorted(scores.items())
+        if Gate.INTEGRITY_VETO in extended.score.gates_applied
+    ]
+    lines.extend(
+        f"{s.ticker}: {s.message}"
+        for s in signals
+        if s.signal_type == SignalType.LEADERSHIP_RED_FLAG
+    )
+    return lines
+
+
+def _stale_tickers(scores: dict[str, ExtendedScore]) -> list[str]:
+    """Tickers whose cached row is older than STALE_AFTER (or undated)."""
+    cutoff = datetime.now() - STALE_AFTER
+    stale: list[str] = []
+    for ticker, extended in sorted(scores.items()):
+        try:
+            updated = datetime.fromisoformat(extended.score.last_updated)
+        except ValueError:
+            stale.append(ticker)
+            continue
+        if updated.replace(tzinfo=None) < cutoff:
+            stale.append(ticker)
+    return stale
+
+
 # ── Terminal panels ─────────────────────────────────────────────────────────
 
 
 def _render_top_by_composite(
-    console, scores: dict[str, ExtendedScore]
+    console: Console, scores: dict[str, ExtendedScore]
 ) -> None:
     if not scores:
         return
@@ -110,7 +155,7 @@ def _render_top_by_composite(
 
 
 def _render_dip_candidates(
-    console, dip_candidates: dict[str, DipCandidateRecord]
+    console: Console, dip_candidates: dict[str, DipCandidateRecord]
 ) -> None:
     if not dip_candidates:
         return
@@ -136,7 +181,7 @@ def _render_dip_candidates(
     console.print(dip_table)
 
 
-def _render_sector_coverage(console, sector_counter: Counter) -> None:
+def _render_sector_coverage(console: Console, sector_counter: Counter[str]) -> None:
     if not sector_counter:
         return
     lines = [
@@ -151,21 +196,33 @@ def _render_sector_coverage(console, sector_counter: Counter) -> None:
     )
 
 
-def _render_red_flags(console, red_flags: list[Signal]) -> None:
+def _render_red_flags(console: Console, red_flags: list[str]) -> None:
     if not red_flags:
         return
-    rf_lines = [f"• {s.ticker}: {s.message}" for s in red_flags[:10]]
     console.print(
         Panel(
-            "\n".join(rf_lines),
-            title="Recent leadership red flags",
+            "\n".join(f"• {line}" for line in red_flags[:10]),
+            title="Integrity vetoes and leadership red flags",
             title_align="left",
             border_style="red",
         )
     )
 
 
-def _render_score_updates(console, score_updates: list[Signal]) -> None:
+def _render_stale(console: Console, stale: list[str]) -> None:
+    if not stale:
+        return
+    console.print(
+        Panel(
+            ", ".join(stale),
+            title=f"Stale rows (> {STALE_AFTER.days} days) — run `refresh all` before acting",
+            title_align="left",
+            border_style="yellow",
+        )
+    )
+
+
+def _render_score_updates(console: Console, score_updates: list[Signal]) -> None:
     if not score_updates:
         return
     recent = score_updates[-5:]
@@ -188,15 +245,17 @@ def _render_score_updates(console, score_updates: list[Signal]) -> None:
 def _render_markdown(
     scores: dict[str, ExtendedScore],
     dip_candidates: dict[str, DipCandidateRecord],
-    red_flags: list[Signal],
-    sector_counter: Counter,
+    red_flags: list[str],
+    sector_counter: Counter[str],
+    stale: list[str],
 ) -> str:
     lines: list[str] = [
         f"# Market brief — {datetime.now().strftime('%Y-%m-%d %H:%M')}",
         "",
         f"- Cached universe: {len(scores)} tickers",
         f"- Dip candidates: {len(dip_candidates)}",
-        f"- Leadership red flags: {len(red_flags)}",
+        f"- Integrity vetoes / red flags: {len(red_flags)}",
+        f"- Stale rows (> {STALE_AFTER.days}d): {len(stale)}",
         "",
     ]
     if scores:
@@ -233,7 +292,10 @@ def _render_markdown(
             lines.append(f"- {sector}: {count}")
         lines.append("")
     if red_flags:
-        lines.append("## Leadership red flags")
-        for s in red_flags[:10]:
-            lines.append(f"- **{s.ticker}**: {s.message}")
+        lines.append("## Integrity vetoes and leadership red flags")
+        lines.extend(f"- {line}" for line in red_flags[:10])
+        lines.append("")
+    if stale:
+        lines.append("## Stale rows")
+        lines.append(", ".join(stale))
     return "\n".join(lines)

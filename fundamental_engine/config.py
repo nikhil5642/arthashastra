@@ -10,6 +10,13 @@ runs fine without it.
 Config comes from an optional `.env` file at the project root. Values
 present in the process environment always win — `.env` only fills
 unset keys via `load_dotenv(override=False)`.
+
+`BASE_CURRENCY` is the investor's own currency: `pick` budgets are in
+it, and every listing's price is converted into it with live FX.
+
+`SEC_USER_AGENT` identifies this tool to SEC EDGAR (US filings history
+for backtests). SEC asks automated clients to name themselves; add a
+contact, e.g. "Your Name you@example.com", if you have one.
 """
 
 from __future__ import annotations
@@ -23,10 +30,16 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+DEFAULT_BASE_CURRENCY = "INR"
+DEFAULT_SEC_USER_AGENT = "Arthashastra fundamental-analyst/1.0 (personal research tool)"
+
+
 @dataclass(slots=True)
 class AnalystConfig:
     data_cache_dir: Path
     brave_api_key: str
+    base_currency: str = DEFAULT_BASE_CURRENCY
+    sec_user_agent: str = DEFAULT_SEC_USER_AGENT
 
     @classmethod
     def from_env(cls) -> "AnalystConfig":
@@ -45,15 +58,21 @@ class AnalystConfig:
             cache_dir = PROJECT_ROOT / cache_dir
         cache_dir.mkdir(parents=True, exist_ok=True)
 
+        base_currency = os.environ.get("BASE_CURRENCY", "").strip().upper()
         return cls(
             data_cache_dir=cache_dir,
             brave_api_key=os.environ.get("BRAVE_API_KEY", ""),
+            base_currency=base_currency or DEFAULT_BASE_CURRENCY,
+            sec_user_agent=os.environ.get("SEC_USER_AGENT", "").strip()
+            or DEFAULT_SEC_USER_AGENT,
         )
 
     def redacted(self) -> dict[str, str]:
         return {
             "data_cache_dir": str(self.data_cache_dir),
             "brave_api_key": _mask(self.brave_api_key),
+            "base_currency": self.base_currency,
+            "sec_user_agent": self.sec_user_agent,
         }
 
 

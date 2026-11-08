@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import fundamental_engine.engine as engine_module
 from data_sources.fundamentals_source import BalanceSheetSnapshot, FetchResult
 from data_sources import fundamentals_source as fs_module
 from fundamental_engine.engine import Engine
@@ -26,13 +27,15 @@ def _snap(ticker: str, *, complete: bool = True) -> BalanceSheetSnapshot:
         rev_3y_cagr=14.0,
         pat_3y_cagr=12.0,
         ocf_to_pat=1.1,
-        promoter_holding=50.0,
+        insider_holding=50.0,
         pledge_pct=0.0,
-        current_price=1500.0,
-        high_52w=1800.0,
-        low_52w=1200.0,
-        market_cap_cr=100000.0,
-        company_name=f"{ticker} Limited",
+        current_price=419.8,
+        high_52w=654.38,
+        low_52w=375.2,
+        market_cap=3.78e12,
+        currency="HKD",
+        financial_currency="CNY",
+        company_name=f"{ticker} Holdings Limited",
         sector="Test",
         industry="Test Industry",
         source="yfinance+screener",
@@ -55,13 +58,17 @@ def _install_source(
 
     # Engine imports FundamentalsSource from fundamentals_source.
     monkeypatch.setattr(fs_module, "FundamentalsSource", lambda: FakeSource())
-
-    import fundamental_engine.engine as engine_module
     monkeypatch.setattr(engine_module, "FundamentalsSource", lambda: FakeSource())
+    monkeypatch.setattr(engine_module, "conversion_rate", _fake_rate)
 
 
 def _env(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("BASE_CURRENCY", "INR")
+
+
+async def _fake_rate(currency: str, base: str) -> float | None:
+    return {"HKD": 11.3, "USD": 88.0}.get(currency)
 
 
 def _history(days: int = 20, start: float = 1400.0) -> list[tuple[str, float]]:
@@ -73,14 +80,14 @@ async def test_refresh_one_success(tmp_path: Path, monkeypatch):
     _install_source(
         monkeypatch,
         {
-            "RELIANCE": FetchResult(
-                snapshot=_snap("RELIANCE"), price_history=_history()
+            "0700.HK": FetchResult(
+                snapshot=_snap("0700.HK"), price_history=_history()
             )
         },
     )
 
     engine = Engine.from_env()
-    result = await engine.refresh_one("RELIANCE")
+    result = await engine.refresh_one("0700.HK")
 
     assert result.status == "ok"
     assert result.composite is not None
@@ -90,13 +97,21 @@ async def test_refresh_one_success(tmp_path: Path, monkeypatch):
     scores = json.loads(
         (tmp_path / "cache" / "scores.json").read_text()
     )
-    assert "RELIANCE" in scores
-    assert scores["RELIANCE"]["company_name"] == "RELIANCE Limited"
-    assert scores["RELIANCE"]["source"] == "yfinance+screener"
+    assert "0700.HK" in scores
+    assert scores["0700.HK"]["company_name"] == "0700.HK Holdings Limited"
+    assert scores["0700.HK"]["currency"] == "HKD"
+    assert scores["0700.HK"]["fx_rate_to_base"] == 11.3  # HKD → INR, cached for `pick`
 
     # Price history persisted to the SQLite store.
     with PriceHistoryStore(tmp_path / "cache" / "prices.db") as store:
-        assert store.latest("RELIANCE") is not None
+        assert store.latest("0700.HK") is not None
+
+    # The full snapshot is cached so `inspect` can answer line-item questions.
+    snapshot = json.loads(
+        (tmp_path / "cache" / "snapshots" / "0700.HK.json").read_text()
+    )
+    assert snapshot["roe"] == 18.0
+    assert snapshot["financial_currency"] == "CNY"
 
 
 async def test_refresh_one_no_data(tmp_path: Path, monkeypatch):
@@ -113,11 +128,11 @@ async def test_refresh_all_walks_emergent_universe(tmp_path: Path, monkeypatch):
     _install_source(
         monkeypatch,
         {
-            "RELIANCE": FetchResult(
-                snapshot=_snap("RELIANCE"), price_history=_history()
+            "MSFT": FetchResult(
+                snapshot=_snap("MSFT"), price_history=_history()
             ),
-            "TCS": FetchResult(
-                snapshot=_snap("TCS"), price_history=_history()
+            "RELIANCE.NS": FetchResult(
+                snapshot=_snap("RELIANCE.NS"), price_history=_history()
             ),
         },
     )
@@ -126,13 +141,13 @@ async def test_refresh_all_walks_emergent_universe(tmp_path: Path, monkeypatch):
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     (cache_dir / "scores.json").write_text(
-        json.dumps({"RELIANCE": {}, "TCS": {}})
+        json.dumps({"MSFT": {}, "RELIANCE.NS": {}})
     )
 
     engine = Engine.from_env()
-    results = await engine.refresh_all()
+    results = await engine.refresh_all(spacing_seconds=0)
     statuses = {r.ticker: r.status for r in results}
-    assert statuses == {"RELIANCE": "ok", "TCS": "ok"}
+    assert statuses == {"MSFT": "ok", "RELIANCE.NS": "ok"}
 
 
 async def test_refresh_emits_signals(tmp_path: Path, monkeypatch):
@@ -140,20 +155,20 @@ async def test_refresh_emits_signals(tmp_path: Path, monkeypatch):
     _install_source(
         monkeypatch,
         {
-            "RELIANCE": FetchResult(
-                snapshot=_snap("RELIANCE"), price_history=_history()
+            "NVDA": FetchResult(
+                snapshot=_snap("NVDA"), price_history=_history()
             )
         },
     )
 
     engine = Engine.from_env()
-    await engine.refresh_one("RELIANCE")
+    await engine.refresh_one("NVDA")
 
     signals = json.loads(
         (tmp_path / "cache" / "signals.json").read_text()
     )
     assert any(
-        s["signal_type"] == "SCORE_UPDATED" and s["ticker"] == "RELIANCE"
+        s["signal_type"] == "SCORE_UPDATED" and s["ticker"] == "NVDA"
         for s in signals
     )
 
@@ -162,10 +177,10 @@ async def test_refresh_without_history_still_succeeds(tmp_path: Path, monkeypatc
     _env(monkeypatch, tmp_path)
     _install_source(
         monkeypatch,
-        {"RELIANCE": FetchResult(snapshot=_snap("RELIANCE"), price_history=[])},
+        {"005930.KS": FetchResult(snapshot=_snap("005930.KS"), price_history=[])},
     )
 
     engine = Engine.from_env()
-    result = await engine.refresh_one("RELIANCE")
+    result = await engine.refresh_one("005930.KS")
     assert result.status == "ok"
     assert result.price_rows == 0

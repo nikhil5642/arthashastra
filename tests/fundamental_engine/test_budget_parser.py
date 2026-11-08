@@ -1,4 +1,4 @@
-"""Budget parser tests — lakhs, crores, thousands, raw rupees, invalid."""
+"""Budget parser tests — international + Indian magnitudes, invalid input."""
 
 from __future__ import annotations
 
@@ -22,6 +22,10 @@ from fundamental_engine.budget_parser import parse_budget
         ("0.5 Crore", 5_000_000),
         ("50k", 50_000),
         ("100", 100),
+        ("2.5m", 2_500_000),
+        ("3 mn", 3_000_000),
+        ("1.2bn", 1_200_000_000),
+        ("1 billion", 1_000_000_000),
     ],
 )
 def test_parse_budget_happy_path(raw, expected):

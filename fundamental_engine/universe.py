@@ -37,6 +37,9 @@ def load_scores(cache_dir: Path) -> dict[str, ExtendedScore]:
     raw = JsonStore(cache_dir / "scores.json").read()
     out: dict[str, ExtendedScore] = {}
     for ticker, data in raw.items():
+        if not isinstance(data, dict):
+            log.debug("load_scores: skipping non-object row for %s", ticker)
+            continue
         entry = {**data, "ticker": ticker}
         parsed = ExtendedScore.from_dict(entry)
         if parsed is None:
@@ -51,6 +54,9 @@ def load_dip_candidates(cache_dir: Path) -> dict[str, DipCandidateRecord]:
     raw = JsonStore(cache_dir / "dip_candidates.json").read()
     out: dict[str, DipCandidateRecord] = {}
     for ticker, data in raw.items():
+        if not isinstance(data, dict):
+            log.debug("load_dip_candidates: skipping non-object row for %s", ticker)
+            continue
         parsed = DipCandidateRecord.from_dict(ticker, data)
         if parsed is None:
             log.debug(

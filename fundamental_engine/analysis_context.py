@@ -1,8 +1,9 @@
 """Analysis-context panel shown at the top of every `analyse` run.
 
 The banner tells the reader (a) what data adapters fired, (b) whether
-the price history was refreshed, (c) whether this is a bank (different
-rubric), and (d) whether there's a cached Claude judgment and how stale
+the price history was refreshed, (c) how fresh the statements are and
+whether the sources disagreed, (d) whether this is a bank (different
+rubric), and (e) whether there's a cached Claude judgment and how stale
 it is. This is the "honesty layer" of the report — it makes explicit
 which pillars are deterministic-only vs blended with Claude.
 """
@@ -10,13 +11,20 @@ which pillars are deterministic-only vs blended with Claude.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from rich.panel import Panel
 
 from data_sources.fundamentals_source import is_bank_snapshot
+from reports.stock_report.data_quality import data_quality_summary
+
+if TYPE_CHECKING:
+    from fundamental_engine.analyse_pipeline import AnalysisResult
 
 
-def analysis_context_panel(result, ticker: str, price_rows_written: int) -> Panel:
+def analysis_context_panel(
+    result: "AnalysisResult", ticker: str, price_rows_written: int
+) -> Panel:
     """Build the 'Analysis context — <TICKER>' banner panel."""
     snap = result.snapshot
     lines: list[str] = [
@@ -35,13 +43,15 @@ def analysis_context_panel(result, ticker: str, price_rows_written: int) -> Pane
             "(empty yfinance history response)"
         )
 
+    lines.append(f"Data quality:     {data_quality_summary(snap)}")
+
     if is_bank_snapshot(snap):
         lines.append(
-            "[cyan]Bank rubric:     profitability (ROE + ROA + NIM) + PAT "
-            "growth + franchise (fee income + CD ratio) + governance. "
-            "GNPA / CASA / CRAR are not exposed by screener — verify "
-            "asset quality and capital adequacy in the Claude leadership "
-            "pillar before trusting the verdict.[/cyan]"
+            "[cyan]Bank rubric:     profitability (ROE + ROA + NIM) + asset "
+            "quality (gross / net NPA) + PAT growth + franchise (fee income + "
+            "CD ratio) + governance. CASA / CRAR are not exposed by screener — "
+            "verify funding mix and capital adequacy in the Claude judgment "
+            "before trusting the verdict.[/cyan]"
         )
 
     lines.append(_judgment_line(result))
@@ -84,7 +94,7 @@ def format_age(days: int | None) -> str:
 # ── Internals ────────────────────────────────────────────────────────────────
 
 
-def _judgment_line(result) -> str:
+def _judgment_line(result: "AnalysisResult") -> str:
     if result.judgment is None:
         return (
             "Cached judgment:  [red]none[/red]  ·  leadership / prospects / "

@@ -1,80 +1,48 @@
-"""Leadership mode classifier tests — uses date-relative years, not hardcoded."""
+"""Leadership mode classifier tests — global modes, pure logic."""
 
 from __future__ import annotations
 
-from datetime import date
-
 from fundamental_engine.leader_mode_classifier import (
-    FIRST_GEN,
-    FIRST_GEN_MAX_AGE_YEARS,
-    MULTI_GEN_FAMILY,
-    PROFESSIONAL,
     VALID_MODES,
+    LeaderMode,
     classify_mode,
 )
 
 
-def _years_ago(n: int) -> int:
-    return date.today().year - n
+def test_founder_led_regardless_of_listing_age():
+    """NVIDIA / Meta style: listed decades ago, founder still running it."""
+    assert classify_mode(founder_active=True, insider_holding_pct=4.0) == LeaderMode.FOUNDER_LED
 
 
-def test_first_gen_recent_listing_with_active_founder():
-    assert classify_mode(
-        listed_year=_years_ago(3),
-        is_founder_active=True,
-        generation=1,
-        promoter_holding_pct=35,
-    ) == FIRST_GEN
-
-
-def test_first_gen_rejected_when_founder_inactive():
-    mode = classify_mode(
-        listed_year=_years_ago(3),
-        is_founder_active=False,
-        generation=1,
-        promoter_holding_pct=35,
+def test_state_control_takes_precedence():
+    assert (
+        classify_mode(state_controlled=True, founder_active=True, insider_holding_pct=60.0)
+        == LeaderMode.STATE_CONTROLLED
     )
-    assert mode != FIRST_GEN
 
 
-def test_first_gen_rejected_when_too_old():
-    mode = classify_mode(
-        listed_year=_years_ago(FIRST_GEN_MAX_AGE_YEARS + 5),
-        is_founder_active=True,
-        generation=1,
-        promoter_holding_pct=35,
+def test_family_control_needs_a_bloc_and_a_family():
+    assert classify_mode(insider_holding_pct=50.0, generation=2) == LeaderMode.FAMILY_CONTROLLED
+    assert (
+        classify_mode(insider_holding_pct=45.0, has_family_control=True)
+        == LeaderMode.FAMILY_CONTROLLED
     )
-    assert mode != FIRST_GEN
 
 
-def test_multi_gen_family_requires_holding_and_generation():
-    assert classify_mode(
-        listed_year=_years_ago(30),
-        promoter_holding_pct=50,
-        generation=2,
-    ) == MULTI_GEN_FAMILY
+def test_widely_held_is_professional():
+    assert classify_mode(insider_holding_pct=0.1) == LeaderMode.PROFESSIONAL
+    assert classify_mode() == LeaderMode.PROFESSIONAL
 
 
-def test_multi_gen_family_accepts_family_promoter_flag():
-    assert classify_mode(
-        listed_year=_years_ago(30),
-        promoter_holding_pct=45,
-        generation=1,
-        has_family_promoter=True,
-    ) == MULTI_GEN_FAMILY
-
-
-def test_low_holding_becomes_professional():
-    assert classify_mode(
-        listed_year=_years_ago(30),
-        promoter_holding_pct=15,
-        generation=3,
-    ) == PROFESSIONAL
-
-
-def test_no_data_defaults_professional():
-    assert classify_mode() == PROFESSIONAL
+def test_legacy_mode_names_still_parse():
+    assert LeaderMode("FIRST_GEN") == LeaderMode.FOUNDER_LED
+    assert LeaderMode("MULTI_GEN_FAMILY") == LeaderMode.FAMILY_CONTROLLED
 
 
 def test_valid_modes_set():
-    assert VALID_MODES == {FIRST_GEN, MULTI_GEN_FAMILY, PROFESSIONAL}
+    assert VALID_MODES == {
+        LeaderMode.FOUNDER_LED,
+        LeaderMode.FAMILY_CONTROLLED,
+        LeaderMode.STATE_CONTROLLED,
+        LeaderMode.PROFESSIONAL,
+    }

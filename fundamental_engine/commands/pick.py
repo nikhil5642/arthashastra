@@ -1,16 +1,25 @@
-"""`pick --amount <INR>` — budget-constrained buy-the-dip candidates.
+"""`pick --amount <BUDGET>` — budget-constrained buy-the-dip candidates.
 
 Reads cached scores + the real price history SQLite DB (populated by
 `analyse` / `refresh` / the engine). For each ticker, builds a real
 PriceSnapshot from the stored daily closes (SMA / RSI from actual yfinance
 data — nothing synthesised), runs the dip gate, then ranks, diversifies,
 and allocates within the budget.
+
+The budget is in the base currency (`BASE_CURRENCY`, default INR). Each
+listing's price is converted with the FX rate cached at refresh time, so
+a ₹ budget can size positions in MSFT, 0700.HK, or RELIANCE.NS alike.
+Picks are diversified across sectors AND countries.
+
+Blocked tickers: anything whose cached score carries the integrity gate,
+plus any ticker with a LEADERSHIP_RED_FLAG signal on the bus.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -20,9 +29,15 @@ from fundamental_engine.budget_parser import parse_budget
 from fundamental_engine.cache import JsonStore
 from fundamental_engine.config import AnalystConfig
 from fundamental_engine.dip_candidate import DipCandidateRecord
+from fundamental_engine.extended_score import ExtendedScore
 from fundamental_engine.universe import load_scores
-from reports.formatting import VERDICT_STYLES, make_console
-from scorers.base import Verdict
+from reports.formatting import (
+    VERDICT_STYLES,
+    format_amount,
+    format_price,
+    make_console,
+)
+from scorers.base import Gate, Verdict
 from screener.dip_detector import (
     DEFAULT_MIN_COMPOSITE,
     DipSignal,
@@ -37,7 +52,7 @@ log = logging.getLogger(__name__)
 
 MAX_PICKS = 8
 MAX_PER_SECTOR = 2
-MIN_SHARES_AFFORDABLE = 10
+MAX_PER_COUNTRY = 4
 MIN_ALLOCATION_PCT = 5.0
 MAX_ALLOCATION_PCT = 25.0
 PRICE_DB_FILENAME = "prices.db"
@@ -48,21 +63,39 @@ class Candidate:
     ticker: str
     name: str
     sector: str
-    current_price: float
+    country: str
+    currency: str
+    current_price: float  # in the listing's trading currency
+    price_in_base: float | None  # None → no FX quote, can't size a position
     composite: float
     verdict: Verdict
     dip: DipSignal
 
 
+def _blocked_tickers(scores: dict[str, ExtendedScore], bus: SignalBus) -> set[str]:
+    """Integrity-vetoed tickers (from cached scores) + red-flag signals."""
+    vetoed = {
+        ticker
+        for ticker, extended in scores.items()
+        if Gate.INTEGRITY_VETO in extended.score.gates_applied
+    }
+    flagged = {
+        s.ticker
+        for s in bus.read_all()
+        if s.signal_type == SignalType.LEADERSHIP_RED_FLAG
+    }
+    return vetoed | flagged
+
+
 def _gather_candidates(
-    cache_dir,
+    scores: dict[str, ExtendedScore],
+    cache_dir: Path,
     *,
     min_composite: float,
     allowed_verdicts: frozenset[Verdict],
     blocked: set[str],
 ) -> tuple[list[Candidate], int]:
     """Return (candidates, tickers_missing_history)."""
-    scores = load_scores(cache_dir)
     if not scores:
         return [], 0
 
@@ -81,18 +114,24 @@ def _gather_candidates(
                 score=extended.score,
                 prices=price_snapshot,
                 blocked_tickers=blocked,
+                yoy_pat_growth=extended.latest_yoy_pat_growth,
+                yoy_revenue_growth=extended.latest_yoy_revenue_growth,
                 min_composite=min_composite,
                 allowed_verdicts=allowed_verdicts,
             )
             if not check.qualifies or check.dip is None:
                 continue
 
+            price = float(price_snapshot.current_price)
             candidates.append(
                 Candidate(
                     ticker=ticker,
                     name=extended.company_name or ticker,
                     sector=extended.sector or "Unknown",
-                    current_price=float(price_snapshot.current_price),
+                    country=extended.country or "Unknown",
+                    currency=extended.currency,
+                    current_price=price,
+                    price_in_base=_price_in_base(extended, price),
                     composite=extended.score.composite,
                     verdict=extended.score.verdict,
                     dip=check.dip,
@@ -101,17 +140,33 @@ def _gather_candidates(
     return candidates, missing_history
 
 
-def _diversify(
-    ranked: list[Candidate], max_picks: int, max_per_sector: int
-) -> list[Candidate]:
+def _price_in_base(extended: ExtendedScore, price: float) -> float | None:
+    """Convert a trading-currency price with the FX rate cached at refresh.
+
+    Rows cached before currencies were tracked carry no currency; those
+    were all base-currency (INR) listings, so their price is used as-is.
+    """
+    if not extended.currency:
+        return price
+    if extended.fx_rate_to_base is None:
+        return None
+    return price * extended.fx_rate_to_base
+
+
+def _diversify(ranked: list[Candidate]) -> list[Candidate]:
+    """Best-ranked first, at most MAX_PER_SECTOR per sector and MAX_PER_COUNTRY per country."""
     out: list[Candidate] = []
-    sector_count: dict[str, int] = {}
+    per_sector: dict[str, int] = {}
+    per_country: dict[str, int] = {}
     for c in ranked:
-        if sector_count.get(c.sector, 0) >= max_per_sector:
+        if per_sector.get(c.sector, 0) >= MAX_PER_SECTOR:
+            continue
+        if per_country.get(c.country, 0) >= MAX_PER_COUNTRY:
             continue
         out.append(c)
-        sector_count[c.sector] = sector_count.get(c.sector, 0) + 1
-        if len(out) >= max_picks:
+        per_sector[c.sector] = per_sector.get(c.sector, 0) + 1
+        per_country[c.country] = per_country.get(c.country, 0) + 1
+        if len(out) >= MAX_PICKS:
             break
     return out
 
@@ -119,20 +174,27 @@ def _diversify(
 def _allocate(
     picks: list[Candidate], budget: float
 ) -> dict[str, tuple[int, float]]:
+    """Equal-weight whole-share allocation in the base currency, capped per position.
+
+    A pick is dropped only when it has no FX-converted price, not even one
+    share fits its slice, or the position would be too small to matter
+    (< MIN_ALLOCATION_PCT of budget). Share counts are indicative — check
+    the exchange's lot size (e.g. 100-share units in Japan) before ordering.
+    """
     if not picks:
         return {}
-    target_per = budget / len(picks)
-    max_per = budget * MAX_ALLOCATION_PCT / 100
+    per_position = min(budget / len(picks), budget * MAX_ALLOCATION_PCT / 100)
     allocations: dict[str, tuple[int, float]] = {}
     for c in picks:
-        target = min(target_per, max_per)
-        shares = int(target // c.current_price) if c.current_price > 0 else 0
-        if shares < MIN_SHARES_AFFORDABLE:
+        if c.price_in_base is None or c.price_in_base <= 0:
             continue
-        rupees = round(shares * c.current_price, 2)
-        if rupees < budget * MIN_ALLOCATION_PCT / 100:
+        shares = int(per_position // c.price_in_base)
+        if shares < 1:
             continue
-        allocations[c.ticker] = (shares, rupees)
+        amount = round(shares * c.price_in_base, 2)
+        if amount < budget * MIN_ALLOCATION_PCT / 100:
+            continue
+        allocations[c.ticker] = (shares, amount)
     return allocations
 
 
@@ -141,6 +203,7 @@ def _render(
     allocations: dict[str, tuple[int, float]],
     budget: float,
     *,
+    base_currency: str,
     min_composite: float,
     min_verdict: str,
     console: Console,
@@ -149,7 +212,7 @@ def _render(
 ) -> None:
     console.print(
         Panel(
-            f"Budget: ₹{budget:,.0f}  ·  "
+            f"Budget: {format_amount(budget, base_currency)}  ·  "
             f"Universe in cache: {universe_size}  ·  "
             f"Candidates found: {len(picks)}  ·  "
             f"Gate: composite ≥ {min_composite} and verdict ≥ {min_verdict}",
@@ -183,6 +246,7 @@ def _render(
     table = Table(title="Ranked picks", title_style="bold")
     table.add_column("Ticker", style="bold")
     table.add_column("Sector")
+    table.add_column("Country")
     table.add_column("Price", justify="right")
     table.add_column("Composite", justify="right")
     table.add_column("Verdict")
@@ -196,17 +260,18 @@ def _render(
         alloc = allocations.get(c.ticker)
         if alloc is None:
             shares_str = "-"
-            alloc_str = "(below min)"
+            alloc_str = "(no FX rate)" if c.price_in_base is None else "(below min)"
         else:
-            shares, rupees = alloc
+            shares, amount = alloc
             shares_str = str(shares)
-            alloc_str = f"₹{rupees:,.0f}"
-            total_alloc += rupees
+            alloc_str = format_amount(amount, base_currency)
+            total_alloc += amount
         verdict_style = VERDICT_STYLES.get(c.verdict, "white")
         table.add_row(
             c.ticker,
             c.sector,
-            f"₹{c.current_price:,.2f}",
+            c.country,
+            format_price(c.current_price, c.currency or base_currency),
             f"{c.composite:.1f}",
             f"[{verdict_style}]{c.verdict}[/{verdict_style}]",
             f"{c.dip.drawdown_pct:.1f}%",
@@ -224,16 +289,19 @@ def _render(
             )
 
     summary_lines = [
-        f"Allocated: ₹{total_alloc:,.0f}  ·  "
-        f"Remaining: ₹{budget - total_alloc:,.0f}",
+        f"Allocated: {format_amount(total_alloc, base_currency)}  ·  "
+        f"Remaining: {format_amount(budget - total_alloc, base_currency)}",
+        "Share counts are indicative — check each exchange's lot size before ordering.",
     ]
     if sector_breakdown:
         summary_lines.append("Sector breakdown:")
-        for sector, rupees in sorted(
+        for sector, amount in sorted(
             sector_breakdown.items(), key=lambda kv: -kv[1]
         ):
-            pct = 100 * rupees / budget
-            summary_lines.append(f"  • {sector}: ₹{rupees:,.0f} ({pct:.1f}%)")
+            pct = 100 * amount / budget
+            summary_lines.append(
+                f"  • {sector}: {format_amount(amount, base_currency)} ({pct:.1f}%)"
+            )
     console.print(
         Panel(
             "\n".join(summary_lines),
@@ -249,43 +317,42 @@ def run_pick_command(
     min_composite: float = DEFAULT_MIN_COMPOSITE,
     min_verdict: str = "BUY",
 ) -> int:
+    cfg = AnalystConfig.from_env()
     budget = parse_budget(amount_raw)
     if budget is None or budget <= 0:
-        print(f"[pick] Invalid budget: {amount_raw!r}. Try '100000' or '1L'.")
+        print(
+            f"[pick] Invalid budget: {amount_raw!r}. Amounts are in "
+            f"{cfg.base_currency}; try '100000', '50k', '2.5m', or '1L'."
+        )
         return 4
 
-    cfg = AnalystConfig.from_env()
     console = make_console()
     allowed_verdicts = allowed_verdicts_from_min(min_verdict)
 
     bus = SignalBus(path=cfg.data_cache_dir / "signals.json")
-    blocked: set[str] = {
-        s.ticker
-        for s in bus.read_all()
-        if s.signal_type == SignalType.LEADERSHIP_RED_FLAG
-    }
-
-    universe_size = len(load_scores(cfg.data_cache_dir))
+    scores = load_scores(cfg.data_cache_dir)
 
     candidates, missing_history = _gather_candidates(
+        scores,
         cfg.data_cache_dir,
         min_composite=min_composite,
         allowed_verdicts=allowed_verdicts,
-        blocked=blocked,
+        blocked=_blocked_tickers(scores, bus),
     )
 
     ranked = sorted(candidates, key=lambda c: dip_rank_key(c.dip), reverse=True)
-    picks = _diversify(ranked, MAX_PICKS, MAX_PER_SECTOR)
+    picks = _diversify(ranked)
     allocations = _allocate(picks, budget)
 
     _render(
         picks,
         allocations,
         budget,
+        base_currency=cfg.base_currency,
         min_composite=min_composite,
         min_verdict=min_verdict,
         console=console,
-        universe_size=universe_size,
+        universe_size=len(scores),
         missing_history=missing_history,
     )
 

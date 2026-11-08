@@ -2,15 +2,22 @@
 
 Subcommands:
     --hello                          Print resolved config and exit.
-    resolve <NAME>                   Name → ticker candidates (yfinance search).
+    resolve <NAME>                   Name → ticker candidates on any exchange.
     refresh <TICKER>                 Fetch live data + cache score (no report).
     refresh all                      Refresh every cached ticker.
     analyse <TICKER>                 Render report for one ticker.
-    pick --amount <INR>              Buy-the-dip candidates from cached scores.
+    inspect <TICKER> [--section X]   Cached score + judgment + full snapshot as JSON.
+    pick --amount <BUDGET>           Buy-the-dip candidates (budget in BASE_CURRENCY).
     brief                            Market overview from cached state.
     research <NAME>                  Fetch Wikipedia + web research for a person.
     news <TICKER>                    Fetch per-company news via Google News RSS.
     engine                           Long-running background cache warmer.
+    migrate-ids [--dry-run]          One-time: legacy bare NSE keys → Yahoo symbols.
+
+Tickers are Yahoo symbols on any exchange: MSFT, GOOGL, RELIANCE.NS,
+0700.HK, 7203.T, SAP.DE, SHEL.L.
+
+Backtests live outside the app, like tests: `python3 -m backtests`.
 
 Qualitative pillars (leadership / prospects / news) are scored by Claude in
 the matching slash commands (`.claude/skills/<name>/SKILL.md`). Claude writes
@@ -25,6 +32,7 @@ import asyncio
 import json
 import logging
 import sys
+from typing import TYPE_CHECKING
 
 from fundamental_engine.analysis_context import (
     analysis_context_panel,
@@ -32,6 +40,10 @@ from fundamental_engine.analysis_context import (
     judgment_age_days,
 )
 from fundamental_engine.config import AnalystConfig
+from signals.fileio import atomic_write_text
+
+if TYPE_CHECKING:
+    from fundamental_engine.judgments import JudgmentStore
 
 log = logging.getLogger("fundamental_engine")
 
@@ -39,7 +51,7 @@ log = logging.getLogger("fundamental_engine")
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fundamental_engine",
-        description="Indian equity fundamental analyst — Claude Code native.",
+        description="Global equity fundamental analyst — Claude Code native.",
     )
     parser.add_argument(
         "--hello",
@@ -49,7 +61,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", title="commands")
 
     p_resolve = sub.add_parser(
-        "resolve", help="Name → ticker candidates via yfinance search."
+        "resolve", help="Name → ticker candidates on any exchange (Yahoo search)."
     )
     p_resolve.add_argument("query", help="Free-text company name.")
     p_resolve.add_argument("--limit", type=int, default=8)
@@ -74,10 +86,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_analyse.add_argument("ticker")
 
+    p_inspect = sub.add_parser(
+        "inspect",
+        help="Print the cached score, judgment, and full snapshot for a ticker as JSON.",
+    )
+    p_inspect.add_argument("ticker")
+    p_inspect.add_argument(
+        "--section",
+        action="append",
+        default=[],
+        help="Only print this snapshot field (repeatable), e.g. --section raw_profit_loss.",
+    )
+
     p_pick = sub.add_parser(
         "pick", help="Buy-the-dip candidates from cached scores."
     )
-    p_pick.add_argument("--amount", required=True, help="Budget in INR (e.g. 100000 or 1L).")
+    p_pick.add_argument(
+        "--amount",
+        required=True,
+        help="Budget in BASE_CURRENCY (e.g. 100000, 50k, 2.5m, 1L).",
+    )
     p_pick.add_argument("--min-composite", type=float, default=75.0)
     p_pick.add_argument(
         "--min-verdict",
@@ -102,7 +130,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "news",
         help="Fetch per-company news via Google News RSS. Uses cached company name unless --company is given.",
     )
-    p_news.add_argument("ticker", help="NSE/BSE ticker symbol.")
+    p_news.add_argument("ticker", help="Ticker symbol, e.g. MSFT or RELIANCE.NS.")
     p_news.add_argument(
         "--company",
         default="",
@@ -116,6 +144,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("engine", help="Run the background cache warmer (long-running).")
+
+    p_migrate = sub.add_parser(
+        "migrate-ids",
+        help="One-time: re-key legacy bare NSE tickers (RELIANCE) to Yahoo symbols (RELIANCE.NS).",
+    )
+    p_migrate.add_argument(
+        "--dry-run", action="store_true", help="List the renames without changing anything."
+    )
 
     return parser
 
@@ -132,7 +168,7 @@ def _run_resolve(query: str, limit: int, as_json: bool) -> int:
 
     matches = asyncio.run(resolve_name(query, limit=limit))
     if not matches:
-        print(f"No Indian-exchange matches for {query!r}.")
+        print(f"No equity listings match {query!r}.")
         return 3
 
     if as_json:
@@ -145,17 +181,16 @@ def _run_resolve(query: str, limit: int, as_json: bool) -> int:
     console = Console()
     table = Table(title=f"Matches for {query!r}")
     table.add_column("Ticker", style="bold")
-    table.add_column("Symbol")
     table.add_column("Exchange")
     table.add_column("Name")
     for m in matches:
-        table.add_row(m.ticker, m.symbol, m.exchange, m.long_name or m.short_name)
+        table.add_row(m.ticker, m.exchange, m.long_name or m.short_name)
     console.print(table)
     return 0
 
 
 def _run_refresh(target: str, *, rejudge: bool = False) -> int:
-    from fundamental_engine.engine import Engine
+    from fundamental_engine.engine import Engine, RefreshStatus
     from fundamental_engine.judgments import JudgmentStore
     from fundamental_engine.ticker import canonical
 
@@ -187,15 +222,15 @@ def _run_refresh(target: str, *, rejudge: bool = False) -> int:
 
     if target.lower() == "all":
         results = asyncio.run(engine.refresh_all())
-        ok = sum(1 for r in results if r.status == "ok")
-        no_data = sum(1 for r in results if r.status == "no_data")
-        errored = sum(1 for r in results if r.status == "error")
+        ok = sum(1 for r in results if r.status == RefreshStatus.OK)
+        no_data = sum(1 for r in results if r.status == RefreshStatus.NO_DATA)
+        errored = sum(1 for r in results if r.status == RefreshStatus.ERROR)
         print(
             f"Refreshed: {ok} ok, {no_data} no_data, {errored} errors "
             f"(out of {len(results)} tickers)."
         )
         for r in results:
-            if r.status == "ok":
+            if r.status == RefreshStatus.OK:
                 print(
                     f"  {r.ticker:<12} {r.verdict:<10} composite {r.composite}"
                 )
@@ -205,7 +240,7 @@ def _run_refresh(target: str, *, rejudge: bool = False) -> int:
                 "first, then `refresh all` to warm them on a schedule."
             )
     else:
-        result = asyncio.run(engine.refresh_one(target))
+        result = asyncio.run(engine.refresh_one(canonical(target)))
         print(
             f"{result.ticker}: {result.status}  "
             f"composite={result.composite}  verdict={result.verdict}  "
@@ -215,30 +250,35 @@ def _run_refresh(target: str, *, rejudge: bool = False) -> int:
 
 
 def _run_analyse(ticker: str) -> int:
-    from fundamental_engine.analyse_pipeline import NoDataError, analyse_ticker
+    from data_sources.fx_source import conversion_rate
+    from fundamental_engine.analyse_pipeline import AnalysisResult, NoDataError, analyse_ticker
     from fundamental_engine.cache import JsonStore
     from fundamental_engine.extended_score import ExtendedScore
+    from fundamental_engine.snapshot_store import SnapshotStore
     from fundamental_engine.ticker import canonical
     from reports.formatting import make_console
     from reports.stock_report import render_stock_report
-    from rich.panel import Panel
     from screener.price_history import PriceHistoryStore
 
     cfg = AnalystConfig.from_env()
     bare = canonical(ticker)
 
+    async def fetch_and_score() -> tuple[AnalysisResult, float | None]:
+        analysed = await analyse_ticker(bare, data_cache_dir=cfg.data_cache_dir)
+        fx = await conversion_rate(analysed.snapshot.currency, cfg.base_currency)
+        return analysed, fx
+
     try:
-        result = asyncio.run(
-            analyse_ticker(bare, data_cache_dir=cfg.data_cache_dir)
-        )
+        result, fx_rate = asyncio.run(fetch_and_score())
     except NoDataError as e:
         print(f"[{bare}] {e}")
         print("Check the ticker symbol (use `resolve <NAME>` to look it up).")
         return 3
 
     JsonStore(cfg.data_cache_dir / "scores.json").upsert(
-        bare, ExtendedScore.from_analysis(result).to_dict()
+        bare, ExtendedScore.from_analysis(result, fx_rate_to_base=fx_rate).to_dict()
     )
+    SnapshotStore(cfg.data_cache_dir).save(result.snapshot)
 
     price_rows_written = 0
     if result.price_history:
@@ -274,11 +314,61 @@ def _run_analyse(ticker: str) -> int:
     return 0
 
 
-def _judgment_age_days_for(store, ticker: str) -> int | None:
+def _judgment_age_days_for(store: "JudgmentStore", ticker: str) -> int | None:
     judgment = store.get(ticker)
     if judgment is None:
         return None
     return judgment_age_days(judgment.updated_at)
+
+
+def _run_inspect(ticker: str, sections: list[str]) -> int:
+    """Dump everything cached for one ticker — no network, no re-scoring."""
+    from dataclasses import fields
+
+    from data_sources.fundamentals_source import BalanceSheetSnapshot
+    from fundamental_engine.judgments import JudgmentStore
+    from fundamental_engine.snapshot_store import SnapshotStore
+    from fundamental_engine.ticker import canonical
+    from fundamental_engine.universe import load_scores
+
+    cfg = AnalystConfig.from_env()
+    bare = canonical(ticker)
+    extended = load_scores(cfg.data_cache_dir).get(bare)
+    judgment = JudgmentStore(cfg.data_cache_dir).get(bare)
+    snapshot = SnapshotStore(cfg.data_cache_dir).get(bare)
+
+    if extended is None and judgment is None and snapshot is None:
+        print(
+            f"[inspect] Nothing cached for {bare}. Run "
+            f"`python3 -m fundamental_engine refresh {bare}` first."
+        )
+        return 3
+
+    snapshot_dict = snapshot.to_dict() if snapshot is not None else None
+    if sections:
+        known = {f.name for f in fields(BalanceSheetSnapshot)}
+        unknown = [name for name in sections if name not in known]
+        if unknown:
+            print(f"[inspect] Unknown snapshot section(s): {', '.join(unknown)}")
+            print("Available: " + ", ".join(sorted(known)))
+            return 2
+        payload: dict[str, object] = {
+            "ticker": bare,
+            "snapshot": (
+                {name: snapshot_dict.get(name) for name in sections}
+                if snapshot_dict is not None
+                else None
+            ),
+        }
+    else:
+        payload = {
+            "ticker": bare,
+            "score": extended.to_dict() if extended is not None else None,
+            "judgment": judgment.to_dict() if judgment is not None else None,
+            "snapshot": snapshot_dict,
+        }
+    print(json.dumps(payload, indent=2, default=str))
+    return 0
 
 
 def _run_pick(amount_raw: str, min_composite: float, min_verdict: str) -> int:
@@ -302,12 +392,14 @@ def _run_research(name: str, ticker: str, as_json: bool) -> int:
     from rich.panel import Panel
 
     cfg = AnalystConfig.from_env()
-    bundle = asyncio.run(ResearchSource().research(name, ticker))
+    bundle = asyncio.run(
+        ResearchSource(brave_api_key=cfg.brave_api_key).research(name, ticker)
+    )
 
     research_dir = cfg.data_cache_dir / "research"
     research_dir.mkdir(parents=True, exist_ok=True)
     fp = research_dir / f"{slug(name)}.json"
-    fp.write_text(json.dumps(bundle.to_dict(), indent=2, default=str))
+    atomic_write_text(fp, json.dumps(bundle.to_dict(), indent=2, default=str))
 
     if as_json:
         print(json.dumps(bundle.to_dict(), indent=2, default=str))
@@ -361,8 +453,8 @@ def _run_research(name: str, ticker: str, as_json: bool) -> int:
 
 def _run_news(ticker: str, company_override: str, days: int, as_json: bool) -> int:
     from data_sources.news_source import NewsSource
-    from fundamental_engine.cache import JsonStore
     from fundamental_engine.ticker import canonical
+    from fundamental_engine.universe import load_scores
     from reports.formatting import make_console
     from rich.table import Table
 
@@ -371,9 +463,8 @@ def _run_news(ticker: str, company_override: str, days: int, as_json: bool) -> i
 
     company_name = company_override.strip()
     if not company_name:
-        scores = JsonStore(cfg.data_cache_dir / "scores.json").read()
-        entry = scores.get(bare) or {}
-        company_name = entry.get("company_name") or ""
+        cached = load_scores(cfg.data_cache_dir).get(bare)
+        company_name = cached.company_name if cached is not None else ""
 
     if not company_name:
         print(
@@ -392,8 +483,8 @@ def _run_news(ticker: str, company_override: str, days: int, as_json: bool) -> i
     news_dir = cfg.data_cache_dir / "news"
     news_dir.mkdir(parents=True, exist_ok=True)
     fp = news_dir / f"{bare}.json"
-    fp.write_text(
-        json.dumps([i.to_dict() for i in items], indent=2, default=str)
+    atomic_write_text(
+        fp, json.dumps([i.to_dict() for i in items], indent=2, default=str)
     )
 
     if as_json:
@@ -453,6 +544,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_refresh(args.target, rejudge=args.rejudge)
     if args.command == "analyse":
         return _run_analyse(args.ticker)
+    if args.command == "inspect":
+        return _run_inspect(args.ticker, args.section)
     if args.command == "pick":
         return _run_pick(args.amount, args.min_composite, args.min_verdict)
     if args.command == "brief":
@@ -463,6 +556,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_news(args.ticker, args.company, args.days, args.json)
     if args.command == "engine":
         return _run_engine()
+    if args.command == "migrate-ids":
+        from fundamental_engine.commands.migrate import run_migrate_command
+
+        return run_migrate_command(dry_run=args.dry_run)
 
     parser.print_help()
     return 1

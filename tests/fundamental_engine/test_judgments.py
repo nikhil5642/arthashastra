@@ -84,3 +84,29 @@ def test_judgment_partial_pillars_round_trip(tmp_path: Path):
     assert loaded.leadership is not None
     assert loaded.prospects is None
     assert loaded.news is None
+
+
+def test_integrity_veto_parsed_from_flag_or_anchor():
+    by_flag = Judgment.from_dict(
+        {"ticker": "X", "leadership": {"score": 25, "integrity_veto": True}}
+    )
+    by_anchor = Judgment.from_dict(
+        {"ticker": "X", "leadership": {"score": 25, "anchors_applied": ["integrity_veto"]}}
+    )
+    clean = Judgment.from_dict({"ticker": "X", "leadership": {"score": 80}})
+    assert by_flag.integrity_veto
+    assert by_anchor.integrity_veto
+    assert not clean.integrity_veto
+
+
+def test_integrity_veto_round_trips_through_the_store(tmp_path: Path):
+    store = JudgmentStore(tmp_path)
+    store.save(
+        Judgment(ticker="VETO", leadership=PillarJudgment(score=25), integrity_veto=True)
+    )
+    loaded = store.get("VETO")
+    assert loaded is not None and loaded.integrity_veto
+
+
+def test_integrity_veto_requires_a_leadership_pillar():
+    assert not Judgment(ticker="X", integrity_veto=True).integrity_veto

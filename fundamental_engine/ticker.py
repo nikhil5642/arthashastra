@@ -1,12 +1,9 @@
-"""Ticker symbol and name normalization helpers."""
+"""Ticker identity and name normalization helpers."""
 
 from __future__ import annotations
 
 import re
 import unicodedata
-
-NSE_SUFFIX = ".NS"
-BSE_SUFFIX = ".BO"
 
 _SLUG_STRIP_RE = re.compile(r"[^\w\s-]", re.UNICODE)
 _SLUG_COLLAPSE_RE = re.compile(r"[-\s]+")
@@ -18,19 +15,17 @@ _SLUG_DROP_CHARS = re.compile(r"['’`]")
 
 
 def canonical(raw: str) -> str:
-    """Bare canonical ticker without exchange suffix ('reliance' → 'RELIANCE')."""
-    t = raw.strip().upper()
-    if t.endswith(NSE_SUFFIX) or t.endswith(BSE_SUFFIX):
-        return t[:-3]
-    return t
+    """The canonical ticker: the Yahoo symbol, uppercased.
 
+        'msft'        → 'MSFT'          (US listings carry no suffix)
+        'reliance.ns' → 'RELIANCE.NS'
+        '0700.hk'     → '0700.HK'
 
-def yf_symbol(raw: str, *, prefer: str = "NSE") -> str:
-    """Yahoo Finance symbol ('RELIANCE' → 'RELIANCE.NS')."""
-    t = raw.strip().upper()
-    if t.endswith(NSE_SUFFIX) or t.endswith(BSE_SUFFIX):
-        return t
-    return f"{t}{NSE_SUFFIX if prefer.upper() == 'NSE' else BSE_SUFFIX}"
+    The exchange suffix is part of the identity — 'BHP' (NYSE) and
+    'BHP.AX' (ASX) are different listings — so it is never stripped and
+    no market is ever assumed.
+    """
+    return raw.strip().upper()
 
 
 def slug(raw: str) -> str:
