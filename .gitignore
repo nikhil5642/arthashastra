@@ -10,6 +10,8 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.coverage
+htmlcov/
 *.egg-info/
 build/
 dist/
@@ -17,6 +19,7 @@ dist/
 # Generated data
 data_cache/
 !data_cache/.gitkeep
+data_cache.backup-*/
 
 # OS / editor
 .DS_Store

@@ -1,26 +1,27 @@
 ---
 name: analyse-stock
-description: Full fundamental analysis of an Indian equity. Always starts from a clean slate — wipes any prior judgment, refreshes live data, then re-scores. Includes anti-optimism anchors so disrupted businesses get downgraded, not excused.
-argument-hint: <ticker or company name>
+description: Full fundamental analysis of any listed equity — US, India, China / Hong Kong, Japan, Europe, or anywhere else Yahoo lists it. Always starts from a clean slate — wipes any prior judgment, refreshes live data, then re-scores. Includes anti-optimism anchors so disrupted businesses get downgraded, not excused.
+argument-hint: <company name or ticker — e.g. Microsoft, GOOGL, RELIANCE.NS, 0700.HK, 7203.T>
 ---
 
-Run the full four-pillar fundamental analysis for **$ARGUMENTS**.
+Run the full five-pillar fundamental analysis for **$ARGUMENTS**.
 
-**Every run starts from a clean slate.** Step 2 below deletes any
-previously cached judgment for this ticker before re-fetching data, so
-the user never has to worry about stale state leaking into the verdict.
+**Every run starts from a clean slate.** Step 2 deletes any previously
+cached judgment for this ticker before re-fetching data, so stale state
+never leaks into the verdict.
 
 **Hard rules — read every time:**
 - Always resolve the input first, even if it already looks like a ticker.
-- Use the CLI exclusively. Do not `import` Python modules or write
-  ad-hoc Python snippets — every piece of data is exposed as a
-  subcommand.
+- Use the CLI for every piece of data. Do not `import` Python modules or
+  write ad-hoc Python — `inspect` exposes everything the cache holds.
 - The Python executable is `python3`, not `python`.
-- Write the judgment file via the Write tool; do not use `echo >` /
-  heredocs in bash.
+- Write the judgment file with the Write tool; never `echo >` / heredocs.
 - **No optimism by default.** The rubric below has explicit downward
-  anchors for each pillar. Apply them — a business in structural
-  decline should not score BUY just because the balance sheet is clean.
+  anchors for each pillar. Apply them — a business in structural decline
+  must not score BUY just because the balance sheet is clean.
+- **No brand priors.** Microsoft, Tencent, and HDFC Bank get exactly the
+  same rubric. If the verdict clashes with the reputation, walk through
+  the numbers before doubting the math.
 
 ## Step 1 — Resolve to a canonical ticker
 
@@ -28,13 +29,17 @@ the user never has to worry about stale state leaking into the verdict.
 python3 -m fundamental_engine resolve "$ARGUMENTS" --json
 ```
 
-Pick the top NSE match. Capture two values:
+Tickers are Yahoo symbols: US listings have no suffix (`MSFT`, `GOOGL`);
+everything else carries its exchange suffix (`RELIANCE.NS`, `0700.HK`,
+`7203.T`, `SAP.DE`, `SHEL.L`). Pick the company's **primary home-market
+listing**, not an ADR or OTC line: `7203.T` over `TM`, `0700.HK` over
+`TCEHY`, `RELIANCE.NS` over `RELIANCE.BO`. Capture:
 
-- `TICKER` — bare ticker (e.g. `RELIANCE`)
-- `COMPANY` — the `long_name` field (e.g. `Reliance Industries Limited`)
+- `TICKER` — the full symbol, suffix included
+- `COMPANY` — the `long_name` field
 
-If the top match is ambiguous, show the top 3 candidates to the user
-and ask which one they meant before proceeding.
+If the match is ambiguous (several unrelated companies, or you can't tell
+which listing is primary), show the top 3 candidates and ask the user.
 
 ## Step 2 — Wipe any stale judgment AND refresh fundamentals
 
@@ -42,117 +47,122 @@ and ask which one they meant before proceeding.
 python3 -m fundamental_engine refresh <TICKER> --rejudge
 ```
 
-The `--rejudge` flag deletes `data_cache/judgments/<TICKER>.json` (if
-present) before running the live fetch. The command prints one of:
+`--rejudge` deletes `data_cache/judgments/<TICKER>.json` before the live
+fetch and prints one of:
 
-    rejudge: cleared TCS judgment (7 days old)
-    rejudge: no prior judgment for TCS — this will be a fresh analysis
+    rejudge: cleared MSFT judgment (7 days old)
+    rejudge: no prior judgment for MSFT — this will be a fresh analysis
 
-**Remember which line appeared.** You will report it to the user at
-step 12 so they can see exactly what prior state existed.
+**Remember which line appeared** — you report it in step 13.
 
-The refresh that follows always hits live yfinance + screener.in and
-writes the extended score to `data_cache/scores.json`. It also
-populates `prices.db` with the real daily closes needed for the dip
-detector.
+The refresh always hits live data: yfinance for every listing, plus
+screener.in for Indian (`.NS` / `.BO`) listings, which adds a deeper
+history and wins on the ratios it publishes.
 
-## Step 3 — Sanity-check the deterministic baseline
+## Step 3 — Read the deterministic baseline
 
 ```bash
 python3 -m fundamental_engine analyse <TICKER>
 ```
 
-Read the "Analysis context" banner and the whole Financial Profile
-section carefully — not just the fundamentals score at the bottom. The
-Financial Profile is where the business tells its story:
+Read the "Analysis context" banner, the Financial Profile, and the Data
+quality section — not just the fundamentals score.
 
-- **`Cached judgment: none`** is what you want to see here — step 2
-  wiped it. The pillars should all show "pending Claude judgment"
-  except fundamentals.
-- **Fundamentals score and growth-deceleration VETO** — if the VETO
-  fired (`VETO: 3y growth decelerating ...`), the company is in the
-  slow bucket and every later anchor caps harder.
-- **3y revenue and PAT CAGRs** — drive the growth-bucket in step 4.
-- **Bank rubric vs industrial rubric** — if you see "Bank rubric
-  applied", the business is a bank / NBFC / insurer / AMC. GNPA /
-  CASA / CRAR are NOT in the data — you must verify them manually.
-- **Multi-year trend** (ROCE 5y / Operating margin 5y / Borrowings 3y
-  change) — is the business *improving or degrading*? A 15% ROE that
-  was 25% three years ago is a different story from a 15% ROE that
-  was 10% three years ago. Factor the direction into prospects.
-- **Shareholding trend**:
-  - **FII ≤ −2pts YoY** = smart-money exit. This is a material
-    bearish signal — flag it in news and drag prospects.
-  - **DII ≥ +2pts YoY paired with FII exit** = domestic money
-    buying what foreigners are selling. Tells you the narrative is
-    contested, not consensus.
-  - **Promoter Δ ≤ −1pt** = insider selling. Material red flag for
-    leadership; dock the score.
-  - **Promoter Δ ≥ +1pt** = insider accumulation. Material positive.
-  - **Retail shareholder count spiking while FIIs exit** = classic
-    "retail catching a falling knife" pattern. Raise the risk note.
-- **Valuation line** (P/E · P/B · Div yield) — a P/B compression
-  vs historical (e.g. HDFC Bank 4× → 2.2×) means the market has
-  already de-rated. You are NOT an early mover; ask whether the
-  re-rating thesis is done or still unfolding.
+- **Two pillars are already scored and are not yours to change:**
+  fundamentals (35%) and valuation (15%). Valuation sets the price
+  against what the business earns — earnings yield, FCF yield (P/B vs
+  ROE for banks) and P/E against its own history — and is capped at 70
+  for slow growers (value-trap guard). Use both in your narrative; never
+  re-score them. Your three pillars are leadership (25%), prospects
+  (15%) and news (10%).
+
+- **`Cached judgment: none`** is what you want here — step 2 wiped it.
+- **Currencies.** Prices and market cap are in the trading currency;
+  statement amounts in the reporting currency. They can differ (Tencent
+  trades in HKD and reports in CNY; London prices are in pence). Never
+  compare across them by hand.
+- **Data quality.** Every "Source conflict" line is two sources
+  disagreeing on a scored ratio; the report shows which one was kept.
+  A STALE annual period means the numbers may predate a material change —
+  say so and weight the verdict down.
+- **Coverage differs by market.** Indian listings carry screener depth:
+  10-year history, quarterly promoter / FII / DII flows, GNPA / NNPA for
+  banks. Elsewhere the snapshot is yfinance-only: 4 annual periods, a
+  latest insider and institutional %, no pledge or insider-flow history.
+  Where a scored input is missing, check it yourself in filings and news
+  (insider sales, share pledges, dual-class control) before scoring
+  leadership.
+- **Growth-deceleration VETO** (`VETO: 3y growth decelerating ...`) —
+  the company is in the slow bucket and every later anchor caps harder.
+- **Rubric.** "Bank rubric applied" means a bank / lender / insurer;
+  CASA / CRAR (capital adequacy) are never in the data — verify them.
+- **Multi-year trend** (ROCE / operating margin / borrowings, where
+  history exists) — a 15% ROE that was 25% three years ago is a
+  different story from one that was 10%. Factor direction into prospects.
+- **Ownership tape:**
+  - **Insider / promoter stake Δ ≤ −1pt** = insider selling — a material
+    red flag for leadership. **Δ ≥ +1pt** = insider accumulation.
+  - **FII ≤ −2pts YoY** (Indian listings) = foreign money exiting; with
+    **DII ≥ +2pts** the narrative is contested, not consensus.
+  - **Retail shareholder count spiking while institutions exit** =
+    "retail catching a falling knife". Raise the risk note.
+- **Valuation line** (P/E · P/B · dividend yield). A multiple compressed
+  versus its own history means the market already de-rated the stock — you
+  are not early; ask whether the re-rating is done or still unfolding.
+  P/B is omitted when price and book are in different currencies.
 
 ## Step 3.5 — Write the business snapshot
 
-Before you touch any pillar scoring, write a 4-sentence business
-snapshot that answers these questions. This is the single most
-important step in the whole skill — if you skip it, you will end up
-scoring ratios without understanding what the business actually does.
+Before any pillar scoring, write a 4-sentence business snapshot. This is
+the most important step — skip it and you end up scoring ratios without
+understanding the business.
 
-1. **What does the company make or do?** (products, services,
-   revenue mix — specific, not "technology" or "conglomerate").
-   The "Business — what the company actually does" panel at the top
-   of the report contains yfinance's official long business summary;
-   read it before writing your snapshot, don't rely on memory alone.
-2. **Who are the customers?** (B2B / B2C, concentrated / diversified,
-   domestic / export, sticky / promotional)
-3. **What is the moat?** (brand, scale, network effects, switching
-   costs, patents, regulation, location, cost advantage — or
-   *none*, which is itself important to state)
-4. **What is the main risk to the business *model*?** (NOT to the
-   stock — risk to the underlying business: disruption, regulation,
-   customer concentration, cyclicality, commodity exposure,
-   promoter governance, geopolitics)
+1. **What does the company make or do?** Products, services, revenue mix
+   — specific, not "technology" or "conglomerate". Read the "Business"
+   panel (Yahoo's long business summary) before relying on memory.
+2. **Who are the customers?** B2B / B2C, concentrated / diversified,
+   domestic / export, sticky / promotional.
+3. **What is the moat?** Brand, scale, network effects, switching costs,
+   patents, regulation, location, cost advantage — or *none*, which is
+   itself important to state.
+4. **What is the main risk to the business *model*?** Disruption,
+   regulation, customer concentration, cyclicality, commodity exposure,
+   controlling-shareholder governance, geopolitics.
 
-Write this down before you start scoring. Every subsequent pillar
-score must be consistent with this snapshot. If the prospects score
-contradicts the moat assessment, something is wrong — go back.
+Every pillar score must be consistent with this snapshot.
 
-**Sell-side consensus vs revealed FII flow.** The header panel shows
-the analyst bundle (e.g. `target ₹1,721 (+27.5% upside) · consensus
-Strong Buy (1.36) (34 analysts)`). Sell-side consensus is NOT
-load-bearing — it lags and is biased by investment-banking
-relationships. When analyst consensus contradicts FII flow (Strong
-Buy rating while FIIs are exiting ≥ 2pts YoY), trust the flow and
-flag the divergence in your news evidence. Upside to consensus target
-is useful for sizing, not for verdict.
+**Sell-side consensus vs revealed flows.** The header shows the analyst
+bundle (target, upside, consensus). Consensus is NOT load-bearing — it
+lags and carries investment-banking bias. When a Strong Buy consensus
+contradicts insider selling or foreign-institution exits, trust the flows
+and flag the divergence in your news evidence.
 
-**Raw data dump is available** if you need to answer a specific
-question (e.g. "has dividend payout risen or fallen over 5 years?",
-"when did CWIP spike?", "what was operating profit in FY20?").
-Every line item screener shows is stored on the snapshot under
-`raw_profit_loss`, `raw_balance_sheet`, `raw_cash_flow`, `raw_ratios`,
-`raw_quarters`, `raw_shareholding_quarterly` as `{row_label: [v0, …]}`
-dicts (oldest→newest, None for missing cells). You don't need to
-re-parse the website — write a tiny Python one-liner through the CLI
-to introspect the snapshot if the report doesn't already show what
-you need.
+**Line-item questions** ("has the dividend payout risen?", "when did
+capex spike?") — read the cached snapshot instead of re-scraping:
+
+```bash
+python3 -m fundamental_engine inspect <TICKER> --section raw_profit_loss
+```
+
+Indian listings carry every screener table (`raw_profit_loss`,
+`raw_balance_sheet`, `raw_cash_flow`, `raw_ratios`, `raw_quarters`,
+`raw_shareholding_quarterly`); `inspect <TICKER>` with no section prints
+the score, judgment, and full snapshot.
 
 ## Step 4 — Growth-bucket classification
 
-From the CAGRs you just read, pick the bucket:
+From the 3y CAGRs, pick the bucket:
 
 - **Both CAGRs ≥ 12%** — growth business; normal scoring applies.
 - **Both CAGRs 7–12%** — steady compounder; normal scoring.
 - **Both CAGRs 3–7%** — SLOW business. Hard caps kick in.
-- **Both CAGRs < 3%, or negative** — STRUCTURAL DECLINE. Caps are
-  severe; only an explicit pipeline-backed turnaround story rescues it.
+- **Both < 3%, or negative** — STRUCTURAL DECLINE. Severe caps; only an
+  explicit, pipeline-backed turnaround rescues it.
 
-Write down the bucket. It drives every cap in steps 6–9.
+CAGRs are in the reporting currency. In a high-inflation economy
+(Turkey, Argentina, Egypt, Nigeria, Pakistan, …) nominal growth flatters
+the business: deflate by local inflation and bucket on **real** growth.
+Write down the bucket — it drives every cap in steps 8–10.
 
 ## Step 5 — Fetch recent news
 
@@ -160,105 +170,125 @@ Write down the bucket. It drives every cap in steps 6–9.
 python3 -m fundamental_engine news <TICKER> --days 30 --json
 ```
 
-Flag items as **material** when they touch: earnings, governance
-(SEBI / fraud / auditor / investigation / probe), corporate actions
-(M&A, buyback, demerger, dividend), promoter (pledge, bulk deal,
-insider trading), rating (upgrade / downgrade / default), leadership
-(CEO / chairman change). Drop the rest.
+Flag items as **material** when they touch: governance (regulator action,
+fraud, auditor, investigation, restatement), rating actions, insider /
+promoter dealings (sales, pledges, block deals), leadership changes,
+corporate actions (M&A, buyback, spin-off, delisting), or earnings and
+guidance. Drop the rest.
+
+The feed is one global English edition. For companies whose news is
+mostly in another language (China, Japan, Korea, …) and the feed looks
+thin, run your own web search in that language for the same 30 days —
+regulator notices and results announcements first.
 
 **Also look for structural disruption signals:**
-- Is the core service line being automated (AI, RPA, cloud-native)?
-- Are clients deferring or cancelling multi-year deals?
-- Has the competitive moat eroded vs new-entrant AI-native vendors?
+- Is the core product or service being automated or commoditised?
+- Are customers deferring or cancelling multi-year deals?
+- Has the moat eroded against new entrants?
 - Are margins compressing in the last 2–4 quarters?
 
-These don't need an explicit "material" tag — they shape your
-prospects and news scores directly.
+These shape the prospects and news scores directly.
 
 ## Step 6 — Fetch research on the primary leader
 
-Pick the company's current chairman / MD / CEO from your knowledge.
-If you're not confident, ask the user.
+Identify the current CEO / chair / managing director (or the controlling
+shareholder, if they run it). If unsure, ask the user.
 
 ```bash
 python3 -m fundamental_engine research "<Leader Name>" --ticker <TICKER> --json
 ```
 
-This hits live Wikipedia and (if `BRAVE_API_KEY` is set) Brave Search.
+This hits live Wikipedia and, when `BRAVE_API_KEY` is set, Brave Search.
 
 ## Step 7 — Classify the leadership mode
 
-- **FIRST_GEN** — listed < 10 years + original founder still active
-- **MULTI_GEN_FAMILY** — promoter ≥ 25% + ≥2nd generation at the helm
-- **PROFESSIONAL** — institutional / low-promoter / professional CEO
+- **FOUNDER_LED** — the founder still runs or controls the company, however
+  long it has been listed (NVIDIA, Meta, a recent IPO).
+- **FAMILY_CONTROLLED** — a family / promoter group controls it, 2nd+
+  generation or a family bloc ≥ 25% (Indian promoter groups, Korean
+  chaebol, Hong Kong tycoon families, European family firms).
+- **STATE_CONTROLLED** — a government or state entity controls it
+  (Chinese SOEs, Indian PSUs, Gulf state companies).
+- **PROFESSIONAL** — widely held, professional management (Microsoft,
+  Infosys, HDFC Bank).
 
 ## Step 8 — Score leadership (0–100) with anti-optimism anchors
 
-**Base rubric:**
-- FIRST_GEN: integrity 35% + track record 30% + reputation 20% + first-time bonus 15%
-- MULTI_GEN_FAMILY: governance 30% + pledge clean 25% + succession 20% + related-party 15% + family reputation 10%
-- PROFESSIONAL: CEO track record 35% + board independence 20% + capital allocation 20% + governance 15% + tenure stability 10%
+**Base rubric by mode:**
+- FOUNDER_LED: integrity 35% + execution track record 30% + capital
+  allocation 20% + key-person / succession risk 15%
+- FAMILY_CONTROLLED: governance 30% + pledge / encumbrance clean 25% +
+  succession 20% + related-party dealings 15% + family reputation 10%
+- STATE_CONTROLLED: minority-shareholder treatment 30% + capital-allocation
+  discipline 25% + policy / political interference risk 20% + governance &
+  disclosure 15% + management stability 10%
+- PROFESSIONAL: CEO track record 35% + board independence 20% + capital
+  allocation 20% + governance 15% + tenure stability 10%
 
 **Anti-optimism anchors (apply these — do not hand-wave):**
 
-1. **Integrity veto** (all modes): fraud, SEBI action, auditor
-   resignation, prior venture bankruptcy, or material integrity failure
-   → clamp leadership ≤ 30.
-2. **Growth-accountability cap** (PROFESSIONAL mode): if the CEO's
-   tenure covers the current 3y window and BOTH CAGRs are < 7%, the
-   CEO owns the outcome. `ceo_track_record` ≤ 55 regardless of
-   tenure length or internal promotion. State explicitly in evidence.
-3. **Structural disruption cap** (all modes): core service line
-   automating away, deal pipeline shrinking, margins compressing
-   → leadership ≤ 65 regardless of everything else.
-4. **"Stable insider" bonus trap**: do not add points for "N-year
-   veteran, internal promotion" unless the CEO actually delivered
-   growth or margin expansion on their watch. Tenure by itself is
-   not track record.
+1. **Integrity veto** (all modes): fraud, enforcement action by any
+   securities regulator or prosecutor (SEC / DOJ, SEBI / ED, CSRC, SFC,
+   FCA / SFO, BaFin, JFSA, …), auditor resignation or qualified opinion,
+   restatement, a material weakness in internal controls, a substantiated
+   fraud short-report, or a prior venture's bankruptcy → clamp leadership
+   ≤ 30 **and** set `"integrity_veto": true`. Python then caps the whole
+   composite at 54 (AVOID): fraud comes with excellent *reported* numbers.
+2. **Growth-accountability cap** (PROFESSIONAL / STATE_CONTROLLED): if the
+   CEO's tenure covers the 3y window and BOTH CAGRs are < 7%, the CEO owns
+   the outcome — track record ≤ 55, whatever the tenure.
+3. **Structural disruption cap** (all modes): core line automating away,
+   deal pipeline shrinking, margins compressing → leadership ≤ 65.
+4. **"Stable insider" trap:** no points for "N-year veteran, internal
+   promotion" unless they actually delivered growth or margin expansion.
+5. **Control without accountability:** dual-class / super-voting shares,
+   pyramids, or a controlling holder with material related-party dealings
+   → governance sub-score ≤ 50 until disclosures show minorities treated
+   fairly.
 
 ## Step 9 — Score prospects (0–100) with anti-optimism anchors
 
-**Base rubric:** moat 40% + tailwind 30% + capex/guidance clarity 30%.
+**Base rubric:** moat 40% + tailwind 30% + capex / guidance clarity 30%.
 
 **Anchors:**
 
-1. **Tailwind caps given growth bucket (from step 4):**
+1. **Tailwind caps by growth bucket (step 4):**
    - CAGRs ≥ 12% → tailwind can be 60–90
    - CAGRs 7–12% → tailwind capped at 70
-   - CAGRs 3–7% → tailwind capped at **45** (near neutral)
+   - CAGRs 3–7% → tailwind capped at **45**
    - CAGRs < 3% / negative → tailwind capped at **30**
-2. **Structural-disruption cap:** active disruptive headwind (AI
-   automating legacy service revenue, EV replacing ICE, digital-
-   native replacing incumbent) → prospects ≤ **55** regardless of moat.
-3. **Moat without growth is brittle:** you can still score moat
-   70–90 for a genuine moat when growth is slow, but the weighted
-   prospects score still obeys the tailwind and disruption caps.
+2. **Structural-disruption cap:** an active disruptive headwind (AI
+   automating legacy revenue, EV replacing ICE, digital-native replacing
+   incumbent) → prospects ≤ **55** regardless of moat.
+3. **Jurisdiction cap:** material exposure to sanctions or export
+   controls, a VIE structure, capital controls, or ADR-delisting risk →
+   prospects ≤ **55** regardless of moat.
+4. **Moat without growth is brittle:** moat can still score 70–90 when
+   growth is slow, but the weighted score obeys the caps above.
 
 ## Step 10 — Score news (0–100) with anti-optimism anchors
 
-Rolling 30-day weighted sentiment × relevance over material items
-only.
+Rolling 30-day weighted sentiment × relevance over material items only.
 
-**Anchors:**
 - Material negatives in governance / rating → clamp to ≤ 35.
 - Structural-disruption headlines (layoffs, guidance cut, deal
   cancellation, margin compression) → clamp to ≤ 50.
-- A quiet news window (no material items) is **neutral, not
-  bullish** — score 55, not 70. "Nothing bad happened" is not a
-  buy signal.
+- A quiet window (no material items) is **neutral, not bullish** — 55,
+  not 70. "Nothing bad happened" is not a buy signal.
 
 ## Step 11 — Write the judgment file
 
-Use the Write tool to create `data_cache/judgments/<TICKER>.json`
-with this exact schema:
+Use the Write tool to create `data_cache/judgments/<TICKER>.json` (the
+full symbol, e.g. `MSFT.json`, `RELIANCE.NS.json`) with this schema:
 
     {
       "ticker": "<TICKER>",
       "leader_name": "<Leader Name>",
       "leadership": {
         "score": <int 0-100>,
-        "mode": "FIRST_GEN|MULTI_GEN_FAMILY|PROFESSIONAL",
+        "mode": "FOUNDER_LED|FAMILY_CONTROLLED|STATE_CONTROLLED|PROFESSIONAL",
         "integrity_score": <int 0-100>,
+        "integrity_veto": <true|false>,
         "evidence": ["bullet 1", "..."],
         "red_flags": ["..."],
         "summary": "one paragraph",
@@ -267,7 +297,7 @@ with this exact schema:
       "prospects": {
         "score": <int 0-100>,
         "evidence": ["bullet 1", "..."],
-        "anchors_applied": ["tailwind_cap_slow_growth", "structural_disruption_cap", "..."]
+        "anchors_applied": ["tailwind_cap_slow_growth", "jurisdiction_cap", "..."]
       },
       "news": {
         "score": <int 0-100>,
@@ -278,7 +308,7 @@ with this exact schema:
       "judged_by": "claude"
     }
 
-`anchors_applied` is mandatory whenever a cap fires. It's your audit
+`anchors_applied` is mandatory whenever a cap fires — it is the audit
 trail for future sessions.
 
 ## Step 12 — Render the final blended report
@@ -287,32 +317,29 @@ trail for future sessions.
 python3 -m fundamental_engine analyse <TICKER>
 ```
 
-Now the "Analysis context" banner should say `Cached judgment: 0 days
-old` with your leader name. The composite is blended with your fresh
-judgment. Sanity ladder:
+The banner should now say `Cached judgment: 0 days old` with your leader
+name. If a gate fired, it is printed under the verdict. Sanity ladder:
 
-- **≥ 80** (STRONG_BUY): underpriced quality grower, ≥ 12% CAGRs,
-  no disruption flags.
+- **≥ 80** (STRONG_BUY): underpriced quality grower, ≥ 12% CAGRs, no
+  disruption or jurisdiction flags.
 - **70–79** (BUY): steady compounder (7–12% CAGR), clean governance,
   clear catalyst.
 - **55–69** (HOLD): slow grower, mixed tailwinds, or
   balance-sheet-strong-but-growth-challenged.
 - **40–54** (AVOID): structural disruption not priced in, governance
-  fragility, or pledge-veto cases.
+  fragility, pledge-veto or integrity-gate cases.
 - **< 40** (RED_FLAG): avoid.
 
-If your composite lands in a band that feels wrong for reality, go
-back and recheck the anchors — do not override the math.
+If the band feels wrong, recheck the anchors — do not override the math.
 
 ## Step 13 — Present to the user
 
-In your response, include these three things in order:
-
-1. **Fresh-state confirmation.** One sentence stating what step 2
-   reported: either "Started fresh — no prior judgment existed" or
-   "Wiped a {N}-day-old judgment and started fresh".
-2. **Verdict + composite + confidence**, one key fact per pillar,
-   the main risks, a clear buy / hold / avoid call.
-3. **Name the anchors you applied.** The user needs to see that
-   prospects was docked for disruption, not that you forgot to dock
-   it.
+1. **Fresh-state confirmation.** One sentence from step 2: "Started
+   fresh — no prior judgment existed" or "Wiped a {N}-day-old judgment
+   and started fresh".
+2. **Verdict + composite + confidence**, one key fact per pillar, the main
+   risks, a clear buy / hold / avoid call. Quote prices in the listing's
+   currency.
+3. **Name the anchors and gates you applied**, and any data-quality
+   caveat (source conflicts, stale statements, fields missing for this
+   market) that limits confidence.

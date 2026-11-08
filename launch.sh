@@ -24,6 +24,7 @@
 #
 # Environment:
 #   DATA_CACHE_DIR  — read by AnalystConfig.from_env; defaults to ./data_cache
+#   BASE_CURRENCY   — your own currency for budgets / FX (default INR)
 #   BRAVE_API_KEY   — optional, only used by /research-founder
 #
 # Manual stop of a stray engine (in case --engine was killed uncleanly):
@@ -38,7 +39,9 @@ MODE="cockpit"   # cockpit | engine | foreground
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
-            sed -n '1,29p' "$0" | sed -e 's/^# \{0,1\}//'
+            # Print the comment header (everything after the shebang up to
+            # the first non-comment line), so the help never drifts.
+            awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
             exit 0
             ;;
         --engine)        MODE="engine" ;;
@@ -77,25 +80,28 @@ if [[ "$MODE" == "cockpit" ]]; then
     # playbooks live in .claude/skills/<name>/SKILL.md; this just points
     # Claude at them and restates the load-bearing rules.
     read -r -d '' PRIMER <<'EOF' || true
-You're driving the fundamental analyst for Indian equities in this repo.
+You're driving the fundamental analyst for global equities in this repo —
+US, India, China / Hong Kong, Japan, Europe, and any market Yahoo lists.
 
 Data model:
+- Tickers are Yahoo symbols: MSFT, GOOGL, RELIANCE.NS, 0700.HK, 7203.T.
+  Always resolve a company name first.
 - Fetching is **on-demand** — there is no background warmer running.
   Each slash command refreshes the ticker it operates on before scoring.
 - CLAUDE.md at the project root has the project rules. Read "Your role"
   and "The rules" before scoring anything. Non-negotiables: no LLM in
   Python, no hardcoding, anti-optimism defaults, verify verdicts from
-  numbers not brand priors, screener.in is authoritative for Indian
-  ratios.
+  numbers not brand priors, unknown data is never treated as good.
 
 Available slash commands:
-  /analyse-stock <TICKER>    full four-pillar deep dive
+  /analyse-stock <TICKER>    full five-pillar deep dive
   /research-founder <name>   leadership research + mode-aware rubric
   /pick-stocks <amount>      buy-the-dip candidates across the cache
   /market-brief              overview of cached universe + recent signals
   /refresh-now <TICKER|all>  force live data refresh
   /explain-score <TICKER>    audit trail for a cached score, no re-fetch
-  /resolve-ticker <name>     free-text name → NSE/BSE ticker
+  /resolve-ticker <name>     free-text name → ticker on any exchange
+  /backtest [suites]         test each scoring claim on up to 30 years of history
 
 Greet the user in one short line and ask what they want to analyse.
 Don't pre-run any commands until they ask for something specific.
@@ -157,8 +163,8 @@ if [[ ! -s "$SCORES_JSON" ]]; then
     cat >&2 <<'WARN'
 ⚠  The cache is empty. The engine will walk 0 tickers per tick until
    you load some. In another shell:
-       python3 -m fundamental_engine refresh RELIANCE
-       python3 -m fundamental_engine refresh HDFCBANK
+       python3 -m fundamental_engine refresh MSFT
+       python3 -m fundamental_engine refresh RELIANCE.NS
 
 WARN
 fi
