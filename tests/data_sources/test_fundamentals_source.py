@@ -584,6 +584,19 @@ def test_book_value_is_dropped_when_currencies_differ():
     assert samsung["dividend_yield"] == 1.85
 
 
+def test_dividend_yield_is_dropped_when_price_and_dividend_units_differ():
+    """Yahoo divides Lloyds' dividend in pounds by its price in pence: 0.04%, not 4%."""
+    for financial_currency in ("GBP", "USD"):  # Lloyds reports in pounds, Shell in dollars
+        london: dict = {}
+        yfinance_adapter._fill_valuation(
+            london,
+            {"trailingPE": 9.59, "trailingAnnualDividendYield": 0.000413,
+             "currency": "GBp", "financialCurrency": financial_currency},
+        )
+        assert "dividend_yield" not in london
+        assert london["pe_ratio"] == 9.59
+
+
 def test_yfinance_symbol_is_never_rewritten():
     assert yfinance_adapter._yf_symbol(" googl ") == "GOOGL"
     assert yfinance_adapter._yf_symbol("005930.ks") == "005930.KS"

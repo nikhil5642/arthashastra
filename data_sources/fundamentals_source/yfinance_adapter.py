@@ -536,19 +536,25 @@ def _fill_ownership(out: SnapshotFields, info: dict[str, object]) -> None:
 def _fill_valuation(out: SnapshotFields, info: dict[str, object]) -> None:
     """P/E, dividend yield, and book value — only where currencies agree.
 
-    Per-share book value is in the *reporting* currency. For a cross-listing
-    such as an ADR (BABA trades in USD, reports in CNY) price / book would
-    mix currencies, so it is left out rather than shown wrong.
+    Yahoo converts trailing EPS into the trading currency, so its P/E holds
+    for every listing. Per-share book value stays in the *reporting*
+    currency, and the trailing dividend yield divides a dividend by a price
+    in another unit whenever the two differ: Lloyds, quoted in pence, shows
+    0.04% instead of about 4%; Alibaba's ADR (USD price, CNY dividend) 6.7%
+    instead of about 1%. For those listings both are left out rather than
+    shown wrong.
     """
     pe = _info_float(info, "trailingPE")
     if pe is not None and pe > 0:
         out["pe_ratio"] = round(pe, 2)
+    currency = info.get("currency")
+    if currency != (info.get("financialCurrency") or currency):
+        return
     dividend_yield = _info_float(info, "trailingAnnualDividendYield")
     if dividend_yield is not None:
         out["dividend_yield"] = round(dividend_yield * 100, 2)
     book_value = _info_float(info, "bookValue")
-    currency = info.get("currency")
-    if book_value is not None and currency == (info.get("financialCurrency") or currency):
+    if book_value is not None:
         out["book_value_per_share"] = book_value
 
 
