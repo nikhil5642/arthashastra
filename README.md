@@ -9,10 +9,15 @@ qualitative leadership / prospects / news judgment, and the report tells
 you STRONG_BUY / BUY / HOLD / AVOID with the numbers to back it.
 
 No Anthropic API key, no cost budget, no hardcoded ticker list. The
-universe is emergent — whatever you've analysed.
+universe is every listed stock Yahoo's screener covers — about 80,000
+listings in 59 markets — plus whatever you've analysed.
 
 ## How it covers every market
 
+- **Screens the whole world.** "US and Japanese tech over $10B with ROE
+  above 15%, down 20%" reads every listing in those markets through
+  Yahoo's live screener, converts sizes into your currency, skips
+  depositary receipts and foreign copies, and scores the best matches.
 - **One pipeline for every listing.** Tickers are Yahoo symbols: `MSFT`,
   `GOOGL`, `RELIANCE.NS`, `0700.HK`, `7203.T`, `SAP.DE`, `SHEL.L`.
   Search by company name and the resolver finds the listing.
@@ -56,10 +61,21 @@ python -m fundamental_engine analyse MSFT                   # full report (live)
 python -m fundamental_engine analyse 0700.HK                # Tencent, Hong Kong
 python -m fundamental_engine analyse RELIANCE.NS            # Reliance, NSE
 python -m fundamental_engine inspect MSFT --section roe     # read the cached snapshot
+python -m fundamental_engine screen --market us jp --sector Technology \
+    --min-mcap 1000B --min-roe 15 --min-drawdown 20 --score 10  # screen two whole markets
+python -m fundamental_engine screen --max-pe 15 --min-roe 20   # all 59 markets (~1½ min)
 python -m fundamental_engine pick --amount 5L               # dips, budget in BASE_CURRENCY
+python -m fundamental_engine pick --amount 5L --tickers 8002.T 8053.T  # dips among chosen names
 python -m fundamental_engine brief                          # overview of the cache
 python -m backtests --step quarter                          # do the scores mean what they claim?
 ```
+
+`screen` filters: `--market` (Yahoo codes: us in jp gb hk cn kr de …;
+default all), `--sector`, `--industry`, `--min-mcap` / `--max-mcap` (in
+`BASE_CURRENCY`), `--max-pe`, `--min-roe`, `--max-de`,
+`--min-revenue-growth`, `--min-dividend-yield`, `--min-drawdown`, and
+`--sort mcap|drawdown|earnings-yield`. `--score N` fully fetches and
+scores the top N and adds them to the cache; `--json` is for skills.
 
 ## Slash commands (from inside Claude Code)
 
@@ -67,7 +83,8 @@ python -m backtests --step quarter                          # do the scores mean
 |---|---|
 | `/analyse-stock <name or ticker>` | Full five-pillar deep dive; Claude writes the leadership / prospects / news judgment |
 | `/research-founder <name>` | Leadership research + mode-aware rubric |
-| `/pick-stocks <amount>` | Buy-the-dip candidates across the cache, FX-converted |
+| `/screen-stocks <filters>` | Screen every listed stock in the chosen markets ("Japanese industrials, P/E under 15") and score the best |
+| `/pick-stocks <amount> [filters]` | Buy-the-dip picks for a budget — screened globally when you name filters, FX-converted |
 | `/market-brief` | Overview of the cached universe + recent signals |
 | `/refresh-now <ticker\|all>` | Force a live data refresh |
 | `/explain-score <ticker>` | Audit trail for a cached score (no re-fetch) |
@@ -117,7 +134,7 @@ back decades.
 ## Tests
 
 ```bash
-pytest                       # ~450 tests, a few seconds
+pytest                       # ~470 tests, a few seconds
 pytest --cov=data_sources --cov=scorers --cov=screener --cov=reports \
        --cov=signals --cov=fundamental_engine --cov=backtests
 ```

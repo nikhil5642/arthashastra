@@ -96,7 +96,8 @@ Data model:
 Available slash commands:
   /analyse-stock <TICKER>    full five-pillar deep dive
   /research-founder <name>   leadership research + mode-aware rubric
-  /pick-stocks <amount>      buy-the-dip candidates across the cache
+  /screen-stocks <filters>   screen every listed stock worldwide ("Japan tech, P/E < 15")
+  /pick-stocks <amount> [filters]  buy-the-dip picks for a budget, screened globally
   /market-brief              overview of cached universe + recent signals
   /refresh-now <TICKER|all>  force live data refresh
   /explain-score <TICKER>    audit trail for a cached score, no re-fetch

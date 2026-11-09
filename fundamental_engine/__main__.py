@@ -7,6 +7,7 @@ Subcommands:
     refresh all                      Refresh every cached ticker.
     analyse <TICKER>                 Render report for one ticker.
     inspect <TICKER> [--section X]   Cached score + judgment + full snapshot as JSON.
+    screen [--market …] [filters]    Screen every listing in the chosen markets (Yahoo).
     pick --amount <BUDGET>           Buy-the-dip candidates (budget in BASE_CURRENCY).
     brief                            Market overview from cached state.
     research <NAME>                  Fetch Wikipedia + web research for a person.
@@ -98,6 +99,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Only print this snapshot field (repeatable), e.g. --section raw_profit_loss.",
     )
 
+    _add_screen_parser(sub)
+
     p_pick = sub.add_parser(
         "pick", help="Buy-the-dip candidates from cached scores."
     )
@@ -111,6 +114,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--min-verdict",
         default="BUY",
         choices=["STRONG_BUY", "BUY", "HOLD", "AVOID", "RED_FLAG"],
+    )
+    p_pick.add_argument(
+        "--tickers",
+        nargs="+",
+        default=[],
+        help="Only pick among these cached tickers (e.g. the ones `screen --score` cached).",
     )
 
     sub.add_parser("brief", help="Market overview from cached state.")
@@ -154,6 +163,48 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _add_screen_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    from fundamental_engine.commands.screen import DEFAULT_LIMIT, DEFAULT_SCAN, ScreenSort
+
+    p = sub.add_parser(
+        "screen",
+        help="Screen every listed stock in the chosen markets (Yahoo's global screener).",
+    )
+    p.add_argument(
+        "--market",
+        nargs="+",
+        default=[],
+        help="Yahoo market codes: us in jp gb hk cn kr de … (default: all 59).",
+    )
+    p.add_argument("--sector", nargs="+", default=[], help="e.g. Technology 'Financial Services'.")
+    p.add_argument("--industry", nargs="+", default=[], help="e.g. Semiconductors.")
+    p.add_argument("--min-mcap", help="Minimum market cap in BASE_CURRENCY (e.g. 10B, 500cr).")
+    p.add_argument("--max-mcap", help="Maximum market cap in BASE_CURRENCY.")
+    p.add_argument("--max-pe", type=float, help="Maximum trailing P/E (loss-makers never pass).")
+    p.add_argument("--min-roe", type=float, help="Minimum return on equity, in %%.")
+    p.add_argument("--max-de", type=float, help="Maximum debt / equity, as a multiple (0.5).")
+    p.add_argument("--min-revenue-growth", type=float, help="Minimum 1-year revenue growth, in %%.")
+    p.add_argument("--min-dividend-yield", type=float, help="Minimum forward dividend yield, in %%.")
+    p.add_argument(
+        "--min-drawdown", type=float, help="Minimum %% below the 52-week high (20 = a 20%% dip)."
+    )
+    p.add_argument("--sort", choices=[s.value for s in ScreenSort], default=ScreenSort.MARKET_CAP.value)
+    p.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Rows to show.")
+    p.add_argument(
+        "--scan",
+        type=int,
+        default=DEFAULT_SCAN,
+        help="Largest matching listings read per market (250 per request).",
+    )
+    p.add_argument(
+        "--score",
+        type=int,
+        default=0,
+        help="Fully fetch and score the top N, adding them to the cache.",
+    )
+    p.add_argument("--json", action="store_true", help="Emit JSON (for skill consumption).")
 
 
 def _print_hello() -> int:
@@ -371,11 +422,48 @@ def _run_inspect(ticker: str, sections: list[str]) -> int:
     return 0
 
 
-def _run_pick(amount_raw: str, min_composite: float, min_verdict: str) -> int:
+def _run_screen(args: argparse.Namespace) -> int:
+    from fundamental_engine.budget_parser import parse_budget
+    from fundamental_engine.commands.screen import ScreenRequest, ScreenSort, run_screen_command
+
+    bounds: list[float | None] = []
+    for flag, raw in (("--min-mcap", args.min_mcap), ("--max-mcap", args.max_mcap)):
+        amount = parse_budget(raw) if raw else None
+        if raw and amount is None:
+            print(f"[screen] Invalid {flag}: {raw!r}. Try '10B', '500cr', '2.5m'.")
+            return 2
+        bounds.append(amount)
+
+    request = ScreenRequest(
+        markets=tuple(m.lower() for m in args.market),
+        sectors=tuple(args.sector),
+        industries=tuple(args.industry),
+        max_pe=args.max_pe,
+        min_roe_pct=args.min_roe,
+        max_debt_to_equity=args.max_de,
+        min_revenue_growth_pct=args.min_revenue_growth,
+        min_dividend_yield_pct=args.min_dividend_yield,
+        min_market_cap=bounds[0],
+        max_market_cap=bounds[1],
+        min_drawdown_pct=args.min_drawdown,
+        sort=ScreenSort(args.sort),
+        limit=args.limit,
+        scan=args.scan,
+        score=args.score,
+    )
+    return run_screen_command(request, as_json=args.json)
+
+
+def _run_pick(
+    amount_raw: str, min_composite: float, min_verdict: str, tickers: list[str]
+) -> int:
     from fundamental_engine.commands.pick import run_pick_command
 
     return run_pick_command(
-        amount_raw, min_composite=min_composite, min_verdict=min_verdict
+        amount_raw,
+        min_composite=min_composite,
+        min_verdict=min_verdict,
+        tickers=tickers or None,
     )
 
 
@@ -546,8 +634,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_analyse(args.ticker)
     if args.command == "inspect":
         return _run_inspect(args.ticker, args.section)
+    if args.command == "screen":
+        return _run_screen(args)
     if args.command == "pick":
-        return _run_pick(args.amount, args.min_composite, args.min_verdict)
+        return _run_pick(args.amount, args.min_composite, args.min_verdict, args.tickers)
     if args.command == "brief":
         return _run_brief()
     if args.command == "research":

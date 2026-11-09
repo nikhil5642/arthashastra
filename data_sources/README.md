@@ -26,7 +26,8 @@ data_sources/
 │   ├── history.py           #   point-in-time snapshots for backtests + SEC EPS rebasing
 │   └── primitives.py        #   parse helpers + period alignment + date-matched YoY
 ├── price_series.py          # PriceSeries — split-adjusted closes + date lookups
-├── fx_source.py             # live FX via Yahoo pairs + minor units (GBp, ZAc, ILA)
+├── universe_source.py       # Yahoo's global screener: every listing in 59 markets, filtered server-side
+├── fx_source.py             # live FX via Yahoo pairs, bridged through USD + minor units (GBp, ZAc, ILA, KWF)
 ├── names.py                 # company-name cleaning for search-style queries
 ├── research_source.py       # Wikipedia API + Brave Search + WebHit TypedDict
 └── news_source.py           # Google News RSS + FeedEntry TypedDict + NewsCategory enum
@@ -65,6 +66,29 @@ data_sources/
 - **News uses one global English edition.** The query is the
   company's everyday name (`names.news_query_name`), so "Reliance
   Industries Limited" searches as "Reliance Industries".
+
+## The global universe (screening)
+
+`universe_source` reads whole markets shallowly where
+`fundamentals_source` reads one company deeply. Yahoo's equity screener
+covers ~80,000 listings in 59 markets; `fetch_page(Criteria(...))`
+returns up to 250 of a market's largest listings that pass the filters,
+which Yahoo applies server-side to every listing in that market. Markets,
+sectors and industries come from yfinance's own lists (`markets()`,
+`sectors()`, `industries()`), never from a table here.
+
+Yahoo's conventions, verified live: ratios are currency-free and in
+percent (ROE 15 = 15%, debt / equity 50 = 0.5×); a loss-maker carries a
+negative P/E, so "P/E at most 20" is queried as 0–20; and amounts are in
+each listing's own currency, so `Criteria` takes market-cap bounds in
+the market's currency — `fundamental_engine/commands/screen.py`
+converts them. `Listing.daily_turnover` (a day's trading ÷ market cap)
+is what tells a primary listing from a depositary receipt or foreign
+copy that carries another instrument's market cap.
+
+FX: a cross Yahoo doesn't quote (MXN→INR, TRY→INR) is bridged through
+the dollar, and Kuwait's fils (`KWF`, 1/1000 of a dinar) join pence,
+cents and agorot as minor units.
 
 ## Point-in-time history (backtests)
 
@@ -111,7 +135,8 @@ this live in the root `backtests/` folder.
 
 - **Every public async method is mockable at the submodule level.**
   Tests monkeypatch `yfinance_adapter._fetch_yfinance_sync`,
-  `screener_adapter._fetch_screener_in`, and
+  `screener_adapter._fetch_screener_in`,
+  `universe_source._fetch_screen_sync`, and
   `fx_source._fetch_major_rate_sync`. `source.py` imports the adapter
   *modules* so attribute lookups happen at call time.
 - **Screener is authoritative where it has coverage** — D/E (from

@@ -105,6 +105,26 @@ def test_pick_command_finds_real_dip(tmp_path, monkeypatch):
     assert "MILD" not in data
 
 
+def test_pick_command_only_considers_chosen_tickers(tmp_path, monkeypatch, capsys):
+    """`--tickers` (e.g. a screen's scored names) narrows the universe."""
+    monkeypatch.setenv("DATA_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("COLUMNS", "160")
+    cache_dir = tmp_path / "cache"
+    _prime_scores(cache_dir)
+    _prime_prices(cache_dir)
+
+    from fundamental_engine.commands.pick import run_pick_command
+
+    rc = run_pick_command(
+        "100000", min_composite=75, min_verdict="BUY", tickers=["mild", "GHOST.L"]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Chosen tickers in cache: 1" in out and "Not in cache: GHOST.L" in out
+    # DEEPDIP is a real dip, but it wasn't chosen.
+    assert json.loads((cache_dir / "dip_candidates.json").read_text()) == {}
+
+
 def test_pick_command_empty_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_CACHE_DIR", str(tmp_path / "cache"))
     (tmp_path / "cache").mkdir(parents=True, exist_ok=True)

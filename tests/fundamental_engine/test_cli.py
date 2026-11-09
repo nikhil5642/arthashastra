@@ -187,4 +187,32 @@ def test_engine_stops_cleanly_on_interrupt(cache, capsys, monkeypatch):
 def test_brief_pick_and_migrate_dispatch(cache):
     assert main(["brief"]) == 0
     assert main(["pick", "--amount", "5L"]) == 0
+    assert main(["pick", "--amount", "5L", "--tickers", "msft", "0700.HK"]) == 0
     assert main(["migrate-ids", "--dry-run"]) == 0
+
+
+def test_screen_flags_become_a_typed_request(cache, capsys, monkeypatch):
+    from fundamental_engine.commands import screen as screen_module
+    from fundamental_engine.commands.screen import ScreenRequest, ScreenSort
+
+    seen: list[tuple[ScreenRequest, bool]] = []
+
+    def fake_run(request: ScreenRequest, *, as_json: bool) -> int:
+        seen.append((request, as_json))
+        return 0
+
+    monkeypatch.setattr(screen_module, "run_screen_command", fake_run)
+    argv = [
+        "screen", "--market", "US", "in", "--sector", "Technology", "--min-mcap", "10B",
+        "--max-pe", "25", "--min-roe", "15", "--max-de", "0.5", "--min-drawdown", "20",
+        "--sort", "drawdown", "--score", "3", "--json",
+    ]
+    assert main(argv) == 0
+    request, as_json = seen[0]
+    assert request.markets == ("us", "in") and request.sectors == ("Technology",)
+    assert (request.min_market_cap, request.max_market_cap) == (1e10, None)
+    assert (request.max_pe, request.min_roe_pct, request.max_debt_to_equity) == (25, 15, 0.5)
+    assert (request.sort, request.score, as_json) == (ScreenSort.DRAWDOWN, 3, True)
+
+    assert main(["screen", "--max-mcap", "lots"]) == 2
+    assert "Invalid --max-mcap" in capsys.readouterr().out

@@ -17,7 +17,8 @@ fundamental_engine/
 ├── __main__.py              # argparse + dispatch (thin)
 ├── commands/                # vertical-slice CLI handlers
 │   ├── __init__.py
-│   ├── pick.py              #   pick --amount <BUDGET>
+│   ├── screen.py            #   screen [--market …] [filters] [--score N]
+│   ├── pick.py              #   pick --amount <BUDGET> [--tickers …]
 │   ├── brief.py             #   brief
 │   └── migrate.py           #   migrate-ids (one-time)
 ├── analyse_pipeline.py      # analyse_ticker / score_snapshot / AnalysisResult
@@ -40,8 +41,9 @@ fundamental_engine/
 
 | Module | Purpose |
 |---|---|
-| `__main__.py` | `python3 -m fundamental_engine <subcommand>` router. Subcommands: `resolve`, `refresh`, `analyse`, `inspect`, `news`, `research`, `pick`, `brief`, `engine`, `migrate-ids`. Each handler is a thin function that parses args and delegates to a command module or pipeline. |
-| `commands/pick.py` | `run_pick_command(amount, …)` — budget in `BASE_CURRENCY`; converts each listing's price with its cached FX rate, blocks integrity-vetoed tickers, runs the dip gate against `prices.db`, diversifies by sector and country, allocates, emits signals, and persists `DipCandidateRecord` rows. |
+| `__main__.py` | `python3 -m fundamental_engine <subcommand>` router. Subcommands: `resolve`, `refresh`, `analyse`, `inspect`, `news`, `research`, `screen`, `pick`, `brief`, `engine`, `migrate-ids`. Each handler is a thin function that parses args and delegates to a command module or pipeline. |
+| `commands/screen.py` | `run_screen_command(ScreenRequest)` — screens every listed stock in the chosen markets (default all 59) through `data_sources.universe_source`: Yahoo applies the ratio filters server-side; here market-cap bounds are converted per market and re-checked per listing in the base currency, depositary receipts and foreign copies are skipped (< 0.001% of market cap traded a day), and each company keeps its most traded listing. `--score N` runs the top N through `Engine.refresh_one` so they join the cache. `ScreenSort` StrEnum orders by market cap, drawdown, or earnings yield. |
+| `commands/pick.py` | `run_pick_command(amount, …, tickers=None)` — budget in `BASE_CURRENCY`; converts each listing's price with its cached FX rate, blocks integrity-vetoed tickers, runs the dip gate against `prices.db`, diversifies by sector and country, allocates, emits signals, and persists `DipCandidateRecord` rows. `tickers` narrows the universe (e.g. to a screen's scored names) and names any that aren't cached. |
 | `commands/brief.py` | `run_brief_command()` — top names, dip candidates, sector coverage, integrity vetoes / red flags, stale rows, recent score updates; terminal panels + Markdown mirror. |
 | `commands/migrate.py` | `run_migrate_command(dry_run)` — one-time re-key of legacy bare NSE tickers to Yahoo symbols across every cache file, with a backup and a never-twice marker. |
 | `snapshot_store.py` | `SnapshotStore` — `analyse` / `refresh` save the full scored snapshot (raw dumps, provenance, conflicts) to `data_cache/snapshots/<TICKER>.json`; `inspect` reads it. |
@@ -49,7 +51,7 @@ fundamental_engine/
 | `analysis_context.py` | `analysis_context_panel(result, ticker, price_rows_written)` — the banner shown at the top of every `analyse` run. Also `judgment_age_days()` + `format_age()` helpers used by the STALE warning hint. |
 | `extended_score.py` | **`ExtendedScore` dataclass — the single serialization boundary for `scores.json`.** `.from_analysis(result)` builds from an `AnalysisResult`, `.from_dict(data)` parses raw JSON via explicit isinstance-checked helpers (`_as_float`, `_as_str`, `_parse_evidence`), `.to_dict()` flattens for storage. Corrupt rows return `None` instead of crashing. |
 | `dip_candidate.py` | **`DipCandidateRecord` dataclass — the single serialization boundary for `dip_candidates.json`.** Wraps a `DipSignal` with name + sector metadata. Uses `_parse_severity`, `_as_float`, `_as_int`, `_as_str` for untyped-input coercion. |
-| `engine.py` | Background cache warmer. Walks the emergent universe, fetches via `FundamentalsSource.fetch_full()`, persists `ExtendedScore.from_analysis(result).to_dict()` to `scores.json` and raw daily closes to `prices.db`. Never calls an LLM. |
+| `engine.py` | Background cache warmer. Walks the cached universe, fetches via `FundamentalsSource.fetch_full()`, persists `ExtendedScore.from_analysis(result).to_dict()` to `scores.json` and raw daily closes to `prices.db`. Never calls an LLM. |
 | `resolver.py` | Free-text name → Yahoo symbol on any exchange. Equities only, ranked by name match with Yahoo's relevance order as tie-breaker; legal suffixes stripped via `data_sources.names`. |
 | `judgments.py` | `Judgment` + `PillarJudgment` + `JudgmentStore`. The only place Claude writes back to the cache. Per-ticker JSON files under `data_cache/judgments/`. `from_dict` narrows raw JSON with explicit isinstance checks. |
 | `universe.py` | `load_universe(cache_dir) -> list[str]` (names only), `load_scores(cache_dir) -> dict[str, ExtendedScore]`, `load_dip_candidates(cache_dir) -> dict[str, DipCandidateRecord]`. Every loader returns typed objects; rows that fail parsing are logged and skipped. |

@@ -43,14 +43,19 @@ Every session Claude works in this repo, the default workflow is:
    `raw_shareholding_quarterly`) keyed by the screener row label. Read
    them with `python3 -m fundamental_engine inspect <TICKER> --section
    raw_profit_loss` — no re-scrape, no ad-hoc Python.
-3. If the user asks whether the scoring **works** → `/backtest` (or
+3. If the user asks to **find / screen / pick stocks** by filters
+   ("US and Japanese tech over $10B, down 20%") → `/screen-stocks` or
+   `/pick-stocks <budget> <filters>`. Both read every listed stock in the
+   chosen markets through Yahoo's screener (`python3 -m fundamental_engine
+   screen …`), not just the cache, then score the best matches.
+4. If the user asks whether the scoring **works** → `/backtest` (or
    `python3 -m backtests [SUITE …] --tickers <SYMBOLS|all> --years 30
    --step year|quarter`). Each suite in `backtests/suites/` tests one
    claim (fundamentals ranks returns, the growth veto is justified, dip
    signals pay, …) on point-in-time history and reports PASS / WEAK PASS
    / WEAK FAIL / FAIL / NO DATA (FAIL needs |t| ≥ 2 against the claim).
    Report the coverage, the t-stats, and every FAIL honestly.
-4. If the user asks you to **change the code** → obey the layer
+5. If the user asks you to **change the code** → obey the layer
    discipline (see "Architecture" below), add a typed interface for
    any new field / shape / value (see "Typed interfaces"), and
    write/update tests that monkeypatch adapters instead of loading
@@ -64,7 +69,10 @@ Every session Claude works in this repo, the default workflow is:
    data — including its exchange and currencies — comes from a live API
    at fetch time. Data sources select themselves by coverage (screener
    answers only for `.NS` / `.BO` listings), so no code branches on a
-   market. The universe is emergent — whatever the user has analysed.
+   market. The universe is either live — every listing Yahoo's screener
+   covers (~80,000 in 59 markets, via `screen`) — or whatever the user
+   has analysed (the cache). Markets, sectors and industries are
+   yfinance's own lists.
 
 2. **No LLM calls from Python.** `scorers/leadership_scorer.py` and
    `scorers/qualitative_scorer.py` do NOT exist. Don't add them. The
@@ -196,7 +204,8 @@ Read those when you're touching a layer for the first time.
 fundamental_engine/          # orchestrator + CLI commands — see README.md
 ├── __main__.py              # argparse + dispatch (the thin CLI shim)
 ├── commands/                # one file per CLI subcommand that needs orchestration
-│   ├── pick.py              #   pick --amount <BUDGET>  (FX-converted, sector + country caps)
+│   ├── screen.py            #   screen [--market …] [filters] [--score N] — every listed stock, globally
+│   ├── pick.py              #   pick --amount <BUDGET> [--tickers …]  (FX-converted, sector + country caps)
 │   ├── brief.py             #   brief
 │   └── migrate.py           #   migrate-ids — one-time bare NSE keys → Yahoo symbols
 ├── analyse_pipeline.py      # analyse_ticker / score_snapshot / AnalysisResult
@@ -229,8 +238,9 @@ data_sources/                # live data adapters — see README.md
 │   ├── history.py           #   StatementHistory + snapshot_as_of + rebase_sec_eps (point-in-time)
 │   └── primitives.py        #   parse helpers + period alignment + date-matched YoY
 ├── price_series.py          # PriceSeries — split-adjusted closes + date lookups
-├── names.py                 # company-name cleaning shared by resolver + news queries
-├── fx_source.py             # live FX via Yahoo pairs + minor units (GBp, ZAc, ILA)
+├── universe_source.py       # Yahoo's global screener: Criteria → EquityQuery, Listing rows
+├── names.py                 # company-name cleaning shared by resolver, news, and screen
+├── fx_source.py             # live FX via Yahoo pairs (bridged through USD) + minor units (GBp, ZAc, ILA, KWF)
 ├── research_source.py       # Wikipedia API + Brave Search (WebHit TypedDict)
 └── news_source.py           # Google News RSS (FeedEntry TypedDict) + NewsCategory enum
 
@@ -267,6 +277,7 @@ signals/                     # append-only file pub/sub + shared file I/O — se
 ├── resolve-ticker/SKILL.md
 ├── analyse-stock/SKILL.md
 ├── research-founder/SKILL.md
+├── screen-stocks/SKILL.md
 ├── pick-stocks/SKILL.md
 ├── market-brief/SKILL.md
 ├── refresh-now/SKILL.md
@@ -329,6 +340,7 @@ callers get IDE autocomplete and exhaustive iteration.
 | `NewsCategory`        | `data_sources/news_source.py`                      | GOVERNANCE · RATING · INSIDER · LEADERSHIP · CORPORATE_ACTION · EARNINGS (severity order) |
 | `Severity`            | `signals/signal_bus.py`                            | INFO · ALERT · URGENT |
 | `SignalType`          | `signals/signal_bus.py`                            | DIP_DETECTED · QUALITY_DIP · LEADERSHIP_NEWS · … |
+| `ScreenSort`          | `fundamental_engine/commands/screen.py`            | MARKET_CAP · DRAWDOWN · EARNINGS_YIELD |
 | `Step`                | `backtests/engine/schedule.py`                     | YEAR · QUARTER |
 | `ScoreKind`           | `backtests/engine/metrics.py`                      | FUNDAMENTALS · VALUATION · COMBINED |
 | `Outcome`             | `backtests/suite.py`                               | PASS · WEAK_PASS · WEAK_FAIL · FAIL · NO_DATA |

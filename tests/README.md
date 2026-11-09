@@ -7,7 +7,7 @@ keys**. Every live adapter is monkeypatched at the module level.
 pytest
 ```
 
-~450 tests, ~96% line coverage, runs in a few seconds.
+~470 tests, ~96% line coverage, runs in a few seconds.
 
 ## Layout
 
@@ -24,7 +24,8 @@ tests/
 │   ├── test_sec_adapter.py              # inline companyfacts payloads
 │   ├── test_history.py                  # point-in-time snapshots, no look-ahead, SEC EPS rebasing
 │   ├── test_valuation.py                # P/E, yields, P/B, P/E history; ADRs, pence, as-of pricing
-│   ├── test_fx_source.py                # mocks _fetch_major_rate_sync; minor units
+│   ├── test_fx_source.py                # mocks _fetch_major_rate_sync; minor units, USD bridge
+│   ├── test_universe_source.py          # real EquityQuery building; mocks _fetch_screen_sync
 │   ├── test_names.py                    # pure logic
 │   ├── test_research_source.py          # mocks _fetch_wikipedia_sync + _fetch_brave_search
 │   └── test_news_source.py              # mocks _fetch_feed_sync
@@ -43,6 +44,7 @@ tests/
 │   ├── test_engine.py                   # mocks FundamentalsSource + verifies prices.db
 │   ├── test_migrate_command.py          # legacy cache → Yahoo symbols, once
 │   ├── test_pick_command.py             # seed scores.json + prices.db, run command
+│   ├── test_screen_command.py           # fake Yahoo screener per market + fake FX
 │   ├── test_resolver.py                 # mocks yfinance.Search
 │   ├── test_judgments.py                # pure I/O, tmp_path
 │   ├── test_snapshot_store.py           # pure I/O, tmp_path

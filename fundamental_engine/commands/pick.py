@@ -9,7 +9,9 @@ and allocates within the budget.
 The budget is in the base currency (`BASE_CURRENCY`, default INR). Each
 listing's price is converted with the FX rate cached at refresh time, so
 a ₹ budget can size positions in MSFT, 0700.HK, or RELIANCE.NS alike.
-Picks are diversified across sectors AND countries.
+Picks are diversified across sectors AND countries. `--tickers` narrows the
+universe to a chosen set — typically the names `screen --score` just
+cached from a global screen.
 
 Blocked tickers: anything whose cached score carries the integrity gate,
 plus any ticker with a LEADERSHIP_RED_FLAG signal on the bus.
@@ -30,6 +32,7 @@ from fundamental_engine.cache import JsonStore
 from fundamental_engine.config import AnalystConfig
 from fundamental_engine.dip_candidate import DipCandidateRecord
 from fundamental_engine.extended_score import ExtendedScore
+from fundamental_engine.ticker import canonical
 from fundamental_engine.universe import load_scores
 from reports.formatting import (
     VERDICT_STYLES,
@@ -209,17 +212,25 @@ def _render(
     console: Console,
     universe_size: int,
     missing_history: int,
+    chosen: bool = False,
+    not_cached: tuple[str, ...] = (),
 ) -> None:
     console.print(
         Panel(
             f"Budget: {format_amount(budget, base_currency)}  ·  "
-            f"Universe in cache: {universe_size}  ·  "
+            f"{'Chosen tickers in cache' if chosen else 'Universe in cache'}: {universe_size}  ·  "
             f"Candidates found: {len(picks)}  ·  "
             f"Gate: composite ≥ {min_composite} and verdict ≥ {min_verdict}",
             title="Buy-the-dip picks",
             title_align="left",
         )
     )
+
+    if not_cached:
+        console.print(
+            f"[yellow]Not in cache: {', '.join(not_cached)} — run `fundamental_engine "
+            f"screen … --score N` or `refresh <TICKER>` first.[/yellow]"
+        )
 
     if universe_size == 0:
         console.print(
@@ -316,6 +327,7 @@ def run_pick_command(
     *,
     min_composite: float = DEFAULT_MIN_COMPOSITE,
     min_verdict: str = "BUY",
+    tickers: list[str] | None = None,
 ) -> int:
     cfg = AnalystConfig.from_env()
     budget = parse_budget(amount_raw)
@@ -331,6 +343,11 @@ def run_pick_command(
 
     bus = SignalBus(path=cfg.data_cache_dir / "signals.json")
     scores = load_scores(cfg.data_cache_dir)
+    not_cached: tuple[str, ...] = ()
+    if tickers is not None:
+        chosen = [canonical(t) for t in tickers]
+        not_cached = tuple(t for t in chosen if t not in scores)
+        scores = {t: scores[t] for t in chosen if t in scores}
 
     candidates, missing_history = _gather_candidates(
         scores,
@@ -354,6 +371,8 @@ def run_pick_command(
         console=console,
         universe_size=len(scores),
         missing_history=missing_history,
+        chosen=tickers is not None,
+        not_cached=not_cached,
     )
 
     # Persist dip candidates as typed DipCandidateRecord rows. `brief`
