@@ -8,10 +8,19 @@ from data_sources import fx_source
 from data_sources.fx_source import conversion_rate, major_unit
 
 
-def test_major_unit_handles_pence_and_cents():
+def test_major_unit_handles_pence_cents_and_fils():
     assert major_unit("GBp") == ("GBP", 100.0)
     assert major_unit("ZAc") == ("ZAR", 100.0)
+    assert major_unit("KWF") == ("KWD", 1000.0)
     assert major_unit("usd") == ("USD", 1.0)
+
+
+async def test_missing_cross_is_bridged_through_the_dollar(monkeypatch):
+    """Yahoo has no MXNINR=X; 1 MXN = 0.055 USD and 1 USD = 90 INR → 4.95 INR."""
+    quotes = {("MXN", "USD"): 0.055, ("USD", "INR"): 90.0}
+    monkeypatch.setattr(fx_source, "_fetch_major_rate_sync", lambda f, t: quotes.get((f, t)))
+    assert await conversion_rate("MXN", "INR") == pytest.approx(4.95)
+    assert await conversion_rate("XYZ", "INR") is None  # no leg → still unknown
 
 
 async def test_same_currency_needs_no_request(monkeypatch):
