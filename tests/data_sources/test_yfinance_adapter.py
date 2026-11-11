@@ -162,3 +162,172 @@ def test_cagr_skips_non_consecutive_years():
         index=["Total Revenue"],
     )
     assert yfinance_adapter._compute_cagr(gappy, ("Total Revenue",), years=3) is None
+
+
+# ── The quarters since the fiscal year: trailing twelve months, trends, changes ──
+
+Q = pd.to_datetime(["2026-09-30", "2026-06-30", "2026-03-31", "2025-12-31", "2025-09-30"])
+
+
+class FakeAlphabet(FakeSamsung):
+    """A US filer with five clean quarters, paper gains in its profit, and a debt-funded build-out."""
+
+    income_stmt = pd.DataFrame(
+        {
+            YEARS[0]: [400.0, 130.0, 132.0, 112.0, 11.0],
+            YEARS[1]: [350.0, 112.0, 100.0, 98.0, 8.0],
+            YEARS[2]: [307.0, 84.0, 74.0, 76.0, 5.8],
+            YEARS[3]: [283.0, 75.0, 60.0, 65.0, 4.6],
+        },
+        index=["Total Revenue", "Operating Income", "Net Income", "Normalized Income", "Diluted EPS"],
+    )
+    balance_sheet = pd.DataFrame(
+        {YEARS[0]: [595.0, 103.0, 415.0, 59.0], YEARS[1]: [450.0, 89.0, 325.0, 23.0]},
+        index=["Total Assets", "Current Liabilities", "Stockholders Equity", "Total Debt"],
+    )
+    cashflow = pd.DataFrame(
+        {YEARS[0]: [165.0, -92.0, 25.0]},
+        index=["Operating Cash Flow", "Capital Expenditure", "Stock Based Compensation"],
+    )
+    quarterly_income_stmt = pd.DataFrame(
+        {
+            Q[0]: [128.0, 41.0, 26.0, 34.0],
+            Q[1]: [120.0, 41.0, 112.0, 32.0],
+            Q[2]: [110.0, 40.0, 63.0, 33.0],
+            Q[3]: [114.0, 36.0, 34.0, 32.0],
+            Q[4]: [102.0, 31.0, 35.0, 26.0],
+        },
+        index=["Total Revenue", "Operating Income", "Net Income", "Normalized Income"],
+    )
+    quarterly_cashflow = pd.DataFrame(
+        {Q[0]: [42.0, -51.0, 8.6], Q[1]: [39.0, -45.0, 8.0], Q[2]: [46.0, -36.0, 6.8],
+         Q[3]: [52.0, -28.0, 7.0], Q[4]: [48.0, -24.0, 6.4]},
+        index=["Operating Cash Flow", "Capital Expenditure", "Stock Based Compensation"],
+    )
+    quarterly_balance_sheet = pd.DataFrame(
+        {
+            Q[0]: [1003.0, 678.0, 142.0, 73.0, 67.0, 12.29],
+            Q[1]: [922.0, 640.0, 113.0, 69.0, 67.0, 12.23],
+            Q[2]: [704.0, 479.0, 90.0, 63.0, 67.0, 12.12],
+            Q[3]: [595.0, 415.0, 59.0, 63.0, 33.0, 12.09],
+            Q[4]: [536.0, 387.0, 34.0, 57.0, 33.0, 12.08],
+        },
+        index=["Total Assets", "Stockholders Equity", "Total Debt", "Accounts Receivable",
+               "Goodwill And Other Intangible Assets", "Ordinary Shares Number"],
+    )
+
+
+@pytest.fixture
+def alphabet(monkeypatch):
+    import yfinance
+
+    monkeypatch.setattr(yfinance, "Ticker", FakeAlphabet)
+
+
+def test_trailing_twelve_months_cover_the_four_newest_quarters(alphabet):
+    out, _ = yfinance_adapter._fetch_yfinance_sync("GOOG")
+
+    assert out["ttm_period_end"] == "2026-09-30"
+    assert out["ttm_revenue"] == 128 + 120 + 110 + 114
+    assert out["ttm_net_income"] == 26 + 112 + 63 + 34
+    assert out["ttm_operating_cash_flow"] == 42 + 39 + 46 + 52
+    assert out["ttm_capex"] == 51 + 45 + 36 + 28  # outflows, stored positive
+    assert out["ttm_free_cash_flow"] == (42 + 39 + 46 + 52) - (51 + 45 + 36 + 28)
+    assert out["ttm_stock_based_compensation"] == pytest.approx(8.6 + 8.0 + 6.8 + 7.0)
+    # The fiscal year stays what it was — the scored ratios are annual.
+    assert (out["operating_cash_flow"], out["capex"], out["free_cash_flow"]) == (165.0, 92.0, 73.0)
+    assert out["revenue"] == 400.0 and out["stock_based_compensation"] == 25.0
+
+
+def test_core_earnings_ratio_is_normalized_over_reported_profit(alphabet):
+    out, _ = yfinance_adapter._fetch_yfinance_sync("GOOG")
+    assert out["core_earnings_ratio_fy"] == round(112 / 132, 3)
+    assert out["core_earnings_ratio_ttm"] == round((34 + 32 + 33 + 32) / (26 + 112 + 63 + 34), 3)
+    # A loss-making period has no ratio: there is no profit to be a share of.
+    assert yfinance_adapter._core_earnings_ratio(5.0, -10.0) is None
+    assert yfinance_adapter._core_earnings_ratio(None, 10.0) is None
+
+
+def test_balance_sheet_changes_compare_the_latest_quarter_with_a_year_earlier(alphabet):
+    out, _ = yfinance_adapter._fetch_yfinance_sync("GOOG")
+    assert out["balance_sheet_date"] == "2026-09-30"
+    assert out["debt_change_1y_pct"] == round((142 - 34) / 34 * 100, 1)
+    assert out["latest_debt_to_equity"] == round(142 / 678, 3)
+    assert out["debt_to_equity_1y_ago"] == round(34 / 387, 3)
+    assert out["receivables_change_1y_pct"] == round((73 - 57) / 57 * 100, 1)
+    assert out["goodwill_change_1y_pct"] == round((67 - 33) / 33 * 100, 1)
+    assert out["latest_goodwill_to_equity"] == round(67 / 678, 3)
+    assert out["share_count_change_1y_pct"] == round((12.29 - 12.08) / 12.08 * 100, 1)
+    assert "inventory_change_1y_pct" not in out  # no inventory row: unknown, not zero
+
+
+def test_a_split_inside_the_year_leaves_the_share_count_change_unknown(monkeypatch):
+    import yfinance
+
+    class SplitAlphabet(FakeAlphabet):
+        def history(self, period: str, auto_adjust: bool) -> pd.DataFrame:
+            days = pd.to_datetime(["2026-07-15", "2026-11-05"])
+            return pd.DataFrame(
+                {"Close": [150.0, 285.0], "Adj Close": [150.0, 285.0], "High": [151.0, 286.0],
+                 "Low": [149.0, 284.0], "Stock Splits": [20.0, 0.0]},
+                index=days,
+            )
+
+    monkeypatch.setattr(yfinance, "Ticker", SplitAlphabet)
+    out, _ = yfinance_adapter._fetch_yfinance_sync("GOOG")
+    assert "share_count_change_1y_pct" not in out
+    assert out["debt_change_1y_pct"] > 0  # everything else is still compared
+
+
+def test_fiscal_year_trends_and_quarterly_margins(alphabet):
+    out, _ = yfinance_adapter._fetch_yfinance_sync("GOOG")
+    # Oldest → newest.
+    assert out["sales_annual_trend"] == [283.0, 307.0, 350.0, 400.0]
+    assert out["net_margin_annual_trend"] == [
+        round(60 / 283 * 100, 2), round(74 / 307 * 100, 2), round(100 / 350 * 100, 2), 33.0
+    ]
+    assert out["operating_margin_annual_trend"][-1] == 32.5
+    # ROCE needs a balance sheet for the same fiscal year-end: only two years have one.
+    assert out["roce_annual_trend"] == [round(112 / (450 - 89) * 100, 2), round(130 / (595 - 103) * 100, 2)]
+    # Newest first, aligned with quarterly_dates.
+    assert out["quarterly_dates"][0] == "2026-09-30"
+    assert out["quarterly_operating_margin"] == [
+        round(41 / 128 * 100, 2), round(41 / 120 * 100, 2), round(40 / 110 * 100, 2),
+        round(36 / 114 * 100, 2), round(31 / 102 * 100, 2),
+    ]
+
+
+def test_half_yearly_reporters_get_no_trailing_window(samsung):
+    # FakeSamsung's quarterly frame holds three scattered quarters.
+    out, _ = yfinance_adapter._fetch_yfinance_sync("005930.KS")
+    assert "ttm_period_end" not in out and "ttm_revenue" not in out
+    assert out["quarterly_operating_margin"] == [None, None, None]  # no operating line per quarter
+
+
+def test_cash_flow_of_another_window_is_not_mixed_in(monkeypatch):
+    import yfinance
+
+    class LaggingCashFlow(FakeAlphabet):
+        quarterly_cashflow = FakeAlphabet.quarterly_cashflow.drop(columns=[Q[0]])
+
+    monkeypatch.setattr(yfinance, "Ticker", LaggingCashFlow)
+    out, _ = yfinance_adapter._fetch_yfinance_sync("GOOG")
+    assert out["ttm_revenue"] == 472.0  # the income window still stands
+    assert "ttm_free_cash_flow" not in out and "ttm_capex" not in out
+
+
+def test_profit_that_turned_into_a_loss_counts_as_minus_100_growth():
+    df = pd.DataFrame(
+        {YEARS[0]: [-12.0, 300.0], YEARS[1]: [5.0, 280.0], YEARS[2]: [20.0, 260.0], YEARS[3]: [40.0, 250.0]},
+        index=["Net Income", "Total Revenue"],
+    )
+    assert yfinance_adapter._compute_cagr(df, ("Net Income",), years=3, wiped_out_counts=True) == -100.0
+    assert yfinance_adapter._compute_cagr(df, ("Net Income",), years=3) is None
+
+
+def test_ebit_is_not_a_stand_in_for_operating_income():
+    """Yahoo's EBIT carries other income and one-off gains — coverage must not use it."""
+    is_ = pd.DataFrame({YEARS[0]: [160.0, 2.0, 400.0]}, index=["EBIT", "Interest Expense", "Total Revenue"])
+    out = yfinance_adapter.SnapshotFields()
+    yfinance_adapter._fill_income_statement_derived(out, is_, None)
+    assert "interest_coverage" not in out and "operating_margin" not in out

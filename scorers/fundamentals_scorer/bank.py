@@ -29,13 +29,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from enum import StrEnum
 
-from data_sources.fundamentals_source import BalanceSheetSnapshot
+from data_sources.fundamentals_source import PROFIT_WIPED_OUT_CAGR, BalanceSheetSnapshot
 from scorers.base import Pillar, ScorerResult
 from scorers.fundamentals_scorer import ownership
 
 
 class BankComponent(StrEnum):
-    """Typed identifiers for the four bank sub-scorers.
+    """Typed identifiers for the five bank sub-scorers.
 
     Parallels `IndustrialComponent` — same typo-safety rationale.
     """
@@ -254,6 +254,8 @@ def _score_growth(
         s = v * 5
     else:
         s = 0.0
+    if v <= PROFIT_WIPED_OUT_CAGR:
+        return s, ["PAT over 3 years: profit turned into a loss → 0/100"]
     return s, [
         f"PAT 3y CAGR = {v:.1f}% → {s:.0f}/100 "
         f"(bank curve; revenue CAGR omitted — merger step-changes distort it)"

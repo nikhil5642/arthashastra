@@ -12,9 +12,13 @@ Every suite is judged by the same rules, fixed before looking at data:
     FAIL       it points the other way, and |t| ≥ 2 — the data contradicts the claim
     NO DATA    too few dates or observations to say anything
 
+Every estimate is one number per date, and the t-stat is taken across
+dates. Returns on one date move together, so a date is one piece of
+evidence however many tickers it holds.
+
 Most claims take one of two shapes, built here so every suite reads alike:
 `ranks_returns` (a higher score comes before a higher return) and
-`beats` (one group's excess return is above or below another's).
+`beats` (one group returns more or less than another on the same dates).
 """
 
 from __future__ import annotations
@@ -39,10 +43,12 @@ from backtests.engine.metrics import (
 )
 
 SIGNIFICANT_T = 2.0
-MIN_DATES = 5  # dates with a rank IC needed to judge a ranking claim
+MIN_DATES = 5  # dates needed to judge a claim: with a rank IC, or with both groups present
 MIN_GROUP_SIZE = 10  # observations needed in each group of a comparison
 
-RETURN_COLUMNS: tuple[str, ...] = ("Observations", "Mean return", "vs same-date average", "Hit rate")
+RETURN_COLUMNS: tuple[str, ...] = (
+    "Observations", "Mean return", "Median return", "vs same-date average", "Hit rate",
+)
 
 
 class Outcome(StrEnum):
@@ -132,7 +138,7 @@ def beats(
     claimed: Direction,
     labels: tuple[str, str],
 ) -> SuiteResult:
-    """Judged on the difference in mean excess return, with Welch's t."""
+    """Judged on the mean per-date difference in return, with its t-stat across dates."""
     comparison = compare_groups(group, rest)
     return SuiteResult(
         outcome=judge_comparison(comparison, claimed=claimed),
@@ -145,18 +151,36 @@ def beats(
 
 
 def judge_comparison(comparison: GroupComparison, *, claimed: Direction) -> Outcome:
-    enough = min(comparison.a.count, comparison.b.count) >= MIN_GROUP_SIZE
-    return judge(comparison.difference_pct, comparison.t_stat, claimed=claimed, enough_data=enough)
+    return judge(
+        comparison.difference_pct,
+        comparison.t_stat,
+        claimed=claimed,
+        enough_data=not _shortfall(comparison),
+    )
 
 
 def comparison_finding(comparison: GroupComparison, labels: tuple[str, str]) -> str:
-    if comparison.difference_pct is None:
-        return f"no complete forward windows for {labels[0].lower()} or {labels[1].lower()}"
+    test = comparison.by_date
+    sizes = f"{comparison.a.count} vs {comparison.b.count} observations"
+    if test.n == 0:
+        return (
+            f"no date had both {labels[0].lower()} and {labels[1].lower()} with a complete "
+            f"forward window ({sizes})"
+        )
     return (
-        f"{labels[0]} returned {signed(comparison.difference_pct, 1, '%')} per period vs "
-        f"{labels[1].lower()}, net of each date's average (Welch t {signed(comparison.t_stat, 2)}; "
-        f"{comparison.a.count} vs {comparison.b.count} observations)"
+        f"{labels[0]} returned {signed(test.mean, 1, '%')} per period vs {labels[1].lower()} on "
+        f"the same date, averaged over {test.n} dates (t {signed(test.t_stat, 2)}, ahead on "
+        f"{percent(test.positive_share)}); {sizes}{_shortfall(comparison)}"
     )
+
+
+def _shortfall(comparison: GroupComparison) -> str:
+    """What a comparison lacks to be judged — '' when it has enough."""
+    if min(comparison.a.count, comparison.b.count) < MIN_GROUP_SIZE:
+        return f" — needs {MIN_GROUP_SIZE}+ observations in each group"
+    if comparison.by_date.n < MIN_DATES:
+        return f" — needs {MIN_DATES}+ dates with both groups"
+    return ""
 
 
 def mean_test_finding(test: MeanTest, what: str) -> str:
@@ -171,10 +195,11 @@ def mean_test_finding(test: MeanTest, what: str) -> str:
 # ── Table cells ──────────────────────────────────────────────────────────────
 
 
-def return_cells(stats: ReturnStats) -> tuple[str, str, str, str]:
+def return_cells(stats: ReturnStats) -> tuple[str, str, str, str, str]:
     return (
         str(stats.count),
         signed(stats.mean_return_pct, 1, "%"),
+        signed(stats.median_return_pct, 1, "%"),
         signed(stats.mean_excess_pct, 1, "%"),
         percent(stats.hit_rate),
     )

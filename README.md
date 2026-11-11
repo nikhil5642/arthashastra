@@ -6,7 +6,9 @@ Finance lists. Ask "analyse Microsoft", "is Tencent a buy at this
 price?", or "find quality dips for ₹5 lakh"; Python fetches live data and
 computes deterministic scores, Claude (inside a slash command) writes the
 qualitative leadership / prospects / news judgment, and the report tells
-you STRONG_BUY / BUY / HOLD / AVOID with the numbers to back it.
+you STRONG_BUY / BUY / HOLD / AVOID with the numbers to back it — and,
+straight under the verdict, what has changed since those numbers were
+audited.
 
 No Anthropic API key, no cost budget, no hardcoded ticker list. The
 universe is every listed stock Yahoo's screener covers — about 80,000
@@ -32,6 +34,37 @@ listings in 59 markets — plus whatever you've analysed.
 - **Same rubric, no brand priors.** Microsoft and HDFC Bank are scored
   on the same curves; only business models (bank vs non-bank) get
   different rubrics.
+
+## What it catches early
+
+A score built on the latest annual report can be most of a year old.
+Every `analyse` and `refresh` also reads what is fresher — the four
+newest quarters, the latest balance sheet against the one a year back,
+the ownership tape, a week of headlines — and names what it finds, as
+**early signals**: concerns and strengths, each with the numbers behind
+it and a severity (URGENT / ALERT / INFO).
+
+| It reads | Concerns it names | Strengths it names |
+|---|---|---|
+| Earnings quality | profit padded by one-off gains; a margin far above the company's own norm (a cyclical peak) | — |
+| Cash | free cash flow falling or turning negative; capex taking nearly all operating cash flow; heavy stock-based pay | free cash flow rising or turning positive |
+| Momentum | revenue shrinking or slowing against its three-year pace; operating margin compressing; profit falling while sales grow | revenue accelerating; margin expanding; profit scaling faster than sales |
+| Balance sheet | debt jumping; negative equity; receivables or inventory outpacing sales; a jump in goodwill | debt falling |
+| Ownership | dilution; insiders or foreign institutions selling; retail absorbing institutional selling | buybacks; insiders or foreign institutions buying |
+| Lenders | bad loans rising | bad loans falling |
+| News | a burst of governance stories; a credit-rating action | — |
+| Tape and data | a deep drawdown; stale statements; a quote whose price and statements don't reconcile | — |
+
+Signals state facts and never move a score on their own. Missing data
+produces no signal — never a strength. The one place they reach the
+numbers is the valuation pillar, which prices on earnings the business
+can repeat: one-off gains are taken out, and a margin above 1.5× the
+company's own median counts only up to that.
+
+Each run is also compared with the last look at the same ticker: a
+verdict that moved, and any concern or strength that is new (or worse),
+is shown in a "Changed since …" panel and logged, so `brief` can tell
+you what changed across your whole watchlist in the last two weeks.
 
 ## Install
 
@@ -100,15 +133,23 @@ composite = 0.35 × fundamentals + 0.15 × valuation + 0.25 × leadership + 0.15
 Fundamentals (is it a good business?) and valuation (is the price
 reasonable for what it earns?) are deterministic. The other three are
 scored by Claude and written to `data_cache/judgments/<TICKER>.json`.
-Valuation uses earnings yield, FCF yield and P/E against the company's own
-history, on one set of curves for every market. Banks and lenders get a
-bank rubric (asset quality, NIM, ROA, CD ratio); everything else — including
-payment networks, exchanges, and asset managers — gets the industrial
-rubric. Anti-optimism defaults: a growth-deceleration veto caps slow
-growers, a value-trap guard stops a shrinking business from looking
-cheap, quiet news windows score neutral (55) not bullish, missing data is
-never treated as good, and an integrity red flag caps the whole composite
-at AVOID.
+Valuation uses earnings yield, FCF yield (over the trailing twelve months)
+and P/E against the company's own history, on one set of curves for every
+market — and on earnings the business can repeat, not on one-off gains or
+a cyclical peak. Banks and lenders get a bank rubric (asset quality, NIM,
+ROA, CD ratio); everything else — including payment networks, exchanges,
+and asset managers — gets the industrial rubric.
+
+Anti-optimism defaults: a growth-deceleration veto caps slow growers, a
+value-trap guard stops a shrinking business from looking cheap, quiet
+news windows score neutral (55) not bullish, missing data is never
+treated as good, known-bad facts are scored rather than dropped
+(negative equity, a profit that became a loss), and an integrity red flag
+caps the whole composite at AVOID.
+
+Judgments age: Claude's news judgment stops counting after 30 days (the
+window it covered has passed), leadership and prospects are flagged STALE
+after 90, and an integrity veto never expires.
 
 ## Backtesting
 
@@ -134,7 +175,7 @@ back decades.
 ## Tests
 
 ```bash
-pytest                       # ~470 tests, a few seconds
+pytest                       # ~596 tests, a few seconds
 pytest --cov=data_sources --cov=scorers --cov=screener --cov=reports \
        --cov=signals --cov=fundamental_engine --cov=backtests
 ```

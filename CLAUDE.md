@@ -17,8 +17,11 @@ in before every action:
 
 - **Python half** — data fetching, deterministic scoring, screening,
   signal bus, reports. Runs with no LLM involvement. Takes live yfinance
-  (every listing) + screener.in (Indian listings) + Google News inputs
-  and produces a `BalanceSheetSnapshot` and a five-pillar `StockScore`.
+  (every listing) + screener.in (Indian listings) + SEC EDGAR (US filers'
+  long history) + Google News inputs and produces a `BalanceSheetSnapshot`,
+  a five-pillar `StockScore`, and a list of **early signals** — concerns
+  and strengths the newest quarters, the latest balance sheet, the
+  ownership tape and the week's headlines show before any score moves.
   The fundamentals and valuation scores are fully determined by the
   numbers; you must never hand-edit them.
 - **Claude half (you)** — the qualitative judgement pillars.
@@ -42,7 +45,10 @@ Every session Claude works in this repo, the default workflow is:
    `raw_cash_flow`, `raw_ratios`, `raw_quarters`,
    `raw_shareholding_quarterly`) keyed by the screener row label. Read
    them with `python3 -m fundamental_engine inspect <TICKER> --section
-   raw_profit_loss` — no re-scrape, no ad-hoc Python.
+   raw_profit_loss` — no re-scrape, no ad-hoc Python. The report's
+   "Early signals" panel and the "Changed since …" panel are the first
+   things to read: they say what is new since the audited numbers and
+   since the last look.
 3. If the user asks to **find / screen / pick stocks** by filters
    ("US and Japanese tech over $10B, down 20%") → `/screen-stocks` or
    `/pick-stocks <budget> <filters>`. Both read every listed stock in the
@@ -53,7 +59,8 @@ Every session Claude works in this repo, the default workflow is:
    --step year|quarter`). Each suite in `backtests/suites/` tests one
    claim (fundamentals ranks returns, the growth veto is justified, dip
    signals pay, …) on point-in-time history and reports PASS / WEAK PASS
-   / WEAK FAIL / FAIL / NO DATA (FAIL needs |t| ≥ 2 against the claim).
+   / WEAK FAIL / FAIL / NO DATA (FAIL needs |t| ≥ 2 against the claim;
+   every estimate is one number per date, with t taken across dates).
    Report the coverage, the t-stats, and every FAIL honestly.
 5. If the user asks you to **change the code** → obey the layer
    discipline (see "Architecture" below), add a typed interface for
@@ -109,6 +116,18 @@ Every session Claude works in this repo, the default workflow is:
      out of the score; it is never defaulted to a clean value. (Pledge
      used to default to 0% because screener has no pledge row — every
      company scored "clean pledge" and the pledge veto could never fire.)
+   - **Known-bad is not unknown.** The mirror of the rule above: a fact
+     that has no ratio is still a fact. Negative shareholders' equity
+     scores the D/E axis at 0 (it used to drop out, so the most levered
+     balance sheets scored like unlevered ones). A profit that turned
+     into a loss is a −100% PAT CAGR (`PROFIT_WIPED_OUT_CAGR`), so the
+     growth veto can fire on it (it used to be "unknown", which let a
+     shrinking loss-maker escape the veto).
+   - **Earnings must be repeatable.** The valuation pillar prices on
+     profit the business can earn again: unusual gains are taken out
+     (never added back), and a margin far above the company's own median
+     counts only up to 1.5× that median. A P/E of 15 made of paper gains,
+     or 9 at the top of a memory cycle, is not cheap.
    When your verdict feels more optimistic than the tape, check
    whether you've actually applied these anchors or whether you're
    importing brand priors.
@@ -125,9 +144,11 @@ Every session Claude works in this repo, the default workflow is:
    listings; SEC EDGAR is the deep history for US filers.** Every listing is fetched from yfinance. For `.NS` / `.BO`
    listings screener.in adds depth, and when the two disagree on D/E,
    ROE, margins, OCF/PAT, working-capital days, or any ratio screener's
-   standard tables expose, screener wins. For backtests, US filers use
-   SEC's first-filed 10-K values (~18 fiscal years) so restatements
-   never leak into the past. See `_SCREENER_WINS` in
+   standard tables expose, screener wins. For US filers SEC adds history
+   only — up to ten fiscal years of sales, profit, margins and ROCE in
+   the live snapshot (Yahoo has four), never a current ratio. For
+   backtests, US filers use SEC's first-filed 10-K values (~18 fiscal
+   years) so restatements never leak into the past. See `_SCREENER_WINS` in
    `data_sources/fundamentals_source/source.py` for the full list
    and the rationale — yfinance's "Total Debt" includes leases that
    Indian analysts exclude, and similar US-centric definitional
@@ -139,9 +160,21 @@ Every session Claude works in this repo, the default workflow is:
    denominator always come from the same column (`_latest_aligned`) or
    the same fiscal-year label across tables (`_value_at_label`) — never
    "latest of each". Interest coverage is core operating EBIT
-   (operating profit − depreciation, or yfinance's Operating Income) /
-   interest on both sources, and a negative value is kept, not dropped.
-   NaN / inf never pass the merge.
+   (operating profit − depreciation, or yfinance's Operating Income —
+   never Yahoo's "EBIT", which carries other income) / interest on both
+   sources, and a negative value is kept, not dropped. NaN / inf never
+   pass the merge. The same holds across time and sources:
+   - **Scores read the latest audited fiscal year; valuation and early
+     signals read the quarters since.** Trailing twelve months is the
+     sum of four *consecutive* quarters or it is nothing
+     (`trailing_twelve_months`); every `ttm_` figure on a snapshot
+     describes the same window (`_keep_one_trailing_window`), and every
+     year-on-year comparison is matched by date, never by position.
+   - **Amounts from two sources share a currency or don't merge.**
+     Screener's statements are in rupees; when Yahoo reports the same
+     company in another currency (Infosys files in dollars), yfinance's
+     absolute amounts are dropped and only its ratios kept
+     (`_in_screeners_currency`).
 
 9. **Tickers are Yahoo symbols; every amount knows its currency.**
    `MSFT`, `GOOGL`, `RELIANCE.NS`, `0700.HK`, `7203.T` — the exchange
@@ -152,11 +185,38 @@ Every session Claude works in this repo, the default workflow is:
    (`snap.financial_currency`); they differ for ADRs and many Hong Kong
    listings. Convert with `data_sources.fx_source`, display with
    `reports.formatting.format_price` / `format_money`, and never compute
-   a ratio across two currencies. Every per-share number is on today's
+   a ratio across two currencies without converting. For a listing whose
+   two currencies differ the live path converts the market cap with spot
+   FX — but only after the quote **reconciles**: a cross-currency quote
+   below 1.5× earnings, or one whose FX-converted P/E is more than 3× away
+   from the source's own, is a depositary receipt (CEDEAR, SDR) or carries
+   a wrong currency label. It is marked `quote_unreliable` and gets no
+   price-based ratio at all. Every per-share number is on today's
    share basis: closes are split-adjusted but not dividend-adjusted
    (that would shrink every past P/E), screener and Yahoo already restate
    past EPS for later splits, and SEC's first-filed EPS is rebased by
    Yahoo's split history. Backtest returns use total-return closes.
+
+10. **Early signals state facts; they never touch a score.**
+    `scorers/early_signals.py` names what the newest data shows — profit
+    padded by one-offs, a margin at a cyclical peak, free cash flow
+    falling, capex outrunning cash flow, debt or goodwill jumping,
+    dilution, receivables outpacing sales, insider and institutional
+    flows, a burst of governance headlines — and the mirror-image
+    strengths. A signal needs the numbers: missing data produces no
+    signal, never a strength. The deterministic pillars are not adjusted
+    by them (the valuation pillar already prices on repeatable earnings);
+    **you** weigh them in the qualitative pillars, and the
+    `/analyse-stock` skill says how. An URGENT concern must be addressed
+    in your judgment, by name.
+
+11. **Judgments age.** A cached judgment was right on the day it was
+    written. The news pillar judges a rolling 30-day window, so a
+    judgment older than 30 days no longer counts for news (the pillar
+    goes back to neutral, zero confidence). Leadership and prospects
+    older than 90 days still count, at lower confidence, with a STALE
+    line. An integrity veto never expires. Pillar scores are held to
+    0–100 when read.
 
 ## Architecture
 
@@ -208,11 +268,12 @@ fundamental_engine/          # orchestrator + CLI commands — see README.md
 │   ├── pick.py              #   pick --amount <BUDGET> [--tickers …]  (FX-converted, sector + country caps)
 │   ├── brief.py             #   brief
 │   └── migrate.py           #   migrate-ids — one-time bare NSE keys → Yahoo symbols
-├── analyse_pipeline.py      # analyse_ticker / score_snapshot / AnalysisResult
-├── analysis_context.py      # "Analysis context" banner + judgment-age helpers
-├── extended_score.py        # ExtendedScore — typed scores.json row + from_dict / to_dict
+├── analyse_pipeline.py      # analyse_ticker / score_snapshot / AnalysisResult + judgment ageing
+├── tracking.py              # record_analysis — persist a run, and what changed since the last look
+├── analysis_context.py      # "Analysis context" + "Changed since …" banners, judgment-age helpers
+├── extended_score.py        # ExtendedScore — typed scores.json row (incl. early signals)
 ├── dip_candidate.py         # DipCandidateRecord — typed dip_candidates.json row
-├── engine.py                # background cache warmer; writes scores.json + snapshots + prices.db + signals.json
+├── engine.py                # refresh_one / refresh_all (fundamentals + news radar → tracking.record_analysis)
 ├── snapshot_store.py        # SnapshotStore — full per-ticker snapshot cache (read by `inspect`)
 ├── resolver.py              # free-text → ticker on any exchange via Yahoo search
 ├── judgments.py             # Judgment + JudgmentStore (Claude writes, Python reads)
@@ -227,27 +288,34 @@ data_sources/                # live data adapters — see README.md
 ├── fundamentals_source/     # yfinance + screener.in + SEC, split into single-responsibility submodules
 │   ├── __init__.py          #   public API only (tests import private helpers from submodules)
 │   ├── snapshot.py          #   BalanceSheetSnapshot + SnapshotFields TypedDict + SCORED_FIELDS
-│   │                        #   + DataConflict + is_bank_snapshot (rubric router)
+│   │                        #   + StatementWindow + DataConflict + is_bank_snapshot (rubric router)
 │   │                        #   + PeerRecord / DocumentRecord aliases
 │   ├── source.py            #   FundamentalsSource async facade + merge rules + _SCREENER_WINS
-│   ├── yfinance_adapter.py  #   yfinance fetcher + section fillers (pandas types via TYPE_CHECKING)
+│   │                        #   + SEC deep history + one currency / one trailing window per snapshot
+│   ├── yfinance_adapter.py  #   yfinance fetcher: fiscal year, trailing twelve months, year-on-year
+│   │                        #   balance-sheet changes, multi-year trends (pandas via TYPE_CHECKING)
 │   ├── screener_adapter.py  #   screener.in fetcher + section parsers + appliers
 │   │                        #   (HTMLParser type via TYPE_CHECKING)
 │   ├── sec_adapter.py       #   SEC EDGAR companyfacts → yfinance-shaped annual frames (first-filed)
-│   ├── valuation.py         #   apply_valuation: P/E, earnings / FCF yield, P/B, P/E history
+│   ├── valuation.py         #   apply_valuation: P/E, earnings / FCF yield (freshest twelve months),
+│   │                        #   P/B, P/E history, spot FX for cross-currency, quote reconciliation
 │   ├── history.py           #   StatementHistory + snapshot_as_of + rebase_sec_eps (point-in-time)
 │   └── primitives.py        #   parse helpers + period alignment + date-matched YoY
+│                            #   + trailing_twelve_months + cagr_pct (PROFIT_WIPED_OUT_CAGR)
 ├── price_series.py          # PriceSeries — split-adjusted closes + date lookups
 ├── universe_source.py       # Yahoo's global screener: Criteria → EquityQuery, Listing rows
 ├── names.py                 # company-name cleaning shared by resolver, news, and screen
 ├── fx_source.py             # live FX via Yahoo pairs (bridged through USD) + minor units (GBp, ZAc, ILA, KWF)
 ├── research_source.py       # Wikipedia API + Brave Search (WebHit TypedDict)
-└── news_source.py           # Google News RSS (FeedEntry TypedDict) + NewsCategory enum
+└── news_source.py           # Google News RSS: de-noised, de-duplicated stories (NewsItem) +
+                             # NewsCategory enum + digest() — a week's story counts (NewsDigest)
 
 scorers/                     # deterministic scoring — see README.md
 ├── base.py                  # Verdict + Pillar + Gate StrEnums + ScorerResult + StockScore + verdict_for
 ├── composite_scorer.py      # blend(...) 35 / 15 / 25 / 15 / 10 + integrity gate
-├── valuation_scorer.py      # valuation pillar: earnings yield + FCF yield (or P/B vs ROE) + P/E vs history
+├── valuation_scorer.py      # valuation pillar: earnings yield + FCF yield (or P/B vs ROE) + P/E vs history,
+│                            # on sustainable_earnings (one-offs out, cyclical peaks capped)
+├── early_signals.py         # detect_early_signals: concerns + strengths beyond the scored ratios
 └── fundamentals_scorer/     # dispatches to industrial or bank rubric based on is_bank_snapshot
     ├── __init__.py          #   score_fundamentals entry
     ├── industrial.py        #   industrial rubric + 5 sub-scorers + pledge / growth vetoes
@@ -265,6 +333,7 @@ reports/                     # pure Rich + Markdown presentation — see README.
     ├── __init__.py          #   re-exports render_stock_report
     ├── render.py            #   entry + markdown writer
     ├── header.py            #   header panel + valuation + analyst bundle
+    ├── early_signals.py     #   concerns / strengths panel, straight under the header
     ├── financial_profile.py #   profile dispatcher + industrial / bank variants
     ├── data_quality.py      #   statement freshness + source conflicts
     └── trends.py            #   multi-year + shareholding + quarterly rows
@@ -289,9 +358,10 @@ tests/                       # hermetic, adapter-mocked — see README.md
 
 backtests/                   # does each scoring claim hold on history? — see README.md
 ├── __main__.py / cli.py     # python3 -m backtests [SUITE …] --tickers … --years 30 --step year|quarter
-├── suite.py                 # Suite + SuiteResult + Outcome + judge (|t| ≥ 2 to PASS or FAIL)
+│                            # (one listing per company; quotes that don't reconcile are left out)
+├── suite.py                 # Suite + SuiteResult + Outcome + judge (|t| ≥ 2 across dates to PASS or FAIL)
 ├── report.py                # terminal view + Markdown mirror (data_cache/reports/backtest_*.md)
-├── engine/                  # schedule · returns · metrics (Observation, rank IC, Welch t) · runner
+├── engine/                  # schedule · returns · metrics (Observation, rank IC, per-date group test) · runner
 └── suites/                  # one claim per module, registered in suites/__init__.py:ALL
 
 data_cache/                  # runtime state (gitignored)
@@ -300,9 +370,10 @@ data_cache/                  # runtime state (gitignored)
 ├── judgments/<TICKER>.json  # Claude-written qualitative scores
 ├── snapshots/<TICKER>.json  # full scored snapshot (raw dumps, provenance, conflicts)
 ├── research/<slug>.json     # cached Wikipedia + Brave bundles
-├── news/<TICKER>.json       # per-company Google News RSS snapshots
+├── news/<TICKER>.json       # per-company news: {ticker, company, window_days, radar, stories}
 ├── dip_candidates.json      # last pick run output
-├── signals.json             # append-only event log (bounded at 500)
+├── signals.json             # append-only event log (bounded at 500): score updates, verdict
+│                            # moves, new early concerns / strengths, dips
 └── reports/                 # saved Markdown reports (analyse / brief / backtest)
 ```
 
@@ -332,6 +403,9 @@ callers get IDE autocomplete and exhaustive iteration.
 | `Pillar`              | `scorers/base.py`                                  | FUNDAMENTALS · VALUATION · LEADERSHIP · PROSPECTS · NEWS |
 | `Gate`                | `scorers/base.py`                                  | INTEGRITY_VETO |
 | `ValuationComponent`  | `scorers/valuation_scorer.py`                      | EARNINGS_YIELD · FCF_YIELD · PRICE_TO_BOOK · VS_HISTORY |
+| `Tone`                | `scorers/early_signals.py`                         | CONCERN · STRENGTH |
+| `EarlySignalKind`     | `scorers/early_signals.py`                         | ONE_OFF_PROFIT · PEAK_MARGIN · FREE_CASH_FLOW_FALLING / _RISING · CAPEX_OUTRUNS_CASH_FLOW · STOCK_PAY_HEAVY · REVENUE_SHRINKING / _DECELERATING / _ACCELERATING · MARGIN_COMPRESSING / _EXPANDING · DEBT_RISING / _FALLING · NEGATIVE_EQUITY · SHARE_DILUTION / _BUYBACK · GOVERNANCE_NEWS · UNRELIABLE_QUOTE · … (one per detector) |
+| `StatementWindow`     | `data_sources/fundamentals_source/snapshot.py`     | TTM · FISCAL_YEAR (which twelve months a flow figure covers) |
 | `IndustrialComponent` | `scorers/fundamentals_scorer/industrial.py`        | BALANCE_SHEET_HEALTH · PROFITABILITY · GROWTH · EARNINGS_QUALITY · OWNERSHIP |
 | `BankComponent`       | `scorers/fundamentals_scorer/bank.py`              | PROFITABILITY · ASSET_QUALITY · GROWTH · FRANCHISE · GOVERNANCE |
 | `RefreshStatus`       | `fundamental_engine/engine.py`                     | OK · NO_DATA · ERROR |
@@ -339,7 +413,7 @@ callers get IDE autocomplete and exhaustive iteration.
 | `Magnitude`           | `fundamental_engine/budget_parser.py`              | K · LAKH · MILLION · CRORE · BILLION (float-valued enum) |
 | `NewsCategory`        | `data_sources/news_source.py`                      | GOVERNANCE · RATING · INSIDER · LEADERSHIP · CORPORATE_ACTION · EARNINGS (severity order) |
 | `Severity`            | `signals/signal_bus.py`                            | INFO · ALERT · URGENT |
-| `SignalType`          | `signals/signal_bus.py`                            | DIP_DETECTED · QUALITY_DIP · LEADERSHIP_NEWS · … |
+| `SignalType`          | `signals/signal_bus.py`                            | UNIVERSE_REFRESHED · SCORE_UPDATED · VERDICT_CHANGED · EARLY_CONCERN · EARLY_STRENGTH · DIP_DETECTED (each has an emitter) |
 | `ScreenSort`          | `fundamental_engine/commands/screen.py`            | MARKET_CAP · DRAWDOWN · EARNINGS_YIELD |
 | `Step`                | `backtests/engine/schedule.py`                     | YEAR · QUARTER |
 | `ScoreKind`           | `backtests/engine/metrics.py`                      | FUNDAMENTALS · VALUATION · COMBINED |
@@ -367,6 +441,8 @@ consumer anywhere else does `.get("key", default)` on a raw dict.
 | `DipCandidateRecord`  | `fundamental_engine/dip_candidate.py`          | `dip_candidates.json` |
 | `BalanceSheetSnapshot` + `DataConflict` | `data_sources/fundamentals_source/snapshot.py` | `snapshots/<TICKER>.json` |
 | `Judgment`, `PillarJudgment` | `fundamental_engine/judgments.py`       | `judgments/<TICKER>.json` |
+| `EarlySignal`         | `scorers/early_signals.py`                     | `scores.json` (the `early_signals` list of each row) |
+| `NewsItem`, `NewsDigest` | `data_sources/news_source.py`               | `news/<TICKER>.json` |
 
 Each `from_dict(data: dict[str, object])` narrows untyped input with
 dedicated `_as_float`, `_as_str`, `_as_int`, `_parse_evidence`,
@@ -427,9 +503,11 @@ profitability 20% (ROE + ROCE + ROA), growth 15% (3y revenue + PAT
 CAGR), earnings quality 15% (OCF/PAT + FCF/PAT), ownership 15%
 (pledge when known + insider stake change + neutral-centred holding —
 a widely-held company is not penalised). Graceful degradation on
-missing inputs. Pledge > 10% clamps the score to 40. Growth-
-deceleration veto caps the score at 70/60/50 when both 3y CAGRs fall
-below 7/5/3%.
+missing inputs — but known-bad is scored, not dropped: negative equity
+is 0 on the D/E axis, and a profit that became a loss is a −100% PAT
+CAGR. Pledge > 10% clamps the score to 40. Growth-deceleration veto caps
+the score at 70/60/50 when both 3y CAGRs fall below 7/5/3%. All inputs
+are the latest audited fiscal year.
 
 **Bank / NBFC / levered financials**: profitability 30% (ROE + ROA +
 NIM on bank-calibrated curves — ROA 1.5% is good, not 12%), asset
@@ -455,14 +533,63 @@ Reliance alike.
 Is the price reasonable for what the business earns? Universal curves:
 earnings yield 35% (100 / P/E) + FCF yield 35% + today's P/E vs the
 median of its own past fiscal-year-end P/Es 30%. Banks and lenders swap
-FCF yield for P/B judged against ROE / 11% cost of equity. Anti-optimism:
-a loss-maker scores 0 on earnings yield, and the **value-trap guard**
-caps valuation at 70 for slow growers (the same both-CAGRs-below-7%
-test as the growth veto) — cheap because shrinking is not a bargain.
-Price and statements must share a currency (ADRs keep only the source's
-P/E); per-share numbers are all on today's share basis (split-adjusted
-closes; SEC's first-filed EPS is rebased by Yahoo's split history).
-Unscoreable → neutral 50 with zero confidence.
+FCF yield for P/B judged against ROE / 11% cost of equity.
+
+Today's price is set against today's business:
+- **FCF yield uses the trailing twelve months** when four consecutive
+  quarters exist, else the fiscal year (`cash_flow_window` says which).
+- **Earnings are "sustainable earnings"** (`sustainable_earnings`), which
+  only ever lowers the profit counted, for the earnings yield and the
+  P/E-vs-history:
+  - *one-offs out* — Yahoo's normalized ÷ reported net income over the
+    P/E's own window (`core_earnings_ratio`); gains are removed, charges
+    are never added back, and under 5% of profit is ignored as noise;
+  - *cyclical peaks capped* — a core net margin above 1.5× the company's
+    own median of the last (up to) six fiscal years counts only up to
+    1.5× that median; a company that typically lost money earns no yield
+    credit. Needs four fiscal years; lenders are exempt.
+  Free cash flow is scored as measured.
+
+Anti-optimism: a loss-maker (over the freshest twelve months) scores 0
+on earnings yield, and the **value-trap guard** caps valuation at 70 for
+slow growers (the same both-CAGRs-below-7% test as the growth veto) —
+cheap because shrinking is not a bargain. Cross-currency listings are
+valued with spot FX once the quote reconciles (rule 9); P/E history is
+same-currency only. Per-share numbers are all on today's share basis
+(split-adjusted closes; SEC's first-filed EPS is rebased by Yahoo's split
+history). Unscoreable or `quote_unreliable` → neutral 50 with zero
+confidence.
+
+### Early signals (no weight — facts for you to weigh)
+
+`detect_early_signals(snap, news=…)` runs on every `analyse` / `refresh`
+and returns `EarlySignal(kind, tone, severity, message)` records,
+concerns first, most severe first. Severity: **URGENT** changes how the
+headline numbers should be read, **ALERT** is material, **INFO** is
+context. They are shown in the report's "Early signals" panel, cached on
+the `scores.json` row, tallied in `brief` / `pick` / `screen`, and when a
+material one is new since the last look it goes on the signal bus and
+into the "Changed since …" panel.
+
+What they read: the four newest quarters against the same quarter a year
+earlier (revenue, operating margin, profit), trailing twelve months
+against the fiscal year (free cash flow, capex, stock pay), the latest
+balance sheet against the one a year back (debt, receivables, inventory,
+goodwill, share count), the ownership tape (insiders, foreign
+institutions, retail), bank NPAs, the price against its 52-week high,
+and a week of headlines (`news_source.digest`): a governance burst is
+several governance-tagged stories AND ≥ 15% of the week's coverage.
+
+A strength paid for out of flagged profit is context, not a material
+strength: when the profit is padded by one-offs or sits at a cyclical
+peak, falling debt, rising free cash flow and widening margins drop to
+INFO with a note. (On history, deleveraging at a margin peak came before
+*lower* returns — it is what cyclicals do at the top.)
+
+They do not change the fundamentals or valuation score. The backtest
+suites `early_concerns` / `early_strengths` / `peak_margin_guard` test
+the part that can be replayed on fiscal-year history; report their
+outcomes as honestly as any other suite.
 
 ### Leadership (25%, YOU score this)
 
@@ -497,7 +624,10 @@ Based on the research bundle + fundamentals context.
 ### News (10%, YOU score this)
 
 Rolling 30-day weighted sentiment × relevance over **material** items
-only. Material negatives (governance, rating) clamp ≤ 35.
+only. Material negatives (governance, rating) clamp ≤ 35. "Rating" means
+credit ratings — a broker's upgrade or downgrade is sell-side opinion.
+The pillar expires with its window: a judgment older than 30 days no
+longer counts for news (rule 11).
 
 ## Judgment file format
 
@@ -533,6 +663,8 @@ Claude writes `data_cache/judgments/<TICKER>.json`:
 The pipeline reads each pillar individually — you can write a
 judgment with only leadership filled in and the other two still
 pending. Re-running `/analyse-stock <TICKER>` will refresh them.
+`updated_at` matters: it is what ages the judgment (rule 11), so always
+write the real current timestamp.
 
 ## Conventions
 
@@ -541,11 +673,13 @@ pending. Re-running `/analyse-stock <TICKER>` will refresh them.
 - `logging.getLogger(__name__)`, never bare `print` outside CLI output
 - Config lives in `AnalystConfig.from_env()`; never read env vars
   from elsewhere
-- Single-writer discipline: only the engine writes to aggregate
-  files (`scores.json`, `signals.json`). CLI readers are read-only
-  except for the specific ticker they operate on.
+- Single-writer discipline: aggregate files (`scores.json`,
+  `signals.json`) are written through `tracking.record_analysis` (one
+  ticker's row at a time, under a file lock) and by `pick` for its dip
+  signals. CLI readers are read-only otherwise.
 - Tests are hermetic — monkeypatch `_fetch_*` adapters, don't
-  create fixture JSONs
+  create fixture JSONs. `tests/conftest.py` holds the one shared guard:
+  an empty news feed, because every refresh reads the news radar
 
 ## Don'ts
 

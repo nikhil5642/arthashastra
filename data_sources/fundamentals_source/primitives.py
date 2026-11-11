@@ -8,12 +8,15 @@ Alignment rule: whenever two numbers are combined into a ratio they must
 come from the *same period*. `_latest_aligned` (same column of one table)
 and `_value_at_label` (same column label across two tables) exist so no
 adapter pairs a TTM cell with an annual one, or FY25 profit with FY26
-assets.
+assets. The same holds across time: `trailing_twelve_months` only sums
+four quarters that really are consecutive, and every year-on-year lookup
+matches by date, never by position.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from datetime import date
 
 # ── Screener.in transport constants ──────────────────────────────────────────
@@ -159,13 +162,13 @@ def _drop_ttm(
 
 
 def _screener_cagr(
-    values: list[float | None] | None, *, years: int
+    values: list[float | None] | None, *, years: int, wiped_out_counts: bool = False
 ) -> float | None:
     """CAGR from an annual row (TTM already dropped by caller).
 
     Requires `years + 1` populated points. Picks the last and `years`-th-
-    last populated points. Returns None when either endpoint is missing,
-    zero, or negative.
+    last populated points. Returns None when either endpoint is missing or
+    the start is zero / negative. See `cagr_pct` for `wiped_out_counts`.
     """
     if not values or len(values) < years + 1:
         return None
@@ -173,30 +176,55 @@ def _screener_cagr(
     past = values[-(years + 1)]
     if current is None or past is None:
         return None
-    if past <= 0 or current <= 0:
+    return cagr_pct(past, current, years=years, wiped_out_counts=wiped_out_counts)
+
+
+# A profit that turned into a loss has no compound growth rate, but it is
+# not "unknown" either: all of it is gone. Reporting −100% keeps the growth
+# curve and the growth-deceleration veto working on the worst outcome a
+# company can post, instead of silently dropping it as missing data.
+PROFIT_WIPED_OUT_CAGR = -100.0
+
+
+def cagr_pct(
+    past: float, current: float, *, years: int, wiped_out_counts: bool = False
+) -> float | None:
+    """Compound annual growth from `past` to `current`, in percent.
+
+    None when the start is zero / negative (no base to grow from) or when
+    the end is zero / negative — unless `wiped_out_counts`, used for profit
+    rows, where a positive start and a non-positive end is a known total
+    loss of the profit (`PROFIT_WIPED_OUT_CAGR`).
+    """
+    if not (math.isfinite(past) and math.isfinite(current)) or past <= 0:
         return None
+    if current <= 0:
+        return PROFIT_WIPED_OUT_CAGR if wiped_out_counts else None
     return round((((current / past) ** (1 / years)) - 1) * 100, 2)
 
 
-# ── Quarterly change lookups ─────────────────────────────────────────────────
+# ── Dated series: year-on-year lookups and trailing windows ──────────────────
+#
+# Every series here is aligned with its `dates` and newest-first. Lookups
+# go by date, not position, so a missing quarter can't silently turn a
+# year-on-year comparison into a 15-month one.
+
+YEAR_DAYS = 365
+YEAR_TOLERANCE_DAYS = 45
+# Consecutive quarter-ends sit 89–92 days apart (53-week fiscal calendars
+# stretch that to ~98).
+QUARTER_GAP_DAYS = range(80, 101)
+QUARTERS_PER_YEAR = 4
 
 
-def pct_change_by_date(
-    values: list[float],
-    dates: list[str],
-    *,
-    current_idx: int,
-    days_ago: int,
-    tolerance: int,
-) -> float | None:
-    """% change vs the entry dated ~`days_ago` before `dates[current_idx]`.
+def index_days_before(
+    dates: Sequence[str], *, current_idx: int, days_ago: int, tolerance: int
+) -> int | None:
+    """Index of the entry dated closest to `days_ago` before `dates[current_idx]`.
 
-    `values` / `dates` are aligned and newest-first. The lookup is by
-    date, not position, so a missing quarter can't silently turn a YoY
-    comparison into a 15-month one. Returns None when no counterpart sits
-    within ±`tolerance` days, or the past value is zero / negative.
+    None when no entry sits within ±`tolerance` days of that target.
     """
-    if current_idx >= len(values) or current_idx >= len(dates):
+    if current_idx >= len(dates):
         return None
     try:
         current_date = date.fromisoformat(dates[current_idx])
@@ -205,7 +233,7 @@ def pct_change_by_date(
 
     best_idx: int | None = None
     best_gap = tolerance + 1
-    for j in range(current_idx + 1, min(len(values), len(dates))):
+    for j in range(current_idx + 1, len(dates)):
         try:
             past_date = date.fromisoformat(dates[j])
         except (TypeError, ValueError):
@@ -213,20 +241,96 @@ def pct_change_by_date(
         gap = abs((current_date - past_date).days - days_ago)
         if gap < best_gap:
             best_gap, best_idx = gap, j
-    if best_idx is None:
-        return None
-    past = values[best_idx]
-    if past <= 0:
-        return None
-    return (values[current_idx] - past) / past * 100
+    return best_idx
 
 
-def latest_yoy_growth(values: list[float], dates: list[str]) -> float | None:
+def pct_change_by_date(
+    values: Sequence[float | None],
+    dates: Sequence[str],
+    *,
+    current_idx: int,
+    days_ago: int,
+    tolerance: int,
+) -> float | None:
+    """% change vs the entry dated ~`days_ago` before `dates[current_idx]`.
+
+    None when there is no counterpart, either value is missing, or the
+    past value is zero / negative (no base for a percentage).
+    """
+    pair = _value_pair(values, dates, current_idx=current_idx, days_ago=days_ago, tolerance=tolerance)
+    if pair is None or pair[1] <= 0:
+        return None
+    current, past = pair
+    return (current - past) / past * 100
+
+
+def change_by_date(
+    values: Sequence[float | None],
+    dates: Sequence[str],
+    *,
+    current_idx: int = 0,
+    days_ago: int = YEAR_DAYS,
+    tolerance: int = YEAR_TOLERANCE_DAYS,
+) -> tuple[float, float] | None:
+    """(current, past) for the entry dated ~`days_ago` earlier — for changes in points."""
+    return _value_pair(values, dates, current_idx=current_idx, days_ago=days_ago, tolerance=tolerance)
+
+
+def _value_pair(
+    values: Sequence[float | None],
+    dates: Sequence[str],
+    *,
+    current_idx: int,
+    days_ago: int,
+    tolerance: int,
+) -> tuple[float, float] | None:
+    width = min(len(values), len(dates))
+    if current_idx >= width:
+        return None
+    past_idx = index_days_before(
+        dates[:width], current_idx=current_idx, days_ago=days_ago, tolerance=tolerance
+    )
+    if past_idx is None:
+        return None
+    current, past = values[current_idx], values[past_idx]
+    if current is None or past is None:
+        return None
+    return current, past
+
+
+def latest_yoy_growth(values: Sequence[float | None], dates: Sequence[str]) -> float | None:
     """Newest quarter vs the same quarter a year earlier, rounded to 0.01."""
     change = pct_change_by_date(
-        values, dates, current_idx=0, days_ago=365, tolerance=45
+        values, dates, current_idx=0, days_ago=YEAR_DAYS, tolerance=YEAR_TOLERANCE_DAYS
     )
     return round(change, 2) if change is not None else None
+
+
+def consecutive_quarters(dates: Sequence[str]) -> bool:
+    """True when the newest four dates are four consecutive quarter-ends."""
+    if len(dates) < QUARTERS_PER_YEAR:
+        return False
+    try:
+        newest = [date.fromisoformat(d) for d in dates[:QUARTERS_PER_YEAR]]
+    except (TypeError, ValueError):
+        return False
+    return all((later - earlier).days in QUARTER_GAP_DAYS for later, earlier in zip(newest, newest[1:]))
+
+
+def trailing_twelve_months(
+    values: Sequence[float | None], dates: Sequence[str]
+) -> float | None:
+    """Sum of the four newest quarters; None unless all four exist and are consecutive.
+
+    A half-yearly reporter, a dropped quarter, or a single missing cell
+    gives None rather than a "twelve months" that covers nine or fifteen.
+    """
+    if not consecutive_quarters(dates) or len(values) < QUARTERS_PER_YEAR:
+        return None
+    window = values[:QUARTERS_PER_YEAR]
+    if any(v is None for v in window):
+        return None
+    return sum(v for v in window if v is not None)
 
 
 # ── Date helpers ─────────────────────────────────────────────────────────────

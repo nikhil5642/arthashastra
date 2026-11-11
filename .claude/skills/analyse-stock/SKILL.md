@@ -22,6 +22,9 @@ never leaks into the verdict.
 - **No brand priors.** Microsoft, Tencent, and HDFC Bank get exactly the
   same rubric. If the verdict clashes with the reputation, walk through
   the numbers before doubting the math.
+- **Every URGENT early concern is answered by name** in the evidence of
+  the pillar it bears on (step 3.2). An unanswered URGENT concern means
+  the analysis is not finished.
 
 ## Step 1 — Resolve to a canonical ticker
 
@@ -57,7 +60,9 @@ fetch and prints one of:
 
 The refresh always hits live data: yfinance for every listing, plus
 screener.in for Indian (`.NS` / `.BO`) listings, which adds a deeper
-history and wins on the ratios it publishes.
+history and wins on the ratios it publishes, plus SEC filings for US
+companies' long history (ten fiscal years of margins). It ends with the
+early-signal tally, e.g. `early signals: 4 concerns (1 urgent) · 1 strength`.
 
 ## Step 3 — Read the deterministic baseline
 
@@ -65,16 +70,23 @@ history and wins on the ratios it publishes.
 python3 -m fundamental_engine analyse <TICKER>
 ```
 
-Read the "Analysis context" banner, the Financial Profile, and the Data
-quality section — not just the fundamentals score.
+Read the "Analysis context" banner, the **Early signals** panel, the
+Financial Profile, and the Data quality section — not just the
+fundamentals score.
 
 - **Two pillars are already scored and are not yours to change:**
-  fundamentals (35%) and valuation (15%). Valuation sets the price
-  against what the business earns — earnings yield, FCF yield (P/B vs
-  ROE for banks) and P/E against its own history — and is capped at 70
-  for slow growers (value-trap guard). Use both in your narrative; never
-  re-score them. Your three pillars are leadership (25%), prospects
-  (15%) and news (10%).
+  fundamentals (35%) and valuation (15%). Fundamentals reads the latest
+  audited fiscal year. Valuation sets today's price against what the
+  business can keep earning — earnings yield, FCF yield over the trailing
+  twelve months (P/B vs ROE for banks) and P/E against its own history —
+  and is capped at 70 for slow growers (value-trap guard). Use both in
+  your narrative; never re-score them. Your three pillars are leadership
+  (25%), prospects (15%) and news (10%).
+- **Two P/Es.** When the header reads `P/E 14.9 (core 26.7)` or
+  `(mid-cycle 19.2)`, the valuation pillar used the second number: the
+  reported profit includes one-off gains, or sits on a margin far above
+  the company's own norm. Quote the second number. Never call a stock
+  cheap on the first.
 
 - **`Cached judgment: none`** is what you want here — step 2 wiped it.
 - **Currencies.** Prices and market cap are in the trading currency;
@@ -106,10 +118,51 @@ quality section — not just the fundamentals score.
     **DII ≥ +2pts** the narrative is contested, not consensus.
   - **Retail shareholder count spiking while institutions exit** =
     "retail catching a falling knife". Raise the risk note.
-- **Valuation line** (P/E · P/B · dividend yield). A multiple compressed
-  versus its own history means the market already de-rated the stock — you
-  are not early; ask whether the re-rating is done or still unfolding.
-  P/B is omitted when price and book are in different currencies.
+- **Valuation line** (P/E · P/B · FCF yield · dividend yield). A multiple
+  compressed versus its own history means the market already de-rated the
+  stock — you are not early; ask whether the re-rating is done or still
+  unfolding.
+- **"Changed since <date>"** (shown when the ticker was analysed before):
+  a verdict that moved, and concerns or strengths that are new or worse
+  since that look. Lead your answer with these.
+
+## Step 3.2 — Read the early signals
+
+The scores above describe the last audited year. The "Early signals"
+panel is what the newest quarters, the latest balance sheet, the
+ownership tape and the week's headlines show since — concerns (▼) first,
+then strengths (▲). Its footer says which periods it could see; "nothing
+flagged" under "no quarterly statements published" means *not looked at*,
+not *clean*.
+
+Signals state facts. They have not moved any score — weighing them is
+your job, in the pillar each one bears on:
+
+| Signal | Bears on | What to do |
+|---|---|---|
+| Quote doesn't reconcile (URGENT) | everything price-based | Stop. This listing is a depositary receipt or carries a wrong currency label. Go back to step 1 and analyse the primary listing. |
+| Profit from unusual items | valuation narrative, leadership | Find the item in the filings (investment gain, asset sale, tax credit) and name it. Quote the core P/E. |
+| Margin at a cyclical peak | prospects | Do not extrapolate today's margin. Judge the tailwind at the company's normal margin; if prices, inventories or new capacity say the cycle is turning, the structural-disruption cap applies (prospects ≤ 55). |
+| Free cash flow falling · capex outrunning cash flow | leadership (capital allocation), prospects (capex / guidance clarity) | Find the cause. Operating cash falling is margin compression by another name. A build-out is only as good as the return management has committed to: no stated return, no credit for the spend — capital-allocation and guidance-clarity sub-scores ≤ 60. |
+| Heavy stock-based pay · dilution | leadership (capital allocation) | Stock pay is a real cost that free cash flow leaves out — restate FCF net of it. With the share count also rising ≥ 3%, capital allocation ≤ 50. |
+| Revenue shrinking or decelerating | growth bucket (step 4) | The 3y CAGR looks backward. Bucket on the slower of the two: the 3y pace, or the latest quarter's year-on-year growth. |
+| Margin compressing · profit falling while sales grow | prospects, news | Mix, pricing, or input costs? Persistent pricing pressure is the structural-disruption anchor. |
+| Debt rising · goodwill jump | leadership (capital allocation) | What was the money for — an acquisition (price paid against what it earns), buybacks at a high multiple, capex? Unexplained leverage counts against capital allocation. |
+| Negative equity | leadership, risk | Buybacks at a cash machine, or accumulated losses? The second is far worse; say which. |
+| Receivables or inventory outpacing sales | leadership (integrity), prospects | The classic early tell of sales pulled forward or demand softening. Check the filings for an explanation; an unexplained build lowers the integrity score. |
+| Insider selling · foreign institutions selling · retail crowding | leadership, risk | See the ownership tape rules above. |
+| Bad loans rising (lenders) | prospects, leadership | Underwriting is the franchise. Say where the rise came from — one account, one segment, or the whole book. A broad-based rise is a structural headwind (prospects ≤ 55). |
+| Governance news burst | leadership (integrity), news | **Unjudged.** Read every governance-tagged story in step 5 and sort it: enforcement, fraud, auditor, restatement (→ integrity-veto rules, step 8) · ordinary litigation or antitrust (→ news) · keyword noise (say so). |
+| Credit-rating news | news | A downgrade is a material negative (news ≤ 35). Check which way it went. |
+| Deep price drawdown | news | Find what the market is reacting to before trusting the statements. |
+| Stale statements | confidence | The scores may predate a material change — say so and weight the verdict down. |
+
+**Strengths are context, not credit.** Revenue accelerating, margins
+expanding, debt falling, buybacks, insiders buying: each can support a
+score *inside* its caps. None of them lifts a cap, and none offsets an
+URGENT concern. A strength that ends "…paid for out of profit that may
+not repeat" has already been discounted by the report: read it as a
+description of the peak, not as an improvement.
 
 ## Step 3.5 — Write the business snapshot
 
@@ -151,7 +204,9 @@ the score, judgment, and full snapshot.
 
 ## Step 4 — Growth-bucket classification
 
-From the 3y CAGRs, pick the bucket:
+From the 3y CAGRs — or the latest quarter's year-on-year growth when an
+early signal says revenue is shrinking or decelerating, whichever is
+slower — pick the bucket:
 
 - **Both CAGRs ≥ 12%** — growth business; normal scoring applies.
 - **Both CAGRs 7–12%** — steady compounder; normal scoring.
@@ -170,11 +225,27 @@ Write down the bucket — it drives every cap in steps 8–10.
 python3 -m fundamental_engine news <TICKER> --days 30 --json
 ```
 
+The JSON has two parts:
+
+- `stories` — one entry per story, newest first, already de-noised
+  (quote pages and 13F filing spam removed) and de-duplicated: `coverage`
+  is how many outlets carried the same headline. `material_category` is a
+  keyword tag (governance · rating · insider · leadership ·
+  corporate_action · earnings) — a first sort, not a judgment.
+- `radar` — the last 7 days' story count per category, with the most
+  widely carried headline. This is what the governance and credit-rating
+  early signals were counted from.
+
 Flag items as **material** when they touch: governance (regulator action,
-fraud, auditor, investigation, restatement), rating actions, insider /
-promoter dealings (sales, pledges, block deals), leadership changes,
-corporate actions (M&A, buyback, spin-off, delisting), or earnings and
-guidance. Drop the rest.
+fraud, auditor, investigation, restatement), credit-rating actions,
+insider / promoter dealings (sales, pledges, block deals), leadership
+changes, corporate actions (M&A, buyback, spin-off, delisting), or
+earnings and guidance. Drop the rest. A broker's upgrade or downgrade is
+sell-side opinion, not a rating action.
+
+A keyword tag can be wrong in both directions: read the governance-tagged
+stories before treating them as red flags, and skim the untagged ones for
+anything the keywords missed.
 
 The feed is one global English edition. For companies whose news is
 mostly in another language (China, Japan, Korea, …) and the feed looks
@@ -245,6 +316,10 @@ This hits live Wikipedia and, when `BRAVE_API_KEY` is set, Brave Search.
    pyramids, or a controlling holder with material related-party dealings
    → governance sub-score ≤ 50 until disclosures show minorities treated
    fairly.
+6. **Early concerns on capital allocation** (step 3.2): heavy stock pay
+   with a rising share count → capital allocation ≤ 50; capex taking
+   nearly all operating cash flow, or debt / goodwill jumping, with no
+   stated return → capital allocation ≤ 60.
 
 ## Step 9 — Score prospects (0–100) with anti-optimism anchors
 
@@ -265,6 +340,10 @@ This hits live Wikipedia and, when `BRAVE_API_KEY` is set, Brave Search.
    prospects ≤ **55** regardless of moat.
 4. **Moat without growth is brittle:** moat can still score 70–90 when
    growth is slow, but the weighted score obeys the caps above.
+5. **Peak earnings are not the trend:** with a "margin at a cyclical
+   peak" signal, judge the tailwind at the company's normal margin. If
+   the cycle shows signs of turning, the structural-disruption cap
+   applies.
 
 ## Step 10 — Score news (0–100) with anti-optimism anchors
 
@@ -275,6 +354,9 @@ Rolling 30-day weighted sentiment × relevance over material items only.
   cancellation, margin compression) → clamp to ≤ 50.
 - A quiet window (no material items) is **neutral, not bullish** — 55,
   not 70. "Nothing bad happened" is not a buy signal.
+- A governance burst you read and found to be noise or ordinary
+  litigation does not clamp the score — but say in the evidence that you
+  read it and what it was.
 
 ## Step 11 — Write the judgment file
 
@@ -311,6 +393,15 @@ full symbol, e.g. `MSFT.json`, `RELIANCE.NS.json`) with this schema:
 `anchors_applied` is mandatory whenever a cap fires — it is the audit
 trail for future sessions.
 
+`updated_at` must be the real current time: it is what ages the judgment.
+After 30 days the news pillar stops counting (its window has passed);
+after 90 days leadership and prospects are flagged STALE and count at
+lower confidence. An integrity veto never expires.
+
+Before writing, check every URGENT concern from step 3.2 appears by name
+in the evidence (or `red_flags`) of the pillar it bears on, with what you
+found.
+
 ## Step 12 — Render the final blended report
 
 ```bash
@@ -331,6 +422,8 @@ name. If a gate fired, it is printed under the verdict. Sanity ladder:
 - **< 40** (RED_FLAG): avoid.
 
 If the band feels wrong, recheck the anchors — do not override the math.
+A BUY or better standing next to an URGENT concern needs a sentence in
+your answer on why the concern does not change the call.
 
 ## Step 13 — Present to the user
 
@@ -339,7 +432,11 @@ If the band feels wrong, recheck the anchors — do not override the math.
    and started fresh".
 2. **Verdict + composite + confidence**, one key fact per pillar, the main
    risks, a clear buy / hold / avoid call. Quote prices in the listing's
-   currency.
-3. **Name the anchors and gates you applied**, and any data-quality
-   caveat (source conflicts, stale statements, fields missing for this
-   market) that limits confidence.
+   currency, and the P/E the valuation used (core or mid-cycle) when it
+   differs from the reported one.
+3. **What is new.** The early concerns and strengths, most severe first,
+   each with what you found when you looked into it — and anything in the
+   "Changed since" panel.
+4. **Name the anchors and gates you applied**, and any data-quality
+   caveat (source conflicts, stale statements, no quarterly statements,
+   fields missing for this market) that limits confidence.

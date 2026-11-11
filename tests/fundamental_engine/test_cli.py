@@ -86,7 +86,7 @@ def test_analyse_caches_score_snapshot_and_fx(cache, capsys, monkeypatch):
     from data_sources import fx_source
     from fundamental_engine import analyse_pipeline
 
-    async def fake_analyse(symbol: str, *, data_cache_dir: Path):
+    async def fake_analyse(symbol: str, *, data_cache_dir: Path, sec_user_agent: str = ""):
         return analyse_pipeline.score_snapshot(
             _msft_snapshot(), data_cache_dir=data_cache_dir, price_history=[("2026-11-05", 530.61)]
         )
@@ -115,7 +115,7 @@ def test_analyse_caches_score_snapshot_and_fx(cache, capsys, monkeypatch):
 def test_analyse_reports_missing_data(cache, capsys, monkeypatch):
     from fundamental_engine import analyse_pipeline
 
-    async def no_data(symbol: str, *, data_cache_dir: Path):
+    async def no_data(symbol: str, *, data_cache_dir: Path, sec_user_agent: str = ""):
         raise analyse_pipeline.NoDataError("No fundamentals data for NOPE")
 
     monkeypatch.setattr(analyse_pipeline, "analyse_ticker", no_data)
@@ -166,8 +166,10 @@ def test_news_uses_cached_name_and_needs_one(cache, capsys, monkeypatch):
         {"MSFT": {"composite": 65.0, "verdict": "HOLD", "company_name": "Microsoft Corporation"}}
     ))
     assert main(["news", "MSFT", "--json"]) == 0
-    [item] = json.loads(capsys.readouterr().out)
-    assert item["material_category"] == "earnings"
+    payload = json.loads(capsys.readouterr().out)
+    [story] = payload["stories"]
+    assert story["material_category"] == "earnings"
+    assert payload["ticker"] == "MSFT" and payload["radar"]["window_days"] == 7
     assert main(["news", "MSFT"]) == 0
     assert "Microsoft Q1 results beat" in capsys.readouterr().out
     assert (cache / "news" / "MSFT.json").exists()

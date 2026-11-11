@@ -118,12 +118,19 @@ def test_band_returns_group_by_verdict():
         obs("MSFT", D1, 85, 10.0), obs("NVDA", D1, 82, -2.0), obs("RBRK", D1, 30, 50.0),
     ], ScoreKind.FUNDAMENTALS)}
     assert rows[Verdict.STRONG_BUY] == ReturnStats(
-        count=2, mean_return_pct=4.0, mean_excess_pct=None, hit_rate=0.5
+        count=2, mean_return_pct=4.0, median_return_pct=4.0, mean_excess_pct=None, hit_rate=0.5
     )
     assert rows[Verdict.RED_FLAG].count == 1
     assert rows[Verdict.HOLD] == ReturnStats(
-        count=0, mean_return_pct=None, mean_excess_pct=None, hit_rate=None
+        count=0, mean_return_pct=None, median_return_pct=None, mean_excess_pct=None, hit_rate=None
     )
+
+
+def test_the_median_shows_what_one_outlier_does_to_a_mean():
+    lottery = [obs("SEZL", D1, 20, 2285.0), obs("LYFT", D1, 20, -10.0), obs("PARR", D1, 20, 5.0)]
+    stats = ReturnStats.of(lottery)
+    assert stats.mean_return_pct == pytest.approx(760.0)
+    assert stats.median_return_pct == 5.0
 
 
 def test_excess_returns_remove_each_dates_average():
@@ -135,12 +142,46 @@ def test_excess_returns_remove_each_dates_average():
     assert [o.excess_return_pct for o in observations] == [20.0, 10.0, -30.0, 0.0, None]
 
 
-def test_compare_groups_uses_welch_t_on_excess_returns():
-    group = [obs("A", D1, 50, 10.0, excess=2.0), obs("B", D1, 50, 12.0, excess=4.0)]
-    rest = [obs("C", D1, 50, 5.0, excess=-1.0), obs("D", D1, 50, 3.0, excess=-3.0)]
+D3 = date(2026, 12, 31)
+
+
+def test_compare_groups_takes_one_difference_per_date():
+    group = [obs("A", D1, 50, 10.0), obs("B", D1, 50, 12.0), obs("A", D2, 50, 8.0), obs("A", D3, 50, 1.0)]
+    rest = [obs("C", D1, 50, 5.0), obs("D", D1, 50, 3.0), obs("C", D2, 50, 2.0), obs("C", D3, 50, 4.0)]
     comparison = compare_groups(group, rest)
-    assert comparison.difference_pct == pytest.approx(5.0)
-    assert comparison.t_stat == pytest.approx(5.0 / math.sqrt(2.0))  # each variance is 2
-    assert comparison.a.mean_return_pct == 11.0 and comparison.b.hit_rate == 1.0
+    # Per date: 11 − 4 = +7, 8 − 2 = +6, 1 − 4 = −3.
+    assert comparison.by_date.n == 3
+    assert comparison.difference_pct == pytest.approx(10.0 / 3)
+    spread = math.sqrt(((7 - 10 / 3) ** 2 + (6 - 10 / 3) ** 2 + (-3 - 10 / 3) ** 2) / 2)
+    assert comparison.t_stat == pytest.approx((10.0 / 3) / (spread / math.sqrt(3)))
+    assert comparison.by_date.positive_share == pytest.approx(2 / 3)
+    # The table still pools every observation.
+    assert comparison.a.count == 4 and comparison.a.mean_return_pct == pytest.approx(7.75)
+    assert comparison.b.hit_rate == 1.0
+
+
+def test_compare_groups_only_counts_dates_both_groups_appear_on():
+    group = [obs("A", D1, 50, 10.0), obs("A", D2, 50, 9.0)]
+    rest = [obs("C", D1, 50, 5.0), obs("C", D3, 50, 1.0)]
+    comparison = compare_groups(group, rest)
+    assert comparison.by_date.n == 1 and comparison.difference_pct == 5.0
+    assert comparison.t_stat is None  # one date: no spread to test against
     assert compare_groups([], rest).difference_pct is None
-    assert compare_groups(group[:1], rest[:1]).t_stat is None  # one each: no spread
+    assert compare_groups([obs("A", D1, 50, None)], rest).by_date.n == 0  # window not complete
+
+
+def test_one_unusual_date_counts_once_however_many_tickers_it_holds():
+    # Thirty names beat thirty others by 20 points — all on ONE date. On four
+    # other dates a single pair shows no edge either way.
+    group = [obs(f"G{i}", D1, 50, 30.0 + i % 3) for i in range(30)]
+    rest = [obs(f"R{i}", D1, 50, 10.0 + i % 3) for i in range(30)]
+    for year, edge in ((2019, 1.0), (2020, -1.0), (2021, 2.0), (2022, -2.0)):
+        day = date(year, 12, 31)
+        group.append(obs("G0", day, 50, 5.0 + edge))
+        rest.append(obs("R0", day, 50, 5.0))
+    comparison = compare_groups(group, rest)
+    assert comparison.by_date.n == 5
+    assert comparison.difference_pct == pytest.approx(4.0)  # (20 + 1 − 1 + 2 − 2) / 5
+    # Pooled, sixty near-identical observations would look overwhelming; by
+    # date it is one good year out of five.
+    assert comparison.t_stat is not None and abs(comparison.t_stat) < 2

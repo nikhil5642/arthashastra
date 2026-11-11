@@ -39,11 +39,16 @@ Three stages, cheapest first:
 1. **Yahoo, server-side:** the ratio filters run over every listing in
    each market; the largest matches come back.
 2. **Here:** market cap in the base currency (live FX per listing), the
-   dip filter, and one listing per company (the most traded — NSE over
-   BSE). Depositary receipts and foreign copies are skipped: they carry
-   another instrument's market cap and trade < 0.001% of it a day.
+   dip filter, and one listing per company — a listing in the company's
+   own reporting currency first, then the most traded (`2330.TW` over the
+   `TSM` receipt, NSE over BSE). Depositary receipts and foreign copies
+   are skipped: they carry another instrument's market cap and trade
+   < 0.001% of it a day, or show a P/E under 1.5 in a currency the
+   company doesn't report in.
 3. **`--score 10`:** the top 10 go through the full live fetch and the
    deterministic fundamentals + valuation scoring, and join the cache.
+   Each scored row carries its early-signal tally
+   (`"early_signals": "3 concerns (1 urgent) · 1 strength"`).
 
 All 59 markets take about 1½ minutes; one or two markets take seconds;
 `--score` adds a few seconds per ticker. `--scan 1000` reads deeper into
@@ -56,12 +61,20 @@ each market (small caps); `--limit` sets how many rows print.
 2. **The scored table** — fundamentals, valuation, deterministic
    composite — and why the leaders lead. Read each leader's evidence:
    `python3 -m fundamental_engine inspect <TICKER>`.
-3. **Anti-optimism:** screen ratios are Yahoo's trailing-twelve-month
-   numbers, unaudited, and one-offs distort them — an investment gain can
+3. **Early signals:** for every scored name with a concern, run
+   `python3 -m fundamental_engine inspect <TICKER>` and read the
+   `early_signals` list on its `score`. Name each URGENT concern beside
+   the ticker — profit padded by one-offs, a margin at a cyclical peak,
+   free cash flow turned negative, a quote that doesn't reconcile.
+4. **Anti-optimism:** the screen's own filters use Yahoo's reported
+   trailing numbers, and one-offs distort them — an investment gain can
    halve a P/E, a year-ago tax charge can make profit growth look huge.
-   Name any leader whose screen numbers clash with its scored evidence.
-   A screen is a shortlist, never a verdict.
-4. **Next step:** `/analyse-stock <TICKER>` on the 2–3 strongest for the
+   The scored valuation does not have that problem: it strips unusual
+   gains and counts a margin only up to 1.5× the company's own norm. So a
+   name can pass `--max-pe 15` and still score poorly on valuation — when
+   that happens, say so; the score is the better number. A screen is a
+   shortlist, never a verdict.
+5. **Next step:** `/analyse-stock <TICKER>` on the 2–3 strongest for the
    full five-pillar verdict, or `/pick-stocks <budget> <same filters>` to
    size a portfolio from them.
 

@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 
 from fundamental_engine.analysis_context import (
     analysis_context_panel,
+    changes_panel,
     format_age,
     judgment_age_days,
 )
@@ -284,6 +285,7 @@ def _run_refresh(target: str, *, rejudge: bool = False) -> int:
             if r.status == RefreshStatus.OK:
                 print(
                     f"  {r.ticker:<12} {r.verdict:<10} composite {r.composite}"
+                    + (f"   {r.early_signals}" if r.early_signals else "")
                 )
         if not results:
             print(
@@ -297,25 +299,26 @@ def _run_refresh(target: str, *, rejudge: bool = False) -> int:
             f"composite={result.composite}  verdict={result.verdict}  "
             f"{result.detail}"
         )
+        if result.early_signals:
+            print(f"early signals: {result.early_signals}  ({result.changes} new since the last look)")
     return 0
 
 
 def _run_analyse(ticker: str) -> int:
     from data_sources.fx_source import conversion_rate
     from fundamental_engine.analyse_pipeline import AnalysisResult, NoDataError, analyse_ticker
-    from fundamental_engine.cache import JsonStore
-    from fundamental_engine.extended_score import ExtendedScore
-    from fundamental_engine.snapshot_store import SnapshotStore
     from fundamental_engine.ticker import canonical
+    from fundamental_engine.tracking import record_analysis
     from reports.formatting import make_console
     from reports.stock_report import render_stock_report
-    from screener.price_history import PriceHistoryStore
 
     cfg = AnalystConfig.from_env()
     bare = canonical(ticker)
 
     async def fetch_and_score() -> tuple[AnalysisResult, float | None]:
-        analysed = await analyse_ticker(bare, data_cache_dir=cfg.data_cache_dir)
+        analysed = await analyse_ticker(
+            bare, data_cache_dir=cfg.data_cache_dir, sec_user_agent=cfg.sec_user_agent
+        )
         fx = await conversion_rate(analysed.snapshot.currency, cfg.base_currency)
         return analysed, fx
 
@@ -326,24 +329,24 @@ def _run_analyse(ticker: str) -> int:
         print("Check the ticker symbol (use `resolve <NAME>` to look it up).")
         return 3
 
-    JsonStore(cfg.data_cache_dir / "scores.json").upsert(
-        bare, ExtendedScore.from_analysis(result, fx_rate_to_base=fx_rate).to_dict()
-    )
-    SnapshotStore(cfg.data_cache_dir).save(result.snapshot)
-
-    price_rows_written = 0
-    if result.price_history:
-        with PriceHistoryStore(cfg.data_cache_dir / "prices.db") as store:
-            price_rows_written = store.load_rows(bare, result.price_history)
+    recorded = record_analysis(result, cfg, fx_rate_to_base=fx_rate)
 
     # Always print an "analysis context" banner up front so the user can
     # see exactly which state this run used — fresh deterministic vs
     # blended with a cached judgment, and how old that judgment was.
     console = make_console()
-    console.print(analysis_context_panel(result, bare, price_rows_written))
+    console.print(analysis_context_panel(result, bare, recorded.price_rows))
+    changes = changes_panel(recorded)
+    if changes is not None:
+        console.print(changes)
 
     reports_dir = cfg.data_cache_dir / "reports"
-    fp = render_stock_report(result.snapshot, result.score, output_dir=reports_dir)
+    fp = render_stock_report(
+        result.snapshot,
+        result.score,
+        early_signals=result.early_signals,
+        output_dir=reports_dir,
+    )
     if fp:
         print(f"\nReport saved: {fp}")
 
@@ -354,7 +357,7 @@ def _run_analyse(ticker: str) -> int:
             "Code to generate and cache them."
         )
     else:
-        age = judgment_age_days(result.judgment.updated_at)
+        age = result.judgment.age_days
         if age is not None and age >= 3:
             print(
                 f"\n[warn] Blended with a {format_age(age)} Claude judgment. "
@@ -540,7 +543,7 @@ def _run_research(name: str, ticker: str, as_json: bool) -> int:
 
 
 def _run_news(ticker: str, company_override: str, days: int, as_json: bool) -> int:
-    from data_sources.news_source import NewsSource
+    from data_sources.news_source import NewsSource, digest
     from fundamental_engine.ticker import canonical
     from fundamental_engine.universe import load_scores
     from reports.formatting import make_console
@@ -562,41 +565,56 @@ def _run_news(ticker: str, company_override: str, days: int, as_json: bool) -> i
         )
         return 3
 
-    items = asyncio.run(
+    stories = asyncio.run(
         NewsSource().fetch_for_company(
             company_name, ticker=bare, within_days=days
         )
     )
+    radar = digest(stories)
+    payload: dict[str, object] = {
+        "ticker": bare,
+        "company": company_name,
+        "window_days": days,
+        # Story counts per material category over the last week — the same
+        # numbers the governance / credit-rating early signals are built on.
+        "radar": radar.to_dict(),
+        "stories": [story.to_dict() for story in stories],
+    }
 
     news_dir = cfg.data_cache_dir / "news"
     news_dir.mkdir(parents=True, exist_ok=True)
     fp = news_dir / f"{bare}.json"
-    atomic_write_text(
-        fp, json.dumps([i.to_dict() for i in items], indent=2, default=str)
-    )
+    atomic_write_text(fp, json.dumps(payload, indent=2, default=str))
 
     if as_json:
-        print(json.dumps([i.to_dict() for i in items], indent=2, default=str))
+        print(json.dumps(payload, indent=2, default=str))
         return 0
 
     console = make_console()
     table = Table(
-        title=f"News for {bare} — {company_name} ({len(items)} items, last {days}d)"
+        title=f"News for {bare} — {company_name} ({len(stories)} stories, last {days}d)"
     )
     table.add_column("Published", style="dim")
     table.add_column("Source")
+    table.add_column("Outlets", justify="right")
     table.add_column("Cat")
     table.add_column("Headline")
-    for item in items[:25]:
+    for story in stories[:40]:
         table.add_row(
-            (item.published_at or "")[:10],
-            item.source[:20],
-            item.material_category if item.is_material else "",
-            (item.headline or "")[:90],
+            story.published_at[:10],
+            story.source[:20],
+            str(story.coverage) if story.coverage > 1 else "",
+            story.material_category if story.is_material else "",
+            story.headline[:100],
         )
     console.print(table)
+    for category, entry in radar.categories.items():
+        console.print(
+            f"[dim]Last {radar.window_days}d · {category.value}: {entry.stories} stories — "
+            f"widest: {entry.widest_headline[:90]} ({entry.widest_coverage} outlets)[/dim]"
+        )
     console.print(f"\n[dim]Cached: {fp}[/dim]")
-    if not items:
+    if not stories:
         console.print(
             "[yellow]No items in window. Google News may have nothing "
             "recent for this query.[/yellow]"
@@ -620,6 +638,8 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    # One line per HTTP request drowns the report; failures still log as warnings.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     parser = _build_parser()
     args = parser.parse_args(argv)
 

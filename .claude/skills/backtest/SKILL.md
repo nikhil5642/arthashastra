@@ -51,7 +51,11 @@ Outcomes are judged by fixed rules, set before looking at the data:
 | WEAK PASS | it points the claimed way, but \|t\| < 2 — could be noise |
 | WEAK FAIL | it points the other way, but \|t\| < 2 — could be noise |
 | FAIL | it points the other way and \|t\| ≥ 2 — the data contradicts the claim |
-| NO DATA | too few dates or observations (ranking claims need 10+ tickers on a date) |
+| NO DATA | too few dates or observations (ranking claims need 10+ tickers on a date; group comparisons need 10+ observations per group and 5+ dates with both) |
+
+Every estimate is **one number per date** — a rank IC, or one group's
+mean return minus the other's on that date — and `t` is taken across
+dates. A date is one piece of evidence however many tickers it holds.
 
 The suites:
 
@@ -63,11 +67,18 @@ The suites:
   deterministic composite?
 - `growth_veto` — do industrials in growth-veto territory underperform?
 - `value_trap_guard` — among the cheapest third, do slow growers lag?
+- `peak_margin_guard` — among the cheapest third, do companies earning
+  far above their own normal margin lag?
+- `early_concerns` / `early_strengths` — do companies carrying a material
+  early concern return less, and ones showing a strength more? Only the
+  statement-based signals can be replayed; say which.
 - `dip_signals` — do quality-dip signals beat everything else?
 - `bank_rubric` — among banks only, does the bank rubric rank returns?
 
-Group comparisons use **excess returns** (each return minus its date's
-average), so a group isn't flattered by happening to sit in a boom year.
+Each table shows the **median** beside the mean, and the hit rate. Read
+all three before describing a group: a basket with a +65% mean, a +17%
+median and the lowest hit rate made its money on one or two names — say
+which, not "the group outperformed".
 
 Lead with the FAILs, then the WEAK FAILs. Never present a WEAK result as
 evidence either way: |t| < 2 is noise-level. A FAIL on an anti-optimism
@@ -84,10 +95,21 @@ listings (screener, ~12).
 
 ## Step 4 — State the caveats
 
-Always name them: survivorship (today's universe only), restated
-screener / Yahoo history (SEC is first-filed), only the deterministic
-pillars are replayed (Claude's judgments have no point-in-time history),
-annual EPS in backtest P/E (up to ~15 months old), returns in each
-listing's own currency, and correlated observations on one date make
-t-stats optimistic. Never present a backtest as proof the composite
-verdict works.
+Always name them:
+
+- **Survivorship and selection** — the universe is today's cache: failed
+  and delisted companies are absent, and the names were chosen with
+  hindsight. That lifts the weakest-scored groups' returns most (their
+  failures are the ones missing), so it works *against* every claim that
+  weak scores come before weak returns, and flatters dip-buying. A
+  loss-making cyclical that survived its trough will look like a great
+  "RED_FLAG" buy; the ones that didn't are not in the data.
+- Restated screener / Yahoo history (SEC is first-filed).
+- Only the deterministic pillars are replayed; Claude's judgments have no
+  point-in-time history. Early signals are only partly replayed.
+- Annual EPS in backtest P/E (up to ~15 months old).
+- Returns in each listing's own currency.
+- Few dates: |t| ≥ 2 is a minimum bar, not proof.
+
+Never present a backtest as proof the composite verdict works — and when
+the scores fail to rank returns on the cache, say that plainly too.

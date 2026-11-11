@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from signals.signal_bus import Severity, Signal, SignalBus, SignalType
+
+
+def test_severity_ranks_from_info_to_urgent():
+    assert Severity.INFO.rank < Severity.ALERT.rank < Severity.URGENT.rank
+    assert max(Severity, key=lambda s: s.rank) is Severity.URGENT
 
 
 def test_emit_and_read_roundtrip(tmp_path: Path) -> None:
@@ -31,13 +37,13 @@ def test_emit_and_read_roundtrip(tmp_path: Path) -> None:
 def test_read_urgent_filters(tmp_path: Path) -> None:
     bus = SignalBus(path=tmp_path / "signals.json")
     bus.emit(Signal(SignalType.DIP_DETECTED, Severity.INFO, "A", "info"))
-    bus.emit(Signal(SignalType.LEADERSHIP_RED_FLAG, Severity.URGENT, "B", "urgent"))
-    bus.emit(Signal(SignalType.EARNINGS_MISS, Severity.ALERT, "C", "alert"))
+    bus.emit(Signal(SignalType.EARLY_CONCERN, Severity.URGENT, "B", "urgent"))
+    bus.emit(Signal(SignalType.VERDICT_CHANGED, Severity.ALERT, "C", "alert"))
 
     urgent = bus.read_urgent()
     assert len(urgent) == 1
     assert urgent[0].ticker == "B"
-    assert urgent[0].signal_type == SignalType.LEADERSHIP_RED_FLAG
+    assert urgent[0].signal_type == SignalType.EARLY_CONCERN
 
 
 def test_read_for_ticker_is_case_insensitive(tmp_path: Path) -> None:
@@ -107,3 +113,28 @@ def test_non_list_file_reads_as_empty(tmp_path: Path) -> None:
 
 def test_severity_formats_as_its_value() -> None:
     assert f"{Severity.URGENT}" == "URGENT"
+
+
+def test_emit_many_appends_in_one_write_and_keeps_the_cap(tmp_path: Path) -> None:
+    bus = SignalBus(path=tmp_path / "signals.json", max_kept=3)
+    bus.emit_many([])  # nothing to write: no file is created
+    assert not (tmp_path / "signals.json").exists()
+
+    bus.emit_many([
+        Signal(SignalType.SCORE_UPDATED, Severity.INFO, "GOOG", "composite 66.6 (HOLD)"),
+        Signal(SignalType.VERDICT_CHANGED, Severity.ALERT, "GOOG", "BUY → HOLD"),
+        Signal(SignalType.EARLY_CONCERN, Severity.URGENT, "GOOG", "44% of profit is one-offs"),
+        Signal(SignalType.EARLY_STRENGTH, Severity.ALERT, "GOOG", "Revenue growth picked up"),
+    ])
+    assert [s.signal_type for s in bus.read_all()] == [
+        SignalType.VERDICT_CHANGED, SignalType.EARLY_CONCERN, SignalType.EARLY_STRENGTH,
+    ]
+
+
+def test_rows_of_a_retired_signal_type_are_skipped_not_fatal(tmp_path: Path) -> None:
+    path = tmp_path / "signals.json"
+    path.write_text(json.dumps([
+        {"signal_type": "LEADERSHIP_RED_FLAG", "severity": "URGENT", "ticker": "X", "message": "old"},
+        {"signal_type": "DIP_DETECTED", "severity": "ALERT", "ticker": "Y", "message": "kept"},
+    ]))
+    assert [s.ticker for s in SignalBus(path=path).read_all()] == ["Y"]

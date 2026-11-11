@@ -13,8 +13,9 @@ to read the fetched data, form a judgment, and write it here.
 Format (one file per ticker):
     data_cache/judgments/{TICKER}.json
     {
-        "ticker": "RELIANCE",
-        "leadership": {"score": 0-100, "mode": "FIRST_GEN|MULTI_GEN_FAMILY|PROFESSIONAL",
+        "ticker": "RELIANCE.NS",
+        "leadership": {"score": 0-100,
+                       "mode": "FOUNDER_LED|FAMILY_CONTROLLED|STATE_CONTROLLED|PROFESSIONAL",
                        "integrity_score": 0-100, "integrity_veto": false,
                        "evidence": [...], "red_flags": [...]},
         "prospects":  {"score": 0-100, "evidence": [...]},
@@ -27,12 +28,18 @@ Format (one file per ticker):
 `leadership.integrity_veto: true` (or `"integrity_veto"` listed in
 `leadership.anchors_applied`) marks a fired integrity veto. The pipeline
 turns it into a composite-level gate, not just a low leadership score.
+
+Judgments age (`Judgment.age_days`): the pipeline stops counting a news
+pillar whose 30-day window has passed and marks older leadership /
+prospects judgments stale — see `analyse_pipeline`. Scores are held to
+0–100 when read.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -72,10 +79,9 @@ class PillarJudgment:
     ) -> "PillarJudgment | None":
         if not data or "score" not in data:
             return None
-        score_raw = data["score"]
-        if not isinstance(score_raw, (int, float)):
+        score = _score_field(data["score"])
+        if score is None:
             return None
-        score = float(score_raw)
 
         evidence_raw = data.get("evidence")
         evidence: list[str]
@@ -108,6 +114,11 @@ class Judgment:
         if self.leadership is None:
             self.integrity_veto = False
 
+    @property
+    def age_days(self) -> int | None:
+        """Days since Claude wrote it; None when `updated_at` doesn't parse."""
+        return age_in_days(self.updated_at)
+
     def to_dict(self) -> dict[str, object]:
         leadership = self.leadership.to_dict() if self.leadership else None
         if leadership is not None and self.integrity_veto:
@@ -135,6 +146,33 @@ class Judgment:
             judged_by=_str_field(data.get("judged_by"), default="claude"),
             integrity_veto=_integrity_veto_flag(leadership_raw),
         )
+
+
+def _score_field(raw: object) -> float | None:
+    """A pillar score, held to the 0–100 scale every other pillar uses.
+
+    A judgment that says 150 (or −20) must not push the composite outside
+    its bands; a non-number or NaN is no score at all.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    score = float(raw)
+    if not math.isfinite(score):
+        return None
+    return min(100.0, max(0.0, score))
+
+
+def age_in_days(updated_at: str, *, now: datetime | None = None) -> int | None:
+    """Whole days since an ISO timestamp; None when it is missing or unparseable."""
+    if not updated_at:
+        return None
+    try:
+        # Strip any trailing timezone offset; ages are compared naive.
+        parsed = datetime.fromisoformat(updated_at.split("+")[0].rstrip("Z"))
+    except ValueError:
+        return None
+    delta = (now or datetime.now()) - parsed.replace(tzinfo=None)
+    return max(0, delta.days)
 
 
 def _integrity_veto_flag(leadership: dict[str, object] | None) -> bool:

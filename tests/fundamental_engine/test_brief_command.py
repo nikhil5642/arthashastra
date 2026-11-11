@@ -98,3 +98,51 @@ def test_brief_lists_integrity_vetoes_and_stale_rows(tmp_path: Path, monkeypatch
     content = next((cache_dir / "reports").glob("brief_*.md")).read_text()
     assert "FRAUDCO: integrity veto" in content
     assert "## Stale rows" in content
+
+
+def test_brief_surfaces_early_signals_and_recent_changes(tmp_path: Path, monkeypatch):
+    from datetime import datetime, timedelta
+
+    monkeypatch.setenv("DATA_CACHE_DIR", str(tmp_path / "cache"))
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def signal(kind: str, tone: str, severity: str, message: str) -> dict:
+        return {"kind": kind, "tone": tone, "severity": severity, "message": message}
+
+    (cache_dir / "scores.json").write_text(json.dumps({
+        "GOOG": {
+            "composite": 66.6, "verdict": "HOLD", "last_updated": datetime.now().isoformat(),
+            "early_signals": [
+                signal("one_off_profit", "concern", "URGENT", "44% of profit is one-offs."),
+                signal("debt_rising", "concern", "ALERT", "Total debt rose 321%."),
+                signal("goodwill_jump", "concern", "INFO", "Goodwill doubled."),
+                signal("revenue_accelerating", "strength", "ALERT", "Revenue growth picked up."),
+                signal("a_kind_from_the_future", "concern", "ALERT", "skipped, not fatal"),
+            ],
+        },
+        "MSFT": {"composite": 64.8, "verdict": "HOLD", "last_updated": datetime.now().isoformat()},
+    }))
+    now = datetime.now()
+    (cache_dir / "signals.json").write_text(json.dumps([
+        {"signal_type": "VERDICT_CHANGED", "severity": "ALERT", "ticker": "GOOG",
+         "message": "BUY → HOLD (composite 71.8 → 66.6)", "timestamp": (now - timedelta(days=1)).isoformat()},
+        {"signal_type": "EARLY_CONCERN", "severity": "URGENT", "ticker": "NVDA",
+         "message": "an old concern", "timestamp": (now - timedelta(days=40)).isoformat()},
+        {"signal_type": "SCORE_UPDATED", "severity": "INFO", "ticker": "GOOG",
+         "message": "composite 66.6 (HOLD)", "timestamp": now.isoformat()},
+    ]))
+
+    from fundamental_engine.commands.brief import run_brief_command
+
+    assert run_brief_command() == 0
+    content = next((cache_dir / "reports").glob("brief_*.md")).read_text()
+    # The most severe concern leads, with the count of the rest; INFO stays in the stock's own report.
+    assert "- GOOG: URGENT · 44% of profit is one-offs.  (+1 more)" in content
+    assert "Goodwill doubled" not in content and "skipped, not fatal" not in content
+    assert "## Early strengths" in content and "- GOOG: Revenue growth picked up." in content
+    assert "— 2 concerns (1 urgent) · 1 strength" not in content  # the tally counts INFO too
+    assert "— 3 concerns (1 urgent) · 1 strength" in content
+    # Only the last two weeks' verdict moves and new signals count as "what changed".
+    assert "BUY → HOLD (composite 71.8 → 66.6)" in content
+    assert "an old concern" not in content and "composite 66.6 (HOLD)" not in content

@@ -7,6 +7,7 @@ from datetime import date
 
 from backtests.engine.metrics import Observation, ScoreKind, attach_excess_returns, mean_test
 from backtests.suite import (
+    MIN_DATES,
     MIN_GROUP_SIZE,
     Direction,
     Outcome,
@@ -64,22 +65,40 @@ def test_ranks_returns_passes_fails_and_needs_dates():
     assert "the most on any date was 8" in too_few_names.finding
 
 
-def test_beats_compares_excess_returns_and_needs_group_size():
+def test_beats_compares_date_by_date_and_says_what_is_missing():
     observations = _ranked(+1)
     top = [o for o in observations if o.fundamentals >= 60]
     rest = [o for o in observations if o.fundamentals < 60]
     result = beats(top, rest, claimed=Direction.POSITIVE, labels=("Top half", "Bottom half"))
     assert result.outcome is Outcome.PASS
     assert result.finding.startswith("Top half returned +")
-    assert "48 vs 48 observations" in result.finding
+    assert "averaged over 8 dates" in result.finding and "ahead on 100%" in result.finding
+    assert result.finding.endswith("48 vs 48 observations")
+    assert result.table is not None and result.table.columns == (
+        "Group", "Observations", "Mean return", "Median return", "vs same-date average", "Hit rate",
+    )
 
     reversed_claim = beats(top, rest, claimed=Direction.NEGATIVE, labels=("Top half", "Bottom half"))
     assert reversed_claim.outcome is Outcome.FAIL
 
     small = beats(top[: MIN_GROUP_SIZE - 1], rest, claimed=Direction.POSITIVE, labels=("A", "B"))
     assert small.outcome is Outcome.NO_DATA
+    assert small.finding.endswith(f"needs {MIN_GROUP_SIZE}+ observations in each group")
+
+    # Plenty of observations, but on too few dates to call anything.
+    few_dates = [o for o in observations if o.as_of.year < 2010 + MIN_DATES - 1]
+    crowded = beats(
+        [o for o in few_dates if o.fundamentals >= 60], [o for o in few_dates if o.fundamentals < 60],
+        claimed=Direction.POSITIVE, labels=("A", "B"),
+    )
+    assert crowded.outcome is Outcome.NO_DATA
+    assert crowded.finding.endswith(f"needs {MIN_DATES}+ dates with both groups")
+
     empty = beats([], rest, claimed=Direction.POSITIVE, labels=("Dips", "Rest"))
-    assert empty.outcome is Outcome.NO_DATA and "no complete forward windows" in empty.finding
+    assert empty.outcome is Outcome.NO_DATA
+    assert empty.finding == (
+        "no date had both dips and rest with a complete forward window (0 vs 48 observations)"
+    )
 
 
 def test_mean_test_finding_text():

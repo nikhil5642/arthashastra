@@ -7,20 +7,31 @@ to that ticker; the exact-phrase query itself scopes the results, so no
 alias resolver is needed. For companies with thin English coverage the
 `/analyse-stock` skill tells Claude to search in the local language too.
 
-Items run through a keyword gate (MATERIAL_KEYWORDS) to mark material events
-vs fluff. Categories are checked in severity order — governance before
-earnings — so "regulator probes Q4 results" is tagged governance, the
-category that drives the news-pillar clamp. Keywords match at word starts
-("pledge" catches "pledged", "ed raid" can't fire inside "listed raid").
-Sentiment scoring is a Claude responsibility in the skill.
+The raw feed is mostly noise, so three things happen before anyone reads it:
+
+  - Junk is dropped: quote pages, chart pages and 13F filing spam match the
+    company's name but report nothing.
+  - Syndicated copies are merged into one story, with `coverage` counting
+    the outlets that carried it. Stories come back newest first.
+  - Each story runs through a keyword gate (MATERIAL_KEYWORDS) to mark
+    material events vs fluff. Categories are checked in severity order —
+    governance before earnings — so "regulator probes Q4 results" is tagged
+    governance, the category that drives the news-pillar clamp. Keywords
+    match at word starts ("pledge" catches "pledged", "ed raid" can't fire
+    inside "listed raid").
+
+`digest(items)` then counts the last week's stories per category — the
+facts behind the governance and credit-rating early signals. Sentiment
+scoring is a Claude responsibility in the skill.
 """
 
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import TypedDict
@@ -29,6 +40,9 @@ from urllib.parse import quote_plus
 from data_sources.names import news_query_name
 
 log = logging.getLogger(__name__)
+
+RADAR_WINDOW_DAYS = 7  # how far back `digest` counts stories
+MAX_FEED_ENTRIES = 100  # Google News returns at most this many
 
 
 class FeedEntry(TypedDict):
@@ -42,7 +56,8 @@ class FeedEntry(TypedDict):
     body: str
     url: str
     published_at: str
-    source: str
+    source: str  # the publisher (Reuters, Bloomberg, …), or the feed's name if unknown
+
 
 class NewsCategory(StrEnum):
     """Categories a material news event can fall into.
@@ -66,15 +81,28 @@ class NewsCategory(StrEnum):
 # and quarterly results is tagged governance. Regulator names cover the
 # largest markets; the generic terms ("probe", "enforcement", "fraud")
 # catch the rest, and Claude judges every item in the skill anyway.
+#
+# GOVERNANCE names trouble, not topics: "regulator" and "sanctions" alone
+# also match "regulatory advantage" and "chip-export sanctions", which say
+# nothing about how a company is run, so they are not keywords.
+#
+# RATING means CREDIT ratings (agencies, outlooks, defaults). A broker
+# moving a stock from Hold to Buy is sell-side opinion, not a rating
+# action, so bare "upgrade" / "downgrade" are deliberately not keywords —
+# and nor is bare "default" ("the default search engine").
 MATERIAL_KEYWORDS: dict[NewsCategory, tuple[str, ...]] = {
     NewsCategory.GOVERNANCE: (
-        "fraud", "scam", "probe", "investigation", "enforcement", "regulator",
-        "securities and exchange commission", "sec charges", "sebi", "csrc",
-        "enforcement directorate", "ed raid", "money laundering", "antitrust",
-        "auditor", "restatement", "whistleblower", "class action", "sanctions",
+        "fraud", "scam", "scandal", "probe", "investigat", "enforcement",
+        "regulatory action", "securities and exchange commission", "sec charges", "sebi",
+        "csrc", "enforcement directorate", "ed raid", "money laundering", "antitrust",
+        "auditor", "restatement", "accounting irregularit", "whistleblower", "class action",
+        "short seller", "short-seller", "sanctioned", "fined", "indict", "arrest", "bribe",
+        "embezzle", "insider trading", "misconduct", "subpoena", "espionage", "spy",
     ),
     NewsCategory.RATING: (
-        "downgrade", "upgrade", "rating action", "credit rating", "default",
+        "rating action", "credit rating", "rating outlook", "outlook to negative",
+        "outlook negative", "moody", "fitch", "debt default", "defaults on", "defaulted",
+        "junk status",
     ),
     NewsCategory.INSIDER: (
         "pledge", "promoter", "insider", "stake sale", "sells stake",
@@ -82,7 +110,7 @@ MATERIAL_KEYWORDS: dict[NewsCategory, tuple[str, ...]] = {
     ),
     NewsCategory.LEADERSHIP: (
         "ceo", "chief executive", "cfo", "chairman", "resignation", "resigned",
-        "appointed", "stepped down", "steps down",
+        "resigns", "appointed", "stepped down", "steps down",
     ),
     NewsCategory.CORPORATE_ACTION: (
         "merger", "acquisition", "acquire", "takeover", "buyback", "dividend",
@@ -99,6 +127,25 @@ _MATERIAL_PATTERNS: dict[NewsCategory, re.Pattern[str]] = {
     for category, keywords in MATERIAL_KEYWORDS.items()
 }
 
+# Pages that carry a company's name but no news: finance-portal quote and
+# chart pages, and the "$TICKER Shares Bought by Some Fund LLC" filing spam.
+_NOISE_PATTERN = re.compile(
+    r"stock price, news, quote"
+    r"|stock quote price and forecast"
+    r"|seasonal returns? chart"
+    r"|options chain"
+    r"|company profile"
+    r"|analyst ratings, estimates"
+    r"|major holders"
+    r"|valuation measures"
+    r"|recent insider transactions"
+    r"|latest stock news"
+    r"|stock forecasts?$"
+    r"|\b(?:balance sheet|income statement|cash flow) - yahoo"
+    r"|\$[a-z][a-z.\-]{0,9}\s+(?:shares|stock|holdings|position)\b",
+    re.IGNORECASE,
+)
+
 # One global English edition for every company, whatever its market.
 GOOGLE_NEWS_RSS = (
     "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
@@ -107,17 +154,47 @@ GOOGLE_NEWS_RSS = (
 
 @dataclass(slots=True)
 class NewsItem:
+    """One story: a headline, who published it, and how widely it was carried."""
+
     ticker: str
     source: str
     headline: str
     url: str
-    published_at: str
+    published_at: str  # ISO, UTC
     body: str = ""
     is_material: bool = False
     material_category: str = ""
+    coverage: int = 1  # outlets that carried this same headline
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class CategoryDigest:
+    """One category's stories inside the radar window."""
+
+    stories: int
+    widest_headline: str  # the story the most outlets carried (the newest on a tie)
+    widest_coverage: int
+
+
+@dataclass(frozen=True, slots=True)
+class NewsDigest:
+    """How many stories each material category saw in the last `window_days`."""
+
+    window_days: int
+    stories: int
+    categories: dict[NewsCategory, CategoryDigest] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "window_days": self.window_days,
+            "stories": self.stories,
+            "categories": {
+                category.value: asdict(entry) for category, entry in self.categories.items()
+            },
+        }
 
 
 def classify_material(text: str) -> tuple[bool, str]:
@@ -128,6 +205,26 @@ def classify_material(text: str) -> tuple[bool, str]:
     return False, ""
 
 
+def digest(
+    items: list[NewsItem], *, window_days: int = RADAR_WINDOW_DAYS, now: datetime | None = None
+) -> NewsDigest:
+    """Count the material stories of the last `window_days`, per category."""
+    cutoff = (now or _utc_now()) - timedelta(days=window_days)
+    recent = [item for item in items if _parse_dt(item.published_at) >= cutoff]
+    categories: dict[NewsCategory, CategoryDigest] = {}
+    for category in NewsCategory:
+        tagged = [item for item in recent if item.material_category == category.value]
+        if not tagged:
+            continue
+        widest = max(tagged, key=lambda item: (item.coverage, item.published_at))
+        categories[category] = CategoryDigest(
+            stories=len(tagged),
+            widest_headline=widest.headline,
+            widest_coverage=widest.coverage,
+        )
+    return NewsDigest(window_days=window_days, stories=len(recent), categories=categories)
+
+
 class NewsSource:
     async def fetch_for_company(
         self,
@@ -136,7 +233,7 @@ class NewsSource:
         ticker: str = "",
         within_days: int = 30,
     ) -> list[NewsItem]:
-        """Fetch news items for one company via a Google News RSS query.
+        """Stories about one company from a Google News RSS query, newest first.
 
         The query is the exact-phrase form of the name with legal suffixes
         dropped (`news_query_name`): "Reliance Industries Limited" →
@@ -167,33 +264,36 @@ class NewsSource:
         ticker: str,
         within_days: int,
     ) -> list[NewsItem]:
-        # Compare everything in naive UTC. `_parse_dt` normalises to naive
-        # UTC already; we do the same for `cutoff` so the filter doesn't
-        # silently drop or keep items based on the host system's timezone.
-        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
-            days=within_days
-        )
-        items: list[NewsItem] = []
+        """Window, de-noise, merge syndicated copies, tag, and sort newest first."""
+        cutoff = _utc_now() - timedelta(days=within_days)
+        stories: dict[str, NewsItem] = {}
+        outlets: dict[str, set[str]] = {}
         for entry in raw:
-            published_at = entry.get("published_at", "")
-            if _parse_dt(published_at) < cutoff:
-                continue
+            published = _parse_dt(entry.get("published_at", ""))
             headline = entry.get("headline", "")
+            if published < cutoff or _NOISE_PATTERN.search(headline):
+                continue
+            key = _story_key(headline) or entry.get("url", "")
+            source = entry.get("source", "")
+            outlets.setdefault(key, set()).add(source)
+            if key in stories:
+                continue
             body = entry.get("body", "")
-            is_mat, category = classify_material(f"{headline} {body}")
-            items.append(
-                NewsItem(
-                    ticker=ticker,
-                    source=entry.get("source", ""),
-                    headline=headline,
-                    url=entry.get("url", ""),
-                    published_at=published_at,
-                    body=body,
-                    is_material=is_mat,
-                    material_category=category,
-                )
+            is_material, category = classify_material(f"{headline} {body}")
+            stories[key] = NewsItem(
+                ticker=ticker,
+                source=source,
+                headline=headline,
+                url=entry.get("url", ""),
+                published_at=published.isoformat(timespec="seconds"),
+                body=body,
+                is_material=is_material,
+                material_category=category,
             )
-        log.info("news: %d items within window", len(items))
+        for key, item in stories.items():
+            item.coverage = len(outlets[key])
+        items = sorted(stories.values(), key=lambda item: item.published_at, reverse=True)
+        log.info("news: %d stories within window (from %d feed entries)", len(items), len(raw))
         return items
 
 
@@ -211,21 +311,54 @@ def _fetch_feed_sync(url: str, source_name: str) -> list[FeedEntry]:
         return []
 
     out: list[FeedEntry] = []
-    for entry in d.entries[:80]:
+    for entry in d.entries[:MAX_FEED_ENTRIES]:
+        publisher = _publisher(entry) or source_name
+        headline = _without_publisher(entry.get("title", "") or "", publisher)
         out.append(
             FeedEntry(
-                headline=entry.get("title", "") or "",
-                body=_strip_html(
-                    entry.get("summary", "") or entry.get("description", "") or ""
-                ),
+                headline=headline,
+                body=_body(entry.get("summary", "") or entry.get("description", "") or "", headline),
                 url=entry.get("link", "") or "",
                 published_at=entry.get("published", "")
                 or entry.get("updated", "")
                 or "",
-                source=source_name,
+                source=publisher,
             )
         )
     return out
+
+
+# ── Feed-entry cleaning ──────────────────────────────────────────────────────
+
+
+def _publisher(entry: object) -> str:
+    """The outlet behind an entry — Google News puts it in `<source>`."""
+    source = entry.get("source") if hasattr(entry, "get") else None  # type: ignore[union-attr]
+    title = source.get("title") if hasattr(source, "get") else None  # type: ignore[union-attr]
+    return title.strip() if isinstance(title, str) else ""
+
+
+def _without_publisher(title: str, publisher: str) -> str:
+    """'Alphabet sinks 10% - CNBC' → 'Alphabet sinks 10%'."""
+    title = html.unescape(title).strip()
+    suffix = f" - {publisher}"
+    return title[: -len(suffix)].rstrip() if publisher and title.endswith(suffix) else title
+
+
+def _body(summary: str, headline: str) -> str:
+    """The entry's summary — empty when it only repeats the headline, as Google's does."""
+    text = " ".join(html.unescape(_strip_html(summary)).split())
+    return "" if headline and text.startswith(headline) else text
+
+
+def _story_key(headline: str) -> str:
+    """Headline reduced to its letters and digits — equal for syndicated copies."""
+    return re.sub(r"[^a-z0-9]+", " ", headline.lower()).strip()
+
+
+def _utc_now() -> datetime:
+    """Now, as naive UTC — everything here compares in naive UTC."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _parse_dt(s: str) -> datetime:
@@ -253,6 +386,4 @@ def _parse_dt(s: str) -> datetime:
 
 
 def _strip_html(text: str) -> str:
-    import re
-
     return re.sub(r"<[^>]+>", "", text or "").strip()

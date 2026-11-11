@@ -177,7 +177,7 @@ def test_industrial_report_renders_every_section(tmp_path: Path):
     for expected in (
         "Current price: ¥2,850.00", "Market cap: ¥44.00T", "P/E 8.4", "P/B 1.10",
         "Gross margin: 20.1%", "SG&A / revenue: 8.2%", "Cash conversion cycle: 21 days",
-        "Goodwill / equity: 0.01", "ROCE 5y trend: 6% → 7% → 9% → 10%  ·  ↑ improving",
+        "Goodwill / equity: 0.01", "ROCE, 4 fiscal years: 6% → 7% → 9% → 10%  ·  ↑ improving",
         "Borrowings 3y change: +18.0% over 3 years  ·  ↑ debt-expanding",
         "Insider / promoter: 11.00%  (-1.20pts YoY)", "⚠ FII exit", "✓ DII accumulating",
         "Retail shareholders: 900,000  (+12.0% YoY)", "¥12.40T  ·  QoQ +4.2%  ·  YoY +5.1%",
@@ -225,3 +225,92 @@ def test_report_prints_the_integrity_gate(tmp_path: Path):
     )
     content = render_stock_report(snap, score, output_dir=tmp_path, console=_quiet()).read_text()
     assert "GATE: integrity veto" in content
+
+
+# ── Early signals, repeatable earnings, and what the report can't trust ──────
+
+
+def _alphabet() -> BalanceSheetSnapshot:
+    return BalanceSheetSnapshot(
+        ticker="GOOG", as_of_date="2026-11-10", company_name="Alphabet Inc.", currency="USD",
+        financial_currency="USD", current_price=284.92, market_cap=3.5e12, pe_ratio=14.9,
+        earnings_yield=6.72, fcf_yield=0.57, core_earnings_ratio_ttm=0.557,
+        ttm_period_end="2026-09-30", latest_annual_period="2025-12-31",
+        quarterly_dates=["2026-09-30"], balance_sheet_date="2026-09-30",
+        roce_annual_trend=[15.7, 26.7, 25.3, 26.3, 31.1, 26.2],
+        net_margin_annual_trend=[22.1, 29.5, 21.2, 24.0, 28.6, 32.8], debt_to_equity=0.14, roe=31.8,
+    )
+
+
+def test_report_leads_with_early_signals_and_the_pe_on_repeatable_earnings(tmp_path: Path, capsys):
+    from data_sources.fundamentals_source import StatementWindow
+    from reports.formatting import make_console
+    from scorers.early_signals import EarlySignal, EarlySignalKind, Tone
+    from signals.signal_bus import Severity
+
+    snap = _alphabet()
+    snap.earnings_window = snap.cash_flow_window = StatementWindow.TTM
+    signals = [
+        EarlySignal(EarlySignalKind.ONE_OFF_PROFIT, Tone.CONCERN, Severity.URGENT,
+                    "44% of the profit came from unusual items."),
+        EarlySignal(EarlySignalKind.REVENUE_ACCELERATING, Tone.STRENGTH, Severity.ALERT,
+                    "Revenue growth picked up to +25%."),
+    ]
+    score = blend(
+        ticker="GOOG", leadership=pending_judgment("leadership"), fundamentals=score_fundamentals(snap),
+        valuation=score_valuation(snap), prospects=pending_judgment("prospects"), news=pending_judgment("news"),
+    )
+
+    fp = render_stock_report(snap, score, early_signals=signals, output_dir=tmp_path, console=make_console())
+    terminal = capsys.readouterr().out
+    assert "Early signals" in terminal and "URGENT" in terminal
+    assert terminal.index("Early signals") < terminal.index("Fundamentals (35%)")
+
+    assert fp is not None
+    content = fp.read_text()
+    for expected in (
+        "## Early signals", "- ▼ URGENT · 44% of the profit came from unusual items.",
+        "- ▲ Revenue growth picked up to +25%.",
+        "Read from: quarters to 2026-09-30  ·  balance sheet of 2026-09-30  ·  fiscal year to 2025-12-31",
+        "P/E 14.9 (core 26.8)", "FCF yield 0.57% (TTM)",
+        "Trailing twelve months: to 2026-09-30",
+        "ROCE, 6 fiscal years:", "Net margin, 6 fiscal years: 22.1% → 29.5%",
+    ):
+        assert expected in content, expected
+
+
+def test_report_says_so_when_nothing_is_flagged_or_nothing_fresher_exists(tmp_path: Path):
+    snap = BalanceSheetSnapshot(ticker="BHP.AX", as_of_date="2026-11-10", roe=20.0,
+                                latest_annual_period="2026-06-30")
+    score = blend(
+        ticker="BHP.AX", leadership=pending_judgment("leadership"), fundamentals=score_fundamentals(snap),
+        valuation=score_valuation(snap), prospects=pending_judgment("prospects"), news=pending_judgment("news"),
+    )
+    content = render_stock_report(snap, score, output_dir=tmp_path, console=_quiet()).read_text()  # type: ignore[union-attr]
+    assert "Nothing flagged beyond what the pillars already score." in content
+    assert "no quarterly statements published" in content
+    assert "Trailing twelve months: not available" in content
+
+
+def test_report_withholds_price_ratios_for_an_unreliable_quote(tmp_path: Path):
+    snap = BalanceSheetSnapshot(ticker="GOOGL.BA", as_of_date="2026-11-10", roe=31.8,
+                                quote_unreliable=True, latest_annual_period="2025-12-31")
+    score = blend(
+        ticker="GOOGL.BA", leadership=pending_judgment("leadership"), fundamentals=score_fundamentals(snap),
+        valuation=score_valuation(snap), prospects=pending_judgment("prospects"), news=pending_judgment("news"),
+    )
+    content = render_stock_report(snap, score, output_dir=tmp_path, console=_quiet()).read_text()  # type: ignore[union-attr]
+    assert "Price and statements don't reconcile" in content
+    assert "- Valuation:" not in content  # no P/E, no yields
+
+
+def test_header_hides_a_lenders_cash_flow_yield_and_flags_unrepeatable_earnings():
+    from reports.stock_report.header import valuation_parts_for
+
+    bank = BalanceSheetSnapshot(ticker="JPM", as_of_date="2026-11-10", is_bank=True, pe_ratio=14.4,
+                                fcf_yield=-8.6, price_to_book=2.6)
+    assert valuation_parts_for(bank) == ["P/E 14.4", "P/B 2.60"]
+
+    unproven = BalanceSheetSnapshot(ticker="RDDT", as_of_date="2026-11-10", pe_ratio=19.4, net_margin=32.0,
+                                    net_margin_annual_trend=[-24.0, -11.0, -37.0, 32.0])
+    assert valuation_parts_for(unproven) == ["P/E 19.4 (no repeatable earnings)"]

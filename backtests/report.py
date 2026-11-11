@@ -21,8 +21,10 @@ from backtests.engine.runner import BacktestResult, Coverage
 from backtests.suite import Outcome, ResultTable, Suite, SuiteResult
 
 CAVEATS: tuple[str, ...] = (
-    "Survivorship: the universe is today's cache — delisted or failed companies are absent, "
-    "which flatters every result.",
+    "Survivorship and selection: the universe is today's cache — failed and delisted "
+    "companies are absent, and the names in it were chosen with hindsight. That lifts every "
+    "group's return, the weakest-scored groups' most (their failures are the ones missing): it "
+    "works against any claim that weak scores come before weak returns, and flatters dip-buying.",
     "Restatements: screener and Yahoo show today's restated figures for past years; SEC values "
     "are first-filed (as originally reported).",
     "Only the deterministic pillars (fundamentals, valuation) are replayed — Claude's leadership, "
@@ -31,10 +33,15 @@ CAVEATS: tuple[str, ...] = (
     "(elsewhere). Prices go back further than fundamentals.",
     "Backtest P/E divides by the latest annual EPS (up to ~15 months old); live P/E is trailing "
     "twelve months.",
-    "Returns are total returns in each listing's own currency. Group comparisons use the excess "
-    "over the same date's average, which removes market-wide moves but not currency moves.",
-    "Observations on one date aren't independent, so t-stats are optimistic: |t| ≥ 2 is the "
-    "minimum bar, not proof.",
+    "Early signals are only partly replayed: the fiscal-year ones everywhere, the quarterly and "
+    "shareholding ones for Indian listings over screener's last three years. News, drawdown and "
+    "trailing-cash-flow signals have no point-in-time history. Unusual items are only stripped "
+    "from earnings where the source publishes normalized income (Yahoo frames, not SEC's).",
+    "Returns are total returns in each listing's own currency. Comparing within a date removes "
+    "market-wide moves but not currency moves.",
+    "Every claim is judged one number per date, so an unusual year counts once — but a yearly "
+    "run has few dates: |t| ≥ 2 is the minimum bar, not proof. Read the median beside the mean; "
+    "a mean can be one name.",
 )
 
 OUTCOME_STYLES: dict[Outcome, str] = {

@@ -3,7 +3,7 @@
 Three distinct trend groups (all rendered into the same 3-column rows
 structure the Financial Profile table uses):
 
-  - Multi-year ratio / leverage trends (ROCE, op margin, borrowings)
+  - Multi-year ratio / leverage trends (ROCE, operating and net margin, borrowings)
   - Quarterly shareholding pattern (Promoter / FII / DII / Public deltas)
   - Quarterly revenue + PAT with date-aware QoQ and YoY deltas
 """
@@ -14,34 +14,32 @@ from data_sources.fundamentals_source import BalanceSheetSnapshot, pct_change_by
 from reports.formatting import format_money
 
 
-# ── Multi-year ratio trend (ROCE / OPM / Borrowings 3y Δ) ────────────────────
+# ── Multi-year ratio trend (ROCE / margins / Borrowings 3y Δ) ────────────────
+
+TREND_YEARS_SHOWN = 6  # the same window the valuation's mid-cycle margin uses
+MIN_TREND_POINTS = 3
 
 
 def append_multi_year_trend_rows(
     rows: list[tuple[str, str, str]], snap: BalanceSheetSnapshot
 ) -> None:
-    """Render 'is the business improving or degrading?' in one section."""
+    """Render 'is the business improving or degrading?' in one section.
+
+    Every market gets these rows: Yahoo supplies four fiscal years, SEC
+    (US filers) and screener (Indian listings) ten or more.
+    """
     trend_rows: list[tuple[str, str]] = []
 
-    if snap.roce_annual_trend and len(snap.roce_annual_trend) >= 3:
-        trend_rows.append(
-            (
-                "ROCE 5y trend",
-                _trend_summary(snap.roce_annual_trend[-5:], unit="%", precision=0),
-            )
-        )
-    if (
-        snap.operating_margin_annual_trend
-        and len(snap.operating_margin_annual_trend) >= 3
+    for label, series, precision in (
+        ("ROCE", snap.roce_annual_trend, 0),
+        ("Operating margin", snap.operating_margin_annual_trend, 1),
+        ("Net margin", snap.net_margin_annual_trend, 1),
     ):
-        trend_rows.append(
-            (
-                "Operating margin 5y trend",
-                _trend_summary(
-                    snap.operating_margin_annual_trend[-5:], unit="%", precision=1
-                ),
+        shown = series[-TREND_YEARS_SHOWN:]
+        if len(shown) >= MIN_TREND_POINTS:
+            trend_rows.append(
+                (f"{label}, {len(shown)} fiscal years", _trend_summary(shown, unit="%", precision=precision))
             )
-        )
     if snap.borrowings_went_from_zero:
         trend_rows.append(
             ("Borrowings 3y change", "from zero to debt  ·  ↑ debt-expanding")

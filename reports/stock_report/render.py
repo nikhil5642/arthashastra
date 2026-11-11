@@ -1,14 +1,16 @@
 """Entry point + markdown renderer for the `analyse <TICKER>` report.
 
 `render_stock_report` is the only public function callers should use.
-It composes the header panel, the optional business-summary panel, the
-Financial Profile panel, the data-quality panel, the four pillar sections,
-and the composite verdict box (with any gates that fired) — then writes a
-Markdown mirror to disk if `output_dir` is given.
+It composes the header panel, the early-signals panel (concerns and
+strengths beyond the scored ratios), the optional business-summary panel,
+the Financial Profile panel, the data-quality panel, the five pillar
+sections, and the composite verdict box (with any gates that fired) — then
+writes a Markdown mirror to disk if `output_dir` is given.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +29,12 @@ from reports.formatting import (
     verdict_text,
 )
 from reports.stock_report.data_quality import data_quality_panel, data_quality_rows
+from reports.stock_report.early_signals import (
+    NOTHING_FLAGGED,
+    early_signal_rows,
+    early_signals_panel,
+    freshness_line,
+)
 from reports.stock_report.financial_profile import (
     financial_profile_panel,
     profile_rows,
@@ -37,6 +45,7 @@ from reports.stock_report.header import (
 )
 from scorers.base import Pillar, StockScore
 from scorers.composite_scorer import PILLAR_WEIGHTS
+from scorers.early_signals import EarlySignal
 
 # Section order and weights come from the composite itself, so the report
 # can never disagree with the formula.
@@ -49,6 +58,7 @@ def render_stock_report(
     snap: BalanceSheetSnapshot,
     score: StockScore,
     *,
+    early_signals: Sequence[EarlySignal] = (),
     output_dir: Path | None = None,
     console: Console | None = None,
 ) -> Path | None:
@@ -56,6 +66,7 @@ def render_stock_report(
     console = console or make_console()
 
     console.print(header_panel(snap, score))
+    console.print(early_signals_panel(snap, early_signals))
     console.print()
 
     if snap.business_summary:
@@ -106,7 +117,7 @@ def render_stock_report(
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
         fp = output_dir / f"{score.ticker}_{datetime.now().strftime('%Y-%m-%d')}.md"
-        fp.write_text(_render_markdown(snap, score))
+        fp.write_text(_render_markdown(snap, score, early_signals))
         return fp
     return None
 
@@ -114,7 +125,9 @@ def render_stock_report(
 # ── Markdown mirror (data_cache/reports/<TICKER>_<date>.md) ──────────────────
 
 
-def _render_markdown(snap: BalanceSheetSnapshot, score: StockScore) -> str:
+def _render_markdown(
+    snap: BalanceSheetSnapshot, score: StockScore, early_signals: Sequence[EarlySignal]
+) -> str:
     lines: list[str] = [
         f"# {score.ticker} — {snap.company_name or ''}",
         "",
@@ -147,6 +160,11 @@ def _render_markdown(snap: BalanceSheetSnapshot, score: StockScore) -> str:
     if vparts:
         lines.append("- Valuation: " + "  ·  ".join(vparts))
     lines.append(f"- Source: {snap.source}")
+    lines.append("")
+
+    lines.append("## Early signals")
+    lines.extend(f"- {row}" for row in early_signal_rows(early_signals) or [NOTHING_FLAGGED])
+    lines.append(f"- _{freshness_line(snap)}_")
     lines.append("")
 
     rows = profile_rows(snap)

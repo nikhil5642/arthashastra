@@ -1,4 +1,4 @@
-"""Analysis-context panel shown at the top of every `analyse` run.
+"""Analysis-context panels shown at the top of every `analyse` run.
 
 The banner tells the reader (a) what data adapters fired, (b) whether
 the price history was refreshed, (c) how fresh the statements are and
@@ -6,20 +6,24 @@ whether the sources disagreed, (d) whether this is a bank (different
 rubric), and (e) whether there's a cached Claude judgment and how stale
 it is. This is the "honesty layer" of the report — it makes explicit
 which pillars are deterministic-only vs blended with Claude.
+
+A second panel says what changed since the previous look at the ticker:
+a verdict that moved, and early concerns or strengths that are new.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 from rich.panel import Panel
 
 from data_sources.fundamentals_source import is_bank_snapshot
+from fundamental_engine.judgments import age_in_days
 from reports.stock_report.data_quality import data_quality_summary
 
 if TYPE_CHECKING:
     from fundamental_engine.analyse_pipeline import AnalysisResult
+    from fundamental_engine.tracking import RecordedAnalysis
 
 
 def analysis_context_panel(
@@ -64,21 +68,30 @@ def analysis_context_panel(
     )
 
 
+def changes_panel(recorded: "RecordedAnalysis") -> Panel | None:
+    """'Since the last look' — None on a first analysis or when nothing moved."""
+    previous = recorded.previous
+    if previous is None or not recorded.changes:
+        return None
+    since = previous.score.last_updated[:10] or "the last look"
+    delta = recorded.current.score.composite - previous.score.composite
+    lines = [f"Composite {previous.score.composite:.1f} → "
+             f"{recorded.current.score.composite:.1f} ({delta:+.1f})"]
+    lines.extend(f"• {change.message}" for change in recorded.changes)
+    return Panel(
+        "\n".join(lines),
+        title=f"Changed since {since}",
+        title_align="left",
+        border_style="yellow",
+    )
+
+
 # ── Judgment age helpers (also used by the CLI "STALE" warning hint) ─────────
 
 
 def judgment_age_days(updated_at: str) -> int | None:
-    """Parse an ISO timestamp and return days-since-now, or None on failure."""
-    if not updated_at:
-        return None
-    try:
-        # Strip any trailing timezone offset; we compare naive.
-        ts = updated_at.split("+")[0].rstrip("Z")
-        parsed = datetime.fromisoformat(ts)
-    except ValueError:
-        return None
-    delta = datetime.now() - parsed.replace(tzinfo=None)
-    return max(0, delta.days)
+    """Days since a judgment's `updated_at`, or None when it doesn't parse."""
+    return age_in_days(updated_at)
 
 
 def format_age(days: int | None) -> str:

@@ -67,6 +67,50 @@ def test_run_writes_a_report_and_exits_like_a_test_run(cache, monkeypatch, capsy
     assert "fetched MSFT" in capsys.readouterr().out
 
 
+def _listing(symbol: str, name: str, currency: str, reporting: str, closes: int):
+    history = us_filer(symbol, margin=0.2)
+    history.metadata = {"company_name": name, "currency": currency, "financial_currency": reporting}
+    history.prices = history.prices[:closes]
+    return history
+
+
+def test_one_listing_per_company_prefers_the_home_currency_then_the_longest_history():
+    histories = [
+        _listing("GOOGL.BA", "Alphabet Inc.", "ARS", "USD", 900),  # a peso receipt, listed first
+        _listing("GOOG", "Alphabet Inc.", "USD", "USD", 500),
+        _listing("GOOGL", "Alphabet Inc.", "USD", "USD", 700),  # same currency, longer history
+        _listing("9988.HK", "Alibaba Group Holding Limited", "HKD", "CNY", 300),
+        _listing("BABA", "Alibaba Group Holding Limited", "USD", "CNY", 600),  # neither is home
+        _listing("SHEL.L", "Shell plc", "GBp", "USD", 800),  # alone: kept whatever its currency
+        _listing("NONAME", "", "USD", "USD", 100),
+        _listing("NONAME2", "", "USD", "USD", 100),  # no name → never matched to another
+    ]
+    kept, left_out = cli.one_listing_per_company(histories)
+    assert [h.symbol for h in kept] == ["GOOGL", "BABA", "SHEL.L", "NONAME", "NONAME2"]
+    assert left_out == ["GOOGL.BA", "GOOG", "9988.HK"]
+    assert cli.one_listing_per_company([]) == ([], [])
+
+
+def test_all_leaves_out_cached_quotes_that_do_not_reconcile(cache, capsys):
+    import json
+
+    from data_sources.fundamentals_source import BalanceSheetSnapshot
+    from fundamental_engine.config import AnalystConfig
+    from fundamental_engine.snapshot_store import SnapshotStore
+
+    cache.mkdir(parents=True)
+    (cache / "scores.json").write_text(json.dumps({"MSFT": {}, "RIO.BA": {}, "NEW.L": {}}))
+    store = SnapshotStore(cache)
+    store.save(BalanceSheetSnapshot(ticker="MSFT", as_of_date="2026-11-11"))
+    store.save(BalanceSheetSnapshot(ticker="RIO.BA", as_of_date="2026-11-11", quote_unreliable=True))
+
+    cfg = AnalystConfig.from_env()
+    assert cli.resolve_tickers(["all"], cfg) == ["MSFT", "NEW.L"]  # no snapshot yet → kept
+    assert "RIO.BA" in capsys.readouterr().out
+    # Naming a ticker is the user's call: it is never filtered.
+    assert cli.resolve_tickers(["rio.ba"], cfg) == ["RIO.BA"]
+
+
 def test_markdown_tally_and_suites_without_tables():
     report = BacktestReport(
         settings="none",

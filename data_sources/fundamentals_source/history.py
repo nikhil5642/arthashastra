@@ -15,9 +15,17 @@ Depth is whatever the sources publish:
   - yfinance (everything else): 4 fiscal years
 
 Prices go back much further (Microsoft to 1986), so returns are never the
-binding constraint. Values that only exist as a current number (insider %,
-P/E) are never back-filled. Sector / industry are taken from today: they
-only route the rubric and rarely change.
+binding constraint. Values that only exist as a current number (the 52-week
+range, a published P/E, analyst targets) are never back-filled.
+
+Quarters: SEC and Yahoo frames are fiscal years only, so for most listings
+a past snapshot carries no quarterly figure — no trailing twelve months, no
+quarter-on-quarter trend. Screener's quarterly and shareholding tables are
+replayed for Indian listings, column by column under the same reporting
+lag, as far back as screener publishes them (about three years).
+
+Sector / industry are taken from today: they only route the rubric and
+rarely change.
 
 Every per-share number is put on today's share basis, the basis of Yahoo's
 split-adjusted prices. screener and Yahoo already restate past EPS for
@@ -88,6 +96,7 @@ class StatementHistory:
     frames: AnnualFrames | None = None
     screener: dict[str, Table] = field(default_factory=dict)
     metadata: SnapshotFields = field(default_factory=SnapshotFields)
+    splits: list[SplitRow] = field(default_factory=list)  # every stock split, oldest first
 
     @property
     def fundamentals_source(self) -> str:
@@ -113,7 +122,7 @@ async def fetch_statement_history(symbol: str, *, sec_user_agent: str) -> Statem
         history.total_return = yahoo.total_return
         history.metadata = yahoo.metadata
         history.frames = AnnualFrames(yahoo.income, yahoo.balance, yahoo.cashflow, "yfinance")
-        splits = yahoo.splits
+        history.splits = splits = yahoo.splits
     else:
         log.warning("yfinance history failed for %s: %s", bare, yahoo)
     if isinstance(sec, sec_adapter.SecAnnualFrames):
@@ -162,7 +171,9 @@ def snapshot_as_of(
     from `history.prices`) when rebuilding many dates for one listing.
     """
     cutoff = as_of - timedelta(days=reporting_lag_days)
-    frame_fields = _drop_non_finite(_frames_as_of(history.frames, cutoff), label="frames")
+    frame_fields = _drop_non_finite(
+        _frames_as_of(history.frames, cutoff, history.splits), label="frames"
+    )
     screener_fields = _drop_non_finite(_screener_as_of(history.screener, cutoff), label="screener")
     merged = _merge(frame_fields, screener_fields)
     for key in _IDENTITY_FIELDS:
@@ -187,7 +198,9 @@ def snapshot_as_of(
 # ── Statement frames (SEC or yfinance) ───────────────────────────────────────
 
 
-def _frames_as_of(frames: AnnualFrames | None, cutoff: date) -> SnapshotFields:
+def _frames_as_of(
+    frames: AnnualFrames | None, cutoff: date, splits: list[SplitRow]
+) -> SnapshotFields:
     out = SnapshotFields()
     if frames is None:
         return out
@@ -203,6 +216,9 @@ def _frames_as_of(frames: AnnualFrames | None, cutoff: date) -> SnapshotFields:
     yfinance_adapter._fill_cash_flow_derived(out, cashflow, income)
     yfinance_adapter._fill_working_capital_days(out, income, balance)
     yfinance_adapter._fill_asset_composition(out, balance)
+    yfinance_adapter._fill_annual_trends(out, income, balance)
+    # No quarterly history exists point-in-time: fiscal year-end against fiscal year-end.
+    yfinance_adapter._fill_balance_sheet_changes(out, None, balance, splits)
     return out
 
 

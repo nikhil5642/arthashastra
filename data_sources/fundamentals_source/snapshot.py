@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import date
+from enum import StrEnum
 from typing import TypedDict
 
 from data_sources.fx_source import major_unit
@@ -40,6 +41,17 @@ SCORED_FIELDS: tuple[str, ...] = (
     "insider_holding",
     "pledge_pct",
 )
+
+
+class StatementWindow(StrEnum):
+    """Which twelve months a flow figure (profit, cash flow) covers."""
+
+    TTM = "TTM"  # the four newest consecutive quarters
+    FISCAL_YEAR = "FY"  # the latest full fiscal year
+
+    @property
+    def label(self) -> str:
+        return "trailing twelve months" if self is StatementWindow.TTM else "latest fiscal year"
 
 
 # ── Rubric routing (structure first, sector strings second) ──────────────────
@@ -170,12 +182,42 @@ class BalanceSheetSnapshot:
     free_cash_flow: float | None = None  # latest full fiscal year, absolute
     shareholders_equity: float | None = None  # latest balance sheet, absolute
 
+    # ── Latest fiscal year, absolute amounts (reporting currency) ────────────
+    revenue: float | None = None
+    operating_cash_flow: float | None = None
+    capex: float | None = None  # cash spent on property and equipment, as a positive number
+    stock_based_compensation: float | None = None
+
+    # ── Trailing twelve months: the four newest consecutive quarters ─────────
+    # All None when the source publishes fewer than four consecutive quarters
+    # (half-yearly reporters); consumers then fall back to the fiscal year.
+    ttm_period_end: str = ""  # ISO date of the newest quarter in the window
+    ttm_revenue: float | None = None
+    ttm_net_income: float | None = None
+    ttm_operating_cash_flow: float | None = None
+    ttm_capex: float | None = None
+    ttm_free_cash_flow: float | None = None
+    ttm_stock_based_compensation: float | None = None
+
+    # ── Earnings quality ─────────────────────────────────────────────────────
+    # Profit excluding unusual items (investment gains, write-offs, one-off
+    # charges) ÷ reported profit, both from the same source and window.
+    # 0.56 means 44% of reported profit was unusual. None when the source
+    # publishes no normalized income or the company made a loss.
+    core_earnings_ratio_fy: float | None = None
+    core_earnings_ratio_ttm: float | None = None
+
     # ── Valuation ratios (set by valuation.apply_valuation) ──────────────────
-    # Only computed when price and statements share a currency.
     earnings_yield: float | None = None  # %, 100 / P/E
-    fcf_yield: float | None = None  # %, free cash flow per share / price
+    fcf_yield: float | None = None  # %, free cash flow / market value of the equity
     price_to_book: float | None = None
     pe_history: list[float] = field(default_factory=list)  # P/E at past FY ends, oldest first
+    earnings_window: StatementWindow | None = None  # the twelve months behind `pe_ratio`
+    cash_flow_window: StatementWindow | None = None  # the twelve months behind `fcf_yield`
+    # The quote's price and the statements can't be put on one basis: a
+    # depositary receipt priced per fraction of a share (a CEDEAR, an SDR), or
+    # statements whose currency label is wrong. Nothing price-based is kept.
+    quote_unreliable: bool = False
 
     # ── Financial profile: margins ───────────────────────────────────────────
     gross_margin: float | None = None
@@ -233,12 +275,29 @@ class BalanceSheetSnapshot:
     insider_delta_1y_pct_points: float | None = None
     num_shareholders_delta_1y_pct: float | None = None
 
+    # ── Year-on-year balance-sheet changes ───────────────────────────────────
+    # The latest balance sheet (quarterly or half-yearly when published)
+    # against the one about twelve months earlier — the changes annual
+    # ratios only show a year late. All currency-free.
+    balance_sheet_date: str = ""  # ISO date of the latest balance sheet compared
+    debt_change_1y_pct: float | None = None
+    latest_debt_to_equity: float | None = None
+    debt_to_equity_1y_ago: float | None = None
+    receivables_change_1y_pct: float | None = None
+    inventory_change_1y_pct: float | None = None
+    goodwill_change_1y_pct: float | None = None  # goodwill + other intangibles
+    latest_goodwill_to_equity: float | None = None
+    # Shares outstanding; None across a stock split (the count isn't comparable).
+    share_count_change_1y_pct: float | None = None
+
     # ── Multi-year ratio / P&L trend (oldest→newest, annual) ─────────────────
     # Raw series so the report can render direction (↑/↓/→) and Claude can
     # reason about "is the business improving or degrading?" without just
-    # looking at the latest snapshot.
+    # looking at the latest snapshot. Amounts are absolute, in the reporting
+    # currency; margins and ROCE are in percent.
     roce_annual_trend: list[float] = field(default_factory=list)
     operating_margin_annual_trend: list[float] = field(default_factory=list)
+    net_margin_annual_trend: list[float] = field(default_factory=list)
     net_profit_annual_trend: list[float] = field(default_factory=list)
     sales_annual_trend: list[float] = field(default_factory=list)
     borrowings_annual_trend: list[float] = field(default_factory=list)
@@ -287,6 +346,9 @@ class BalanceSheetSnapshot:
     quarterly_revenue: list[float] = field(default_factory=list)  # newest-first
     quarterly_pat: list[float] = field(default_factory=list)
     quarterly_dates: list[str] = field(default_factory=list)
+    # Operating profit ÷ revenue per quarter, %, aligned with `quarterly_dates`
+    # (None where the source has no operating line for that quarter).
+    quarterly_operating_margin: list[float | None] = field(default_factory=list)
     latest_yoy_revenue_growth: float | None = None
     latest_yoy_pat_growth: float | None = None
 
@@ -311,6 +373,50 @@ class BalanceSheetSnapshot:
         present = sum(1 for f in SCORED_FIELDS if getattr(self, f) is not None)
         return round(100.0 * present / len(SCORED_FIELDS), 1)
 
+    @property
+    def ttm_is_current(self) -> bool:
+        """A trailing-twelve-month window exists and is no older than the fiscal year."""
+        return bool(self.ttm_period_end) and self.ttm_period_end >= self.latest_annual_period
+
+    @property
+    def ttm_adds_news(self) -> bool:
+        """The trailing window ends after the fiscal year — it holds quarters the annual ratios lack."""
+        return bool(self.ttm_period_end) and self.ttm_period_end > self.latest_annual_period
+
+    @property
+    def core_earnings_ratio(self) -> float | None:
+        """Core ÷ reported profit over the twelve months the P/E covers."""
+        if self.earnings_window is StatementWindow.FISCAL_YEAR:
+            return self.core_earnings_ratio_fy
+        if self.core_earnings_ratio_ttm is not None and self.ttm_is_current:
+            return self.core_earnings_ratio_ttm
+        return self.core_earnings_ratio_fy
+
+    @property
+    def trailing_net_margin(self) -> float | None:
+        """Net margin (%) over the freshest twelve months available."""
+        if (
+            self.earnings_window is not StatementWindow.FISCAL_YEAR
+            and self.ttm_is_current
+            and self.ttm_net_income is not None
+            and self.ttm_revenue
+            and self.ttm_revenue > 0
+        ):
+            return round(self.ttm_net_income / self.ttm_revenue * 100, 2)
+        return self.net_margin
+
+    def trailing(self, name: str) -> tuple[float | None, StatementWindow]:
+        """The freshest twelve-month figure for a flow line, and which window it covers.
+
+        `name` is the fiscal-year field (`"free_cash_flow"`, `"capex"`, …);
+        its `ttm_` twin wins when a current trailing window has it.
+        """
+        if self.ttm_is_current:
+            ttm_value = getattr(self, f"ttm_{name}")
+            if ttm_value is not None:
+                return ttm_value, StatementWindow.TTM
+        return getattr(self, name), StatementWindow.FISCAL_YEAR
+
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
@@ -334,7 +440,19 @@ class BalanceSheetSnapshot:
                 if parsed is not None:
                     conflicts.append(parsed)
         kwargs["data_conflicts"] = conflicts
+        for window_field in ("earnings_window", "cash_flow_window"):
+            kwargs[window_field] = _parse_window(kwargs.get(window_field))
         return cls(**kwargs)  # type: ignore[arg-type]
+
+
+def _parse_window(raw: object) -> StatementWindow | None:
+    """A cached window label back into the enum; anything unknown is None."""
+    if isinstance(raw, StatementWindow):
+        return raw
+    try:
+        return StatementWindow(str(raw))
+    except ValueError:
+        return None
 
 
 # ── SnapshotFields: the adapter-layer builder shape ────────────────────────
@@ -407,6 +525,19 @@ class SnapshotFields(TypedDict, total=False):
     net_income: float | None
     free_cash_flow: float | None
     shareholders_equity: float | None
+    revenue: float | None
+    operating_cash_flow: float | None
+    capex: float | None
+    stock_based_compensation: float | None
+    ttm_period_end: str
+    ttm_revenue: float | None
+    ttm_net_income: float | None
+    ttm_operating_cash_flow: float | None
+    ttm_capex: float | None
+    ttm_free_cash_flow: float | None
+    ttm_stock_based_compensation: float | None
+    core_earnings_ratio_fy: float | None
+    core_earnings_ratio_ttm: float | None
     earnings_yield: float | None
     fcf_yield: float | None
     price_to_book: float | None
@@ -459,9 +590,21 @@ class SnapshotFields(TypedDict, total=False):
     insider_delta_1y_pct_points: float | None
     num_shareholders_delta_1y_pct: float | None
 
+    # Year-on-year balance-sheet changes
+    balance_sheet_date: str
+    debt_change_1y_pct: float | None
+    latest_debt_to_equity: float | None
+    debt_to_equity_1y_ago: float | None
+    receivables_change_1y_pct: float | None
+    inventory_change_1y_pct: float | None
+    goodwill_change_1y_pct: float | None
+    latest_goodwill_to_equity: float | None
+    share_count_change_1y_pct: float | None
+
     # Multi-year ratio / P&L trend
     roce_annual_trend: list[float]
     operating_margin_annual_trend: list[float]
+    net_margin_annual_trend: list[float]
     net_profit_annual_trend: list[float]
     sales_annual_trend: list[float]
     borrowings_annual_trend: list[float]
@@ -502,6 +645,7 @@ class SnapshotFields(TypedDict, total=False):
     quarterly_revenue: list[float]
     quarterly_pat: list[float]
     quarterly_dates: list[str]
+    quarterly_operating_margin: list[float | None]
     latest_yoy_revenue_growth: float | None
     latest_yoy_pat_growth: float | None
 

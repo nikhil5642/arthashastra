@@ -12,6 +12,14 @@ The balance-sheet bucket is itself a weighted blend of five ratios:
 D/E 30% + interest coverage 25% + current ratio 15% + quick ratio 15%
 + net debt / EBITDA 15%.
 
+Known-bad is never scored as unknown:
+  - Negative shareholders' equity has no D/E ratio, but it is the most
+    levered a balance sheet can be — the D/E axis scores 0, it is not
+    dropped.
+  - A profit that turned into a loss arrives as a −100% PAT CAGR
+    (`PROFIT_WIPED_OUT_CAGR`), so the growth curve and the veto below both
+    see it.
+
 Vetoes and caps (applied after the weighted sum):
   - Pledge > 10% clamps the final score to 40 (promoter-behaviour veto).
   - Growth deceleration: both 3y CAGRs below 3%/5%/7% → score capped at
@@ -23,7 +31,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from enum import StrEnum
 
-from data_sources.fundamentals_source import BalanceSheetSnapshot
+from data_sources.fundamentals_source import PROFIT_WIPED_OUT_CAGR, BalanceSheetSnapshot
 from scorers.base import Pillar, ScorerResult
 from scorers.fundamentals_scorer import ownership
 
@@ -131,9 +139,8 @@ def _apply_growth_cap(
     if score_so_far <= cap_score:
         return score_so_far
     rev = snap.rev_3y_cagr or 0.0
-    pat = snap.pat_3y_cagr or 0.0
     evidence.append(
-        f"VETO: 3y growth decelerating (rev {rev:.1f}%, PAT {pat:.1f}%, "
+        f"VETO: 3y growth decelerating (rev {rev:.1f}%, PAT {pat_growth_label(snap.pat_3y_cagr)}, "
         f"both < {cap_pct:.0f}%) — score capped at {cap_score:.1f} "
         f"(uncapped was {score_so_far:.1f}). Balance-sheet quality does not "
         f"compensate for a business that stopped growing."
@@ -157,6 +164,20 @@ def growth_deceleration_cap(
         if rev < threshold and pat < threshold:
             return threshold, cap
     return None
+
+
+def pat_growth_label(pat_3y_cagr: float | None) -> str:
+    """'12.4%', or 'turned to a loss' for a profit that was wiped out."""
+    if pat_3y_cagr is None:
+        return "n/a"
+    if pat_3y_cagr <= PROFIT_WIPED_OUT_CAGR:
+        return "turned to a loss"
+    return f"{pat_3y_cagr:.1f}%"
+
+
+def has_negative_equity(snap: BalanceSheetSnapshot) -> bool:
+    """Liabilities exceed assets — known, and the opposite of a clean balance sheet."""
+    return snap.shareholders_equity is not None and snap.shareholders_equity <= 0
 
 
 # ── Sub-scorers (each returns (score, evidence_lines) or (None, [])) ─────────
@@ -183,6 +204,12 @@ def _score_balance_sheet_health(
             s = max(0.0, 25.0 - (de - 1.5) * 20.0)
         sub_scores.append((s, 30))
         evidence.append(f"D/E = {de:.2f} → {s:.0f}/100")
+    elif has_negative_equity(snap):
+        sub_scores.append((0.0, 30))
+        evidence.append(
+            "Shareholders' equity is negative — liabilities exceed assets, "
+            "so there is no book cushion under the debt → 0/100"
+        )
 
     if snap.interest_coverage is not None:
         ic = snap.interest_coverage
@@ -288,6 +315,8 @@ def _score_profitability(
                 s = max(0.0, val * 4)
         sub_scores.append(s)
         evidence.append(f"{name} = {val:.1f}% → {s:.0f}/100")
+    if snap.roe is None and has_negative_equity(snap):
+        evidence.append("ROE not meaningful — shareholders' equity is negative")
     if not sub_scores:
         return None, []
     return sum(sub_scores) / len(sub_scores), evidence
@@ -315,7 +344,10 @@ def _score_growth(
         else:
             s = 0.0
         sub_scores.append(s)
-        evidence.append(f"{name} = {val:.1f}% → {s:.0f}/100")
+        if val <= PROFIT_WIPED_OUT_CAGR:
+            evidence.append("PAT over 3 years: profit turned into a loss → 0/100")
+        else:
+            evidence.append(f"{name} = {val:.1f}% → {s:.0f}/100")
     if not sub_scores:
         return None, []
     return sum(sub_scores) / len(sub_scores), evidence

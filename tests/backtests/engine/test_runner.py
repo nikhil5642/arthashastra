@@ -114,3 +114,35 @@ def test_dip_gate_quality_bar_is_the_deterministic_composite():
     assert score.composite == 81.0  # 0.7 × 90 + 0.3 × 60
     assert score.verdict is Verdict.STRONG_BUY
     assert score.valuation_score == 60.0 and score.data_completeness_pct == 80.0
+
+
+def test_observations_record_peak_margins_and_material_early_signals():
+    """A cyclical on a record margin, levering up: both show on the as-of date."""
+    cols = pd.to_datetime(["2025-06-30", "2024-06-30", "2023-06-30", "2022-06-30"])
+    revenue = [300.0, 150.0, 120.0, 130.0]
+    profit = [180.0, 30.0, 6.0, 26.0]  # margins 60%, 20%, 5%, 20% → median 20%
+    income = pd.DataFrame(
+        [revenue, profit, [p / SHARES for p in profit]],
+        index=["Total Revenue", "Net Income", "Diluted EPS"], columns=cols,
+    )
+    balance = pd.DataFrame(
+        [[900.0, 500.0, 420.0, 400.0], [400.0, 250.0, 220.0, 210.0], [200.0, 60.0, 55.0, 50.0]],
+        index=["Total Assets", "Stockholders Equity", "Total Debt"], columns=cols,
+    )
+    cyclical = StatementHistory(
+        symbol="MU",
+        prices=daily_prices(date(2021, 1, 1), 2200, start_price=100.0, daily_growth=0.0004),
+        frames=AnnualFrames(income=income, balance=balance, cashflow=None, source="sec"),
+        metadata={"sector": "Technology", "currency": "USD", "financial_currency": "USD"},
+    )
+    steady = us_filer("MSFT", margin=0.35)
+
+    result = run_backtest([cyclical, steady], [date(2024, 12, 31), date(2025, 12, 31)], horizon_months=12)
+    by_key = {(o.ticker, o.as_of.year): o for o in result.observations}
+
+    # FY2025 is public by end-2025: 60% margin against a 20% median, debt up 233%.
+    peak = by_key[("MU", 2025)]
+    assert peak.peak_margin and peak.material_concerns == 2 and peak.material_strengths == 0
+    # A year earlier only FY2022–24 were public: three years are too few to call a cycle.
+    assert not by_key[("MU", 2024)].peak_margin
+    assert not by_key[("MSFT", 2025)].peak_margin and by_key[("MSFT", 2025)].material_concerns == 0

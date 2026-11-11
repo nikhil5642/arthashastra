@@ -114,3 +114,17 @@ def test_turnover_is_currency_free_and_reads_pence():
     no_volume = Listing.from_quote(_quote(averageDailyVolume3Month=None))
     assert no_volume is not None and no_volume.daily_turnover is None
     assert Listing.from_quote(_quote(fiftyTwoWeekHigh=None)).drawdown_pct is None
+
+
+def test_listing_knows_when_it_trades_in_another_currency_than_it_reports():
+    from data_sources.universe_source import Listing
+
+    base = {"symbol": "X", "regularMarketPrice": 10.0, "marketCap": 1e9}
+    home = Listing.from_quote({**base, "currency": "USD", "financialCurrency": "USD"})
+    pence = Listing.from_quote({**base, "currency": "GBp", "financialCurrency": "GBP"})
+    cedear = Listing.from_quote({**base, "currency": "ARS", "financialCurrency": "USD"})
+    unknown = Listing.from_quote({**base, "currency": "USD"})
+    assert home is not None and not home.cross_currency
+    assert pence is not None and not pence.cross_currency  # pence are pounds
+    assert cedear is not None and cedear.cross_currency
+    assert unknown is not None and not unknown.cross_currency  # unknown is not "foreign"

@@ -7,10 +7,20 @@ listings screener.in adds depth and wins on the ratios it publishes
 price history, current / quick ratios, net debt / EBITDA, sector /
 industry, currencies, ownership percentages, and the analyst bundle.
 
+Three views of the same company come out of one fetch:
+
+  - the latest full fiscal year  → the scored ratios (audited, comparable)
+  - the four newest quarters     → trailing-twelve-month profit and cash
+                                   flow, so valuation never prices today's
+                                   share against statements a year old
+  - the latest balance sheet     → year-on-year changes in debt,
+    against the one a year back    receivables, inventory, goodwill and
+                                   share count — what the annual ratios
+                                   only show a year late
+
 `.info` and `.fast_info` are rate-limited in 2026 so we stick to the
-DataFrame accessors (`.history`, `.balance_sheet`, `.income_stmt`,
-`.cashflow`, `.quarterly_income_stmt`) and only touch `.info` as a
-best-effort final step for metadata.
+DataFrame accessors and only touch `.info` as a best-effort final step
+for metadata.
 
 Tests monkeypatch `_fetch_yfinance_sync` on this module directly.
 """
@@ -21,9 +31,16 @@ import asyncio
 import logging
 import math
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, Callable, TypeVar
 
-from data_sources.fundamentals_source.primitives import latest_yoy_growth
+from data_sources.fundamentals_source.primitives import (
+    cagr_pct,
+    change_by_date,
+    consecutive_quarters,
+    latest_yoy_growth,
+    trailing_twelve_months,
+)
 from data_sources.fundamentals_source.snapshot import SnapshotFields
 
 if TYPE_CHECKING:
@@ -41,6 +58,38 @@ SplitRow = tuple[str, float]  # (ISO date, ratio) — 4.0 for a 4-for-1 split
 _T = TypeVar("_T")
 
 TRADING_DAYS_PER_YEAR = 252
+MAX_TREND_YEARS = 10  # fiscal years kept in the multi-year trend series
+# A split inside the comparison year makes two share counts incomparable.
+SPLIT_LOOKBACK_DAYS = 400
+
+# ── Statement rows, by Yahoo's labels (first present wins) ───────────────────
+
+_REVENUE = ("Total Revenue", "Operating Revenue")
+# Core operating profit. Yahoo's "EBIT" row is NOT a substitute: it adds
+# interest back to pre-tax profit, so it carries other income and one-off
+# gains — the very things interest coverage and ROCE must exclude.
+_OPERATING_INCOME = ("Operating Income", "Total Operating Income As Reported")
+_NET_INCOME = ("Net Income", "Net Income Common Stockholders")
+# Net income with unusual items (investment gains, write-offs, special
+# charges) taken out, after tax — computed by Yahoo's data provider.
+_NORMALIZED_INCOME = ("Normalized Income",)
+_OPERATING_CASH_FLOW = ("Operating Cash Flow", "Cash Flow From Continuing Operating Activities")
+_CAPEX = ("Capital Expenditure",)
+_FREE_CASH_FLOW = ("Free Cash Flow",)
+_STOCK_COMPENSATION = ("Stock Based Compensation",)
+_EQUITY = ("Common Stock Equity", "Stockholders Equity", "Total Stockholder Equity")
+_TOTAL_DEBT = ("Total Debt", "Long Term Debt")
+_TOTAL_ASSETS = ("Total Assets",)
+_CURRENT_LIABILITIES = ("Current Liabilities", "Total Current Liabilities")
+_RECEIVABLES = ("Accounts Receivable", "Receivables")
+_INVENTORY = ("Inventory",)
+_GOODWILL_AND_INTANGIBLES = (
+    "Goodwill And Other Intangible Assets",
+    "Other Intangible Assets",
+    "Goodwill",
+)
+_SHARES_OUTSTANDING = ("Ordinary Shares Number", "Share Issued")
+
 
 def _yf_symbol(raw: str) -> str:
     """Canonical tickers ARE Yahoo symbols ('MSFT', 'RELIANCE.NS', '0700.HK').
@@ -87,17 +136,17 @@ def _fetch_yfinance_sync(
         lambda: t.history(period="10y", auto_adjust=False),
         label=f"history {ticker}",
     )
-    bs: "DataFrame | None" = _safe(
-        lambda: t.balance_sheet, label=f"balance_sheet {ticker}"
-    )
-    is_: "DataFrame | None" = _safe(
-        lambda: t.income_stmt, label=f"income_stmt {ticker}"
-    )
-    cf: "DataFrame | None" = _safe(
-        lambda: t.cashflow, label=f"cashflow {ticker}"
-    )
+    bs: "DataFrame | None" = _safe(lambda: t.balance_sheet, label=f"balance_sheet {ticker}")
+    is_: "DataFrame | None" = _safe(lambda: t.income_stmt, label=f"income_stmt {ticker}")
+    cf: "DataFrame | None" = _safe(lambda: t.cashflow, label=f"cashflow {ticker}")
     q_is: "DataFrame | None" = _safe(
         lambda: t.quarterly_income_stmt, label=f"quarterly_income_stmt {ticker}"
+    )
+    q_cf: "DataFrame | None" = _safe(
+        lambda: t.quarterly_cashflow, label=f"quarterly_cashflow {ticker}"
+    )
+    q_bs: "DataFrame | None" = _safe(
+        lambda: t.quarterly_balance_sheet, label=f"quarterly_balance_sheet {ticker}"
     )
 
     out: SnapshotFields = SnapshotFields()
@@ -111,7 +160,10 @@ def _fetch_yfinance_sync(
     _fill_cash_flow_derived(out, cf, is_)
     _fill_working_capital_days(out, is_, bs)
     _fill_asset_composition(out, bs)
+    _fill_annual_trends(out, is_, bs)
     _fill_quarterly_trend(out, q_is)
+    _fill_trailing_twelve_months(out, q_is, q_cf)
+    _fill_balance_sheet_changes(out, q_bs, bs, _splits(hist))
     _fill_info_metadata(out, t, ticker)
 
     return out, price_history
@@ -168,12 +220,12 @@ def _fetch_history_bundle_sync(ticker: str) -> YahooHistory:
         cashflow=_safe(lambda: t.cashflow, label=f"cashflow {ticker}"),
         prices=_column_rows(hist, "Close"),
         total_return=_column_rows(hist, "Adj Close"),
-        splits=[(day, ratio) for day, ratio in _column_rows(hist, "Stock Splits") if ratio > 0],
+        splits=_splits(hist),
         metadata=metadata,
     )
 
 
-# ── Per-section fillers (keep _fetch_yfinance_sync readable) ─────────────────
+# ── Price context ────────────────────────────────────────────────────────────
 
 
 def _fill_price_context(
@@ -202,6 +254,14 @@ def _column_rows(hist: "DataFrame | None", column: str) -> list[PriceRow]:
         day = ts.date().isoformat() if hasattr(ts, "date") else str(ts)[:10]
         rows.append((day, float(value)))
     return rows
+
+
+def _splits(hist: "DataFrame | None") -> list[SplitRow]:
+    """Every stock split in the price history, oldest first."""
+    return [(day, ratio) for day, ratio in _column_rows(hist, "Stock Splits") if ratio > 0]
+
+
+# ── Latest fiscal year: the scored ratios ────────────────────────────────────
 
 
 def _fill_annual_period(
@@ -240,15 +300,11 @@ def _fill_eps_history(out: SnapshotFields, is_: "DataFrame | None") -> None:
 def _fill_balance_sheet_derived(
     out: SnapshotFields, bs: "DataFrame | None"
 ) -> None:
-    total_debt = _bs_first(bs, ("Total Debt", "Long Term Debt"))
-    equity = _bs_first(
-        bs, ("Common Stock Equity", "Stockholders Equity", "Total Stockholder Equity")
-    )
+    total_debt = _bs_first(bs, _TOTAL_DEBT)
+    equity = _bs_first(bs, _EQUITY)
     current_assets = _bs_first(bs, ("Current Assets",))
-    current_liabilities = _bs_first(
-        bs, ("Current Liabilities", "Total Current Liabilities")
-    )
-    inventory = _bs_first(bs, ("Inventory",))
+    current_liabilities = _bs_first(bs, _CURRENT_LIABILITIES)
+    inventory = _bs_first(bs, _INVENTORY)
 
     if equity is not None:
         out["shareholders_equity"] = equity
@@ -274,10 +330,10 @@ def _fill_income_statement_derived(
 ) -> None:
     # Core operating EBIT — excludes other income and one-off gains, the
     # same definition the screener path uses for interest coverage.
-    ebit = _bs_first(is_, ("Operating Income", "EBIT"))
+    ebit = _bs_first(is_, _OPERATING_INCOME)
     ebitda = _bs_first(is_, ("EBITDA", "Normalized EBITDA"))
     interest = _bs_first(is_, ("Interest Expense",))
-    revenue = _bs_first(is_, ("Total Revenue", "Operating Revenue"))
+    revenue = _bs_first(is_, _REVENUE)
     gross_profit = _bs_first(is_, ("Gross Profit",))
     cogs = _bs_first(is_, ("Cost Of Revenue", "Reconciled Cost Of Revenue"))
     sga = _bs_first(
@@ -287,11 +343,12 @@ def _fill_income_statement_derived(
             "Selling General And Administrative",
         ),
     )
-    net_income = _bs_first(is_, ("Net Income", "Net Income Common Stockholders"))
+    net_income = _bs_first(is_, _NET_INCOME)
+    normalized_income = _bs_first(is_, _NORMALIZED_INCOME)
     pretax = _bs_first(is_, ("Pretax Income",))
     tax_provision = _bs_first(is_, ("Tax Provision",))
 
-    total_debt = _bs_first(bs, ("Total Debt", "Long Term Debt"))
+    total_debt = _bs_first(bs, _TOTAL_DEBT)
     net_debt_raw = _bs_first(bs, ("Net Debt",))
     cash = _bs_first(
         bs,
@@ -300,13 +357,9 @@ def _fill_income_statement_derived(
             "Cash Cash Equivalents And Short Term Investments",
         ),
     )
-    equity = _bs_first(
-        bs, ("Common Stock Equity", "Stockholders Equity", "Total Stockholder Equity")
-    )
-    total_assets = _bs_first(bs, ("Total Assets",))
-    current_liabilities = _bs_first(
-        bs, ("Current Liabilities", "Total Current Liabilities")
-    )
+    equity = _bs_first(bs, _EQUITY)
+    total_assets = _bs_first(bs, _TOTAL_ASSETS)
+    current_liabilities = _bs_first(bs, _CURRENT_LIABILITIES)
 
     # A negative value is kept on purpose: a core operating loss is
     # known-bad coverage (scored 0), not missing data.
@@ -324,6 +377,9 @@ def _fill_income_statement_derived(
 
     if net_income is not None:
         out["net_income"] = net_income
+    core_ratio = _core_earnings_ratio(normalized_income, net_income)
+    if core_ratio is not None:
+        out["core_earnings_ratio_fy"] = core_ratio
     if net_income is not None and equity is not None and equity > 0:
         out["roe"] = round(net_income / equity * 100, 2)
     if net_income is not None and total_assets is not None and total_assets > 0:
@@ -338,16 +394,17 @@ def _fill_income_statement_derived(
         if capital_employed > 0:
             out["roce"] = round(ebit / capital_employed * 100, 2)
 
-    rev_cagr = _compute_cagr(is_, ("Total Revenue", "Operating Revenue"), years=3)
+    rev_cagr = _compute_cagr(is_, _REVENUE, years=3)
     if rev_cagr is not None:
         out["rev_3y_cagr"] = rev_cagr
-    pat_cagr = _compute_cagr(
-        is_, ("Net Income", "Net Income Common Stockholders"), years=3
-    )
+    # A profit that became a loss is the worst growth outcome, not a gap in
+    # the data — see primitives.PROFIT_WIPED_OUT_CAGR.
+    pat_cagr = _compute_cagr(is_, _NET_INCOME, years=3, wiped_out_counts=True)
     if pat_cagr is not None:
         out["pat_3y_cagr"] = pat_cagr
 
     if revenue is not None and revenue > 0:
+        out["revenue"] = revenue
         if gross_profit is not None:
             out["gross_margin"] = round(gross_profit / revenue * 100, 2)
         if ebit is not None:
@@ -363,29 +420,42 @@ def _fill_income_statement_derived(
         out["tax_rate"] = round(tax_provision / pretax * 100, 2)
 
 
+def _core_earnings_ratio(
+    normalized_income: float | None, net_income: float | None
+) -> float | None:
+    """Profit without unusual items ÷ reported profit, for a profitable period.
+
+    Both numbers come from the same statement column(s), so the ratio is
+    source-consistent whatever the merge later does with `net_income`.
+    """
+    if normalized_income is None or net_income is None or net_income <= 0:
+        return None
+    return round(normalized_income / net_income, 3)
+
+
 def _fill_cash_flow_derived(
     out: SnapshotFields,
     cf: "DataFrame | None",
     is_: "DataFrame | None",
 ) -> None:
-    ocf = _bs_first(
-        cf,
-        (
-            "Operating Cash Flow",
-            "Cash Flow From Continuing Operating Activities",
-        ),
-    )
-    fcf = _bs_first(cf, ("Free Cash Flow",))
-    capex = _bs_first(cf, ("Capital Expenditure",))
-    net_income = _bs_first(is_, ("Net Income", "Net Income Common Stockholders"))
+    ocf = _bs_first(cf, _OPERATING_CASH_FLOW)
+    fcf = _bs_first(cf, _FREE_CASH_FLOW)
+    capex = _bs_first(cf, _CAPEX)
+    stock_compensation = _bs_first(cf, _STOCK_COMPENSATION)
+    net_income = _bs_first(is_, _NET_INCOME)
 
+    if ocf is not None:
+        out["operating_cash_flow"] = ocf
+    if capex is not None:
+        out["capex"] = abs(capex)  # Yahoo reports the outflow as a negative
+    if stock_compensation is not None:
+        out["stock_based_compensation"] = stock_compensation
     if ocf is not None and net_income is not None and net_income > 0:
         out["ocf_to_pat"] = round(ocf / net_income, 3)
 
-    # Prefer the Free Cash Flow row; otherwise compute from OCF + capex
-    # (capex is a negative number in yfinance, so adding it subtracts).
+    # Prefer the Free Cash Flow row; otherwise compute from OCF − capex.
     if fcf is None and ocf is not None and capex is not None:
-        fcf = ocf + capex
+        fcf = ocf - abs(capex)
     if fcf is not None:
         out["free_cash_flow"] = fcf
     if fcf is not None and net_income is not None and net_income > 0:
@@ -397,10 +467,10 @@ def _fill_working_capital_days(
     is_: "DataFrame | None",
     bs: "DataFrame | None",
 ) -> None:
-    revenue = _bs_first(is_, ("Total Revenue", "Operating Revenue"))
+    revenue = _bs_first(is_, _REVENUE)
     cogs = _bs_first(is_, ("Cost Of Revenue", "Reconciled Cost Of Revenue"))
-    inventory = _bs_first(bs, ("Inventory",))
-    accounts_receivable = _bs_first(bs, ("Accounts Receivable", "Receivables"))
+    inventory = _bs_first(bs, _INVENTORY)
+    accounts_receivable = _bs_first(bs, _RECEIVABLES)
     accounts_payable = _bs_first(bs, ("Accounts Payable", "Payables"))
 
     if revenue is not None and revenue > 0 and accounts_receivable is not None:
@@ -423,22 +493,81 @@ def _fill_working_capital_days(
 def _fill_asset_composition(
     out: SnapshotFields, bs: "DataFrame | None"
 ) -> None:
-    equity = _bs_first(
-        bs, ("Common Stock Equity", "Stockholders Equity", "Total Stockholder Equity")
-    )
+    equity = _bs_first(bs, _EQUITY)
     tangible_book = _bs_first(bs, ("Tangible Book Value", "Net Tangible Assets"))
-    goodwill_intangibles = _bs_first(
-        bs,
-        (
-            "Goodwill And Other Intangible Assets",
-            "Other Intangible Assets",
-            "Goodwill",
-        ),
-    )
+    goodwill_intangibles = _bs_first(bs, _GOODWILL_AND_INTANGIBLES)
     if tangible_book is not None and equity is not None and equity > 0:
         out["tangible_book_ratio"] = round(tangible_book / equity, 3)
     if goodwill_intangibles is not None and equity is not None and equity > 0:
         out["goodwill_to_equity"] = round(goodwill_intangibles / equity, 3)
+
+
+# ── Fiscal-year history: is the business improving or degrading? ─────────────
+
+
+def _fill_annual_trends(
+    out: SnapshotFields, is_: "DataFrame | None", bs: "DataFrame | None"
+) -> None:
+    """Sales, profit, margin and ROCE by fiscal year, oldest → newest.
+
+    Works on any yfinance-shaped annual frames: Yahoo's four years or SEC's
+    eighteen (the live path and the backtests both call it), so a US filer
+    gets a full business cycle of margins, not just the recent upswing.
+    """
+    income = _dated_rows(is_, anchor=_REVENUE)
+    if income is None:
+        return
+    revenue = income.first(_REVENUE) or []
+    profit = income.first(_NET_INCOME) or []
+    operating = income.first(_OPERATING_INCOME) or []
+    balance = _dated_rows(bs, anchor=_TOTAL_ASSETS)
+
+    sales: list[float] = []
+    profits: list[float] = []
+    net_margins: list[float] = []
+    operating_margins: list[float] = []
+    roce: list[float] = []
+    for i in reversed(range(min(len(income.dates), MAX_TREND_YEARS))):
+        year_revenue = revenue[i]
+        if year_revenue is None or year_revenue <= 0:
+            continue
+        sales.append(year_revenue)
+        year_profit = _at(profit, i)
+        if year_profit is not None:
+            profits.append(year_profit)
+            net_margins.append(round(year_profit / year_revenue * 100, 2))
+        year_operating = _at(operating, i)
+        if year_operating is not None:
+            operating_margins.append(round(year_operating / year_revenue * 100, 2))
+            year_roce = _roce_at(balance, income.dates[i], year_operating)
+            if year_roce is not None:
+                roce.append(year_roce)
+
+    for key, series in (
+        ("sales_annual_trend", sales),
+        ("net_profit_annual_trend", profits),
+        ("net_margin_annual_trend", net_margins),
+        ("operating_margin_annual_trend", operating_margins),
+        ("roce_annual_trend", roce),
+    ):
+        if series:
+            out[key] = series  # type: ignore[literal-required]
+
+
+def _roce_at(balance: "_DatedRows | None", fiscal_end: str, ebit: float) -> float | None:
+    """EBIT ÷ (total assets − current liabilities) at one fiscal year-end."""
+    if balance is None or fiscal_end not in balance.dates:
+        return None
+    i = balance.dates.index(fiscal_end)
+    total_assets = _at(balance.first(_TOTAL_ASSETS), i)
+    current_liabilities = _at(balance.first(_CURRENT_LIABILITIES), i)
+    if total_assets is None or current_liabilities is None:
+        return None
+    capital_employed = total_assets - current_liabilities
+    return round(ebit / capital_employed * 100, 2) if capital_employed > 0 else None
+
+
+# ── The quarters since: trends and trailing twelve months ────────────────────
 
 
 def _fill_quarterly_trend(
@@ -447,6 +576,7 @@ def _fill_quarterly_trend(
     q_rev, q_pat, q_dates = _extract_quarterly_series(q_is)
     if q_dates:
         out["quarterly_dates"] = q_dates
+        out["quarterly_operating_margin"] = _quarterly_operating_margin(q_is, q_dates)
     if q_rev:
         out["quarterly_revenue"] = q_rev
         growth = latest_yoy_growth(q_rev, q_dates)
@@ -457,6 +587,152 @@ def _fill_quarterly_trend(
         growth = latest_yoy_growth(q_pat, q_dates)
         if growth is not None:
             out["latest_yoy_pat_growth"] = growth
+
+
+def _quarterly_operating_margin(
+    q_is: "DataFrame | None", quarter_ends: list[str]
+) -> list[float | None]:
+    """Operating profit ÷ revenue (%) for each of `quarter_ends`, None where unknown."""
+    income = _dated_rows(q_is, anchor=_REVENUE)
+    if income is None:
+        return [None] * len(quarter_ends)
+    revenue = income.first(_REVENUE) or []
+    operating = income.first(_OPERATING_INCOME) or []
+    margins: list[float | None] = []
+    for quarter_end in quarter_ends:
+        margin: float | None = None
+        if quarter_end in income.dates:
+            i = income.dates.index(quarter_end)
+            quarter_revenue, quarter_operating = _at(revenue, i), _at(operating, i)
+            if quarter_revenue and quarter_revenue > 0 and quarter_operating is not None:
+                margin = round(quarter_operating / quarter_revenue * 100, 2)
+        margins.append(margin)
+    return margins
+
+
+def _fill_trailing_twelve_months(
+    out: SnapshotFields, q_is: "DataFrame | None", q_cf: "DataFrame | None"
+) -> None:
+    """Twelve-month sums over the four newest consecutive quarters.
+
+    The income statement sets the window. The cash-flow statement only
+    contributes when its newest quarter is the same one, so every `ttm_`
+    figure describes the same twelve months.
+    """
+    income = _dated_rows(q_is, anchor=_REVENUE)
+    if income is None or not consecutive_quarters(income.dates):
+        return
+    out["ttm_period_end"] = income.dates[0]
+    for key, row_names in (("ttm_revenue", _REVENUE), ("ttm_net_income", _NET_INCOME)):
+        total = income.trailing(row_names)
+        if total is not None:
+            out[key] = total  # type: ignore[literal-required]
+    core_ratio = _core_earnings_ratio(
+        income.trailing(_NORMALIZED_INCOME), income.trailing(_NET_INCOME)
+    )
+    if core_ratio is not None:
+        out["core_earnings_ratio_ttm"] = core_ratio
+
+    cash = _dated_rows(q_cf, anchor=_OPERATING_CASH_FLOW)
+    if cash is None or cash.dates[0] != income.dates[0] or not consecutive_quarters(cash.dates):
+        return
+    operating_cash_flow = cash.trailing(_OPERATING_CASH_FLOW)
+    capex = cash.trailing(_CAPEX)
+    free_cash_flow = cash.trailing(_FREE_CASH_FLOW)
+    if free_cash_flow is None and operating_cash_flow is not None and capex is not None:
+        free_cash_flow = operating_cash_flow - abs(capex)
+    stock_compensation = cash.trailing(_STOCK_COMPENSATION)
+
+    if operating_cash_flow is not None:
+        out["ttm_operating_cash_flow"] = operating_cash_flow
+    if capex is not None:
+        out["ttm_capex"] = abs(capex)
+    if free_cash_flow is not None:
+        out["ttm_free_cash_flow"] = free_cash_flow
+    if stock_compensation is not None:
+        out["ttm_stock_based_compensation"] = stock_compensation
+
+
+# ── The latest balance sheet against the one a year earlier ──────────────────
+
+
+def _fill_balance_sheet_changes(
+    out: SnapshotFields,
+    q_bs: "DataFrame | None",
+    bs: "DataFrame | None",
+    splits: list[SplitRow] | None,
+) -> None:
+    """Year-on-year changes in debt, receivables, inventory, goodwill and share count.
+
+    Uses the quarterly (or half-yearly) balance sheets when one sits a year
+    before the newest, else the two latest fiscal year-ends. Every pair is
+    matched by date, and each change needs a positive year-ago base.
+
+    `splits` is the listing's split history. The share-count change is only
+    computed when that history is known and shows no split inside the
+    year: a split changes the count without issuing or retiring a single
+    share of ownership.
+    """
+    sheet = _year_comparable(q_bs) or _year_comparable(bs)
+    if sheet is None:
+        return
+    out["balance_sheet_date"] = sheet.dates[0]
+
+    debt = sheet.year_pair(_TOTAL_DEBT)
+    equity = sheet.year_pair(_EQUITY)
+    goodwill = sheet.year_pair(_GOODWILL_AND_INTANGIBLES)
+
+    for key, pair in (
+        ("debt_change_1y_pct", debt),
+        ("receivables_change_1y_pct", sheet.year_pair(_RECEIVABLES)),
+        ("inventory_change_1y_pct", sheet.year_pair(_INVENTORY)),
+        ("goodwill_change_1y_pct", goodwill),
+    ):
+        change = _pct_change(pair)
+        if change is not None:
+            out[key] = change  # type: ignore[literal-required]
+
+    if debt is not None and equity is not None:
+        if equity[0] > 0:
+            out["latest_debt_to_equity"] = round(debt[0] / equity[0], 3)
+        if equity[1] > 0:
+            out["debt_to_equity_1y_ago"] = round(debt[1] / equity[1], 3)
+    if goodwill is not None and equity is not None and equity[0] > 0:
+        out["latest_goodwill_to_equity"] = round(goodwill[0] / equity[0], 3)
+
+    if splits is not None and not _split_in_year_to(splits, sheet.dates[0]):
+        change = _pct_change(sheet.year_pair(_SHARES_OUTSTANDING))
+        if change is not None:
+            out["share_count_change_1y_pct"] = change
+
+
+def _year_comparable(df: "DataFrame | None") -> "_DatedRows | None":
+    """The balance sheets, if one of them sits about a year before the newest."""
+    sheet = _dated_rows(df, anchor=_TOTAL_ASSETS)
+    if sheet is None or change_by_date(sheet.first(_TOTAL_ASSETS) or [], sheet.dates) is None:
+        return None
+    return sheet
+
+
+def _pct_change(pair: tuple[float, float] | None) -> float | None:
+    """% change of (latest, year-ago); None without a positive year-ago base."""
+    if pair is None or pair[1] <= 0:
+        return None
+    latest, prior = pair
+    return round((latest - prior) / prior * 100, 1)
+
+
+def _split_in_year_to(splits: list[SplitRow], balance_sheet_date: str) -> bool:
+    """Was there a stock split in the year leading up to `balance_sheet_date`?"""
+    try:
+        sheet_day = date.fromisoformat(balance_sheet_date)
+    except ValueError:
+        return False
+    window_start = (sheet_day - timedelta(days=SPLIT_LOOKBACK_DAYS)).isoformat()
+    return any(window_start <= day <= balance_sheet_date for day, _ in splits)
+
+
+# ── Listing metadata (`.info`, best-effort) ──────────────────────────────────
 
 
 def _fill_info_metadata(
@@ -569,6 +845,77 @@ def _info_float(info: dict[str, object], key: str) -> float | None:
 # ── DataFrame helpers ────────────────────────────────────────────────────────
 
 
+@dataclass(slots=True)
+class _DatedRows:
+    """A statement as plain lists: its reporting dates, and each row aligned to them.
+
+    `dates` are ISO strings, newest first, limited to real reporting
+    periods (columns where the statement's anchor row has a value — Yahoo
+    often carries an older column that is entirely empty).
+    """
+
+    dates: list[str]
+    rows: dict[str, list[float | None]]
+
+    def first(self, candidates: tuple[str, ...]) -> list[float | None] | None:
+        """The first of `candidates` this statement has."""
+        for name in candidates:
+            if name in self.rows:
+                return self.rows[name]
+        return None
+
+    def trailing(self, candidates: tuple[str, ...]) -> float | None:
+        """Twelve-month sum of the first candidate row with four full quarters."""
+        for name in candidates:
+            if name in self.rows:
+                total = trailing_twelve_months(self.rows[name], self.dates)
+                if total is not None:
+                    return total
+        return None
+
+    def year_pair(self, candidates: tuple[str, ...]) -> tuple[float, float] | None:
+        """(latest, about a year earlier) for the first candidate row with both."""
+        for name in candidates:
+            if name in self.rows:
+                pair = change_by_date(self.rows[name], self.dates)
+                if pair is not None:
+                    return pair
+        return None
+
+
+def _dated_rows(df: "DataFrame | None", *, anchor: tuple[str, ...]) -> _DatedRows | None:
+    """A statement frame as `_DatedRows`, or None when it has no usable period."""
+    if df is None:
+        return None
+    try:
+        if df.empty:
+            return None
+    except Exception:
+        return None
+    anchor_row = _first_row(df, anchor)
+    if anchor_row is None:
+        return None
+    columns = [
+        column
+        for column in df.columns
+        if hasattr(column, "date") and _finite_or_none(anchor_row.get(column)) is not None
+    ]
+    if not columns:
+        return None
+    columns.sort(reverse=True)
+    return _DatedRows(
+        dates=[column.date().isoformat() for column in columns],
+        rows={
+            str(name): [_finite_or_none(df.at[name, column]) for column in columns]
+            for name in df.index
+        },
+    )
+
+
+def _at(row: list[float | None] | None, i: int) -> float | None:
+    return row[i] if row is not None and i < len(row) else None
+
+
 def _extract_quarterly_series(
     q_is: "DataFrame | None",
 ) -> tuple[list[float], list[float], list[str]]:
@@ -587,8 +934,8 @@ def _extract_quarterly_series(
     except Exception:
         return [], [], []
 
-    rev_row = _first_row(q_is, ("Total Revenue", "Operating Revenue"))
-    pat_row = _first_row(q_is, ("Net Income", "Net Income Common Stockholders"))
+    rev_row = _first_row(q_is, _REVENUE)
+    pat_row = _first_row(q_is, _NET_INCOME)
     if rev_row is None:
         return [], [], []
 
@@ -655,7 +1002,7 @@ def _safe(fn: Callable[[], _T], *, label: str) -> _T | None:
 def _bs_first(
     df: "DataFrame | None", candidates: tuple[str, ...]
 ) -> float | None:
-    """Return the first populated value across `candidates` row names."""
+    """The newest column's value for the first of `candidates` that has one."""
     if df is None:
         return None
     try:
@@ -666,13 +1013,9 @@ def _bs_first(
     for name in candidates:
         try:
             if name in df.index:
-                val = df.loc[name].iloc[0]
-                if val is None:
-                    continue
-                v = float(val)
-                if v != v:  # NaN guard
-                    continue
-                return v
+                value = _finite_or_none(df.loc[name].iloc[0])
+                if value is not None:
+                    return value
         except (KeyError, IndexError, TypeError, ValueError):
             continue
     return None
@@ -683,8 +1026,14 @@ def _compute_cagr(
     candidates: tuple[str, ...],
     *,
     years: int,
+    wiped_out_counts: bool = False,
 ) -> float | None:
-    """CAGR from a yfinance DataFrame's row. iloc[0] is newest."""
+    """CAGR from a yfinance DataFrame's row. iloc[0] is newest.
+
+    yfinance often leaves the oldest annual column NaN for Indian and other
+    non-US filers; a NaN endpoint gives None (it would otherwise slip past
+    every `<=` check and score growth 0/100 while bypassing the growth veto).
+    """
     if df is None:
         return None
     try:
@@ -699,16 +1048,14 @@ def _compute_cagr(
             series = df.loc[name]
             if len(series) < years + 1 or not _consecutive_years(series.index, years):
                 continue
-            current = float(series.iloc[0])
-            past = float(series.iloc[years])
-            # yfinance often leaves the oldest annual column NaN for Indian
-            # and other non-US filers. NaN slips through `<= 0` checks and
-            # would score growth 0/100 while bypassing the growth veto.
-            if not (math.isfinite(current) and math.isfinite(past)):
-                continue
-            if past <= 0 or current <= 0:
-                continue
-            return round((((current / past) ** (1 / years)) - 1) * 100, 2)
+            growth = cagr_pct(
+                float(series.iloc[years]),
+                float(series.iloc[0]),
+                years=years,
+                wiped_out_counts=wiped_out_counts,
+            )
         except (KeyError, IndexError, TypeError, ValueError):
             continue
+        if growth is not None:
+            return growth
     return None

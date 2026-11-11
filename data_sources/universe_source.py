@@ -75,6 +75,14 @@ class Listing:
     high_52w: float | None = None
     trailing_pe: float | None = None
     avg_daily_volume: float | None = None  # shares, 3-month average
+    financial_currency: str = ""  # the company's reporting currency; "" when Yahoo omits it
+
+    @property
+    def cross_currency(self) -> bool:
+        """Trades in one currency, reports in another (an ADR, a Hong Kong H-share, a CEDEAR)."""
+        return bool(self.financial_currency) and (
+            major_unit(self.currency)[0] != self.financial_currency.upper()
+        )
 
     @property
     def drawdown_pct(self) -> float | None:
@@ -109,6 +117,7 @@ class Listing:
             high_52w=_positive(quote.get("fiftyTwoWeekHigh")),
             trailing_pe=_positive(quote.get("trailingPE")),
             avg_daily_volume=_positive(quote.get("averageDailyVolume3Month")),
+            financial_currency=_text(quote, "financialCurrency"),
         )
 
 

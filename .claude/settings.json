@@ -1,20 +1,6 @@
 {
   "permissions": {
     "deny": [
-      "Edit(fundamental_engine/**)",
-      "Edit(data_sources/**)",
-      "Edit(scorers/**)",
-      "Edit(screener/**)",
-      "Edit(reports/**)",
-      "Edit(signals/**)",
-      "Edit(tests/**)",
-      "Write(fundamental_engine/**)",
-      "Write(data_sources/**)",
-      "Write(scorers/**)",
-      "Write(screener/**)",
-      "Write(reports/**)",
-      "Write(signals/**)",
-      "Write(tests/**)",
       "Bash(rm -rf:*)",
       "Bash(git push --force:*)",
       "Bash(git push -f:*)",
@@ -23,28 +9,6 @@
       "Bash(git checkout .:*)",
       "Bash(git branch -D:*)",
       "Bash(git commit --amend:*)"
-    ],
-    "ask": [
-      "Edit(CLAUDE.md)",
-      "Edit(README.md)",
-      "Edit(launch.sh)",
-      "Edit(.env)",
-      "Edit(.env.example)",
-      "Edit(pyproject.toml)",
-      "Edit(requirements.txt)",
-      "Edit(.gitignore)",
-      "Edit(.claude/settings.json)",
-      "Edit(.claude/skills/**)",
-      "Write(CLAUDE.md)",
-      "Write(README.md)",
-      "Write(launch.sh)",
-      "Write(.env)",
-      "Write(.env.example)",
-      "Write(pyproject.toml)",
-      "Write(requirements.txt)",
-      "Write(.gitignore)",
-      "Write(.claude/settings.json)",
-      "Write(.claude/skills/**)"
     ]
   }
 }

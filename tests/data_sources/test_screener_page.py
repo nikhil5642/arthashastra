@@ -271,3 +271,57 @@ async def test_html_tree_is_none_when_both_pages_fail(mock_http):
 
     mock_http(handler)
     assert await screener_adapter._fetch_html_tree("ACME") is None
+
+
+async def test_industrial_page_trailing_window_fiscal_amounts_and_trends(monkeypatch):
+    out = await _parse(monkeypatch, _industrial_page())
+
+    # The latest fiscal year's amounts, in rupees. Capex is the gap between
+    # operating and free cash flow of that same year.
+    assert out["revenue"] == 1800 * CRORE
+    assert out["operating_cash_flow"] == 300 * CRORE
+    assert out["capex"] == 100 * CRORE
+
+    # Twelve months from the four newest quarters (Dec-25 … Sep-26).
+    assert out["ttm_period_end"] == "2026-09-30"
+    assert out["ttm_revenue"] == (460 + 480 + 500 + 560) * CRORE
+    assert out["ttm_net_income"] == (65 + 70 + 72 + 84) * CRORE
+
+    # Multi-year series: amounts in rupees like every other amount, margins in %.
+    assert out["sales_annual_trend"] == [1000 * CRORE, 1200 * CRORE, 1500 * CRORE, 1800 * CRORE]
+    assert out["net_profit_annual_trend"][-1] == 249 * CRORE
+    assert out["borrowings_annual_trend"] == [300 * CRORE, 280 * CRORE, 250 * CRORE, 240 * CRORE]
+    assert out["net_margin_annual_trend"] == [11.2, 12.17, 13.0, 13.83]
+    assert out["operating_margin_annual_trend"] == [20.0, 20.83, 21.33, 22.22]
+
+    # This page's quarterly table has no operating line: aligned, but unknown.
+    assert out["quarterly_operating_margin"] == [None] * 5
+
+
+def test_quarterly_operating_margin_is_after_depreciation():
+    """Same definition as the yfinance path's Operating Income ÷ revenue."""
+    out: dict = {}
+    screener_adapter._apply_quarters(
+        out,
+        ["Jun 2026", "Sep 2026"],
+        {
+            "sales": [500.0, 560.0],
+            "operating profit": [100.0, 126.0],
+            "depreciation": [20.0, 14.0],
+            "net profit": [72.0, 84.0],
+        },
+    )
+    assert out["quarterly_dates"] == ["2026-09-30", "2026-06-30"]
+    assert out["quarterly_operating_margin"] == [20.0, 16.0]  # (126 − 14) / 560, (100 − 20) / 500
+    assert "ttm_revenue" not in out  # two quarters are not twelve months
+
+
+def test_profit_that_became_a_loss_reaches_the_snapshot_as_minus_100():
+    out: dict = {}
+    screener_adapter._apply_profit_loss(
+        out,
+        YEARS,
+        {"sales": [900.0, 950.0, 960.0, 940.0], "net profit": [80.0, 40.0, 5.0, -30.0]},
+    )
+    assert out["pat_3y_cagr"] == -100.0
+    assert out["rev_3y_cagr"] == round(((940 / 900) ** (1 / 3) - 1) * 100, 2)

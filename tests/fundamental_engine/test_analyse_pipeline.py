@@ -56,7 +56,7 @@ def _install_fake_source(
         async def fetch(self, ticker: str) -> BalanceSheetSnapshot:
             return snap
 
-    monkeypatch.setattr(analyse_pipeline, "FundamentalsSource", lambda: FakeSource())
+    monkeypatch.setattr(analyse_pipeline, "FundamentalsSource", lambda **_: FakeSource())
 
 
 async def test_analyse_ticker_without_judgment_uses_pending(
@@ -177,3 +177,127 @@ def test_integrity_veto_in_judgment_caps_the_composite(tmp_path: Path):
     reloaded = ExtendedScore.from_dict(ExtendedScore.from_analysis(result).to_dict())
     assert reloaded is not None
     assert reloaded.score.gates_applied == result.score.gates_applied
+
+
+# ── Judgments age ────────────────────────────────────────────────────────────
+
+
+def _judged(tmp_path: Path, *, days_old: int | None) -> AnalysisResult:
+    from datetime import datetime, timedelta
+
+    updated_at = (
+        "not a timestamp" if days_old is None
+        else (datetime.now() - timedelta(days=days_old)).isoformat(timespec="seconds")
+    )
+    JudgmentStore(tmp_path).save(
+        Judgment(
+            ticker="MSFT",
+            leadership=PillarJudgment(score=82, evidence=["Proven capital allocation"]),
+            prospects=PillarJudgment(score=78),
+            news=PillarJudgment(score=20, evidence=["Regulator opens probe"]),
+            updated_at=updated_at,
+        )
+    )
+    return score_snapshot(_fresh_snap(), data_cache_dir=tmp_path)
+
+
+def test_a_fresh_judgment_counts_in_full(tmp_path: Path):
+    score = _judged(tmp_path, days_old=3).score
+    assert (score.leadership_score, score.prospects_score, score.news_score) == (82.0, 78.0, 20.0)
+    assert not any(line.startswith(("STALE", "EXPIRED")) for lines in score.evidence.values() for line in lines)
+
+
+def test_a_news_judgment_expires_with_its_thirty_day_window(tmp_path: Path):
+    score = _judged(tmp_path, days_old=45).score
+    # The probe it judged is outside the window: the pillar is neutral again, not still 20.
+    assert score.news_score == 50.0
+    assert score.evidence["news"][0].startswith("EXPIRED: the news judgment was written 45 days ago")
+    # Leadership and prospects move slowly: still counted, not yet stale.
+    assert (score.leadership_score, score.prospects_score) == (82.0, 78.0)
+    assert not score.evidence["leadership"][0].startswith("STALE")
+
+
+def test_old_leadership_and_prospects_judgments_are_kept_but_flagged(tmp_path: Path):
+    fresh_confidence = _judged(tmp_path, days_old=3).score.confidence
+    stale = _judged(tmp_path, days_old=120).score
+    assert stale.leadership_score == 82.0
+    assert stale.evidence["leadership"][0].startswith("STALE: judged 120 days ago")
+    assert stale.evidence["prospects"][0].startswith("STALE")
+    assert stale.confidence < fresh_confidence
+
+
+def test_a_judgment_of_unknown_age_is_treated_as_old(tmp_path: Path):
+    score = _judged(tmp_path, days_old=None).score
+    assert score.news_score == 50.0
+    assert "an unknown time ago" in score.evidence["news"][0]
+    assert score.evidence["leadership"][0].startswith("STALE")
+
+
+def test_an_integrity_veto_never_expires(tmp_path: Path):
+    from datetime import datetime, timedelta
+
+    JudgmentStore(tmp_path).save(
+        Judgment(
+            ticker="MSFT", leadership=PillarJudgment(score=25), integrity_veto=True,
+            updated_at=(datetime.now() - timedelta(days=400)).isoformat(timespec="seconds"),
+        )
+    )
+    assert score_snapshot(_fresh_snap(), data_cache_dir=tmp_path).score.composite <= 54.0
+
+
+# ── Early signals ride along with every analysis ─────────────────────────────
+
+
+def test_score_snapshot_reads_the_statements_and_the_news_digest(tmp_path: Path):
+    from data_sources.news_source import CategoryDigest, NewsCategory, NewsDigest
+    from scorers.early_signals import EarlySignalKind
+
+    snap = _fresh_snap()
+    snap.shareholders_equity = -10.0
+    news = NewsDigest(window_days=7, stories=10, categories={
+        NewsCategory.GOVERNANCE: CategoryDigest(stories=6, widest_headline="Board probes CEO", widest_coverage=2)
+    })
+    result = score_snapshot(snap, data_cache_dir=tmp_path, news=news)
+    assert {s.kind for s in result.early_signals} >= {
+        EarlySignalKind.NEGATIVE_EQUITY, EarlySignalKind.GOVERNANCE_NEWS
+    }
+    # …and survive the scores.json round trip.
+    reloaded = ExtendedScore.from_dict(ExtendedScore.from_analysis(result).to_dict())
+    assert reloaded is not None and reloaded.early_signals == result.early_signals
+
+
+async def test_analyse_ticker_reads_the_companys_news_radar(monkeypatch, tmp_path: Path):
+    from datetime import datetime
+
+    from data_sources import news_source
+    from scorers.early_signals import EarlySignalKind
+
+    _install_fake_source(monkeypatch, _fresh_snap())
+    searched: list[str] = []
+
+    def fake_feed(url: str, source_name: str) -> list[dict]:
+        searched.append(url)
+        now = datetime.now().isoformat()
+        return [
+            {"headline": f"Microsoft faces fraud investigation, part {i}", "body": "", "url": f"u{i}",
+             "published_at": now, "source": "Reuters"}
+            for i in range(4)
+        ]
+
+    monkeypatch.setattr(news_source, "_fetch_feed_sync", fake_feed)
+    result = await analyse_ticker("MSFT", data_cache_dir=tmp_path)
+    assert "%22Microsoft%22" in searched[0]
+    assert EarlySignalKind.GOVERNANCE_NEWS in {s.kind for s in result.early_signals}
+
+
+async def test_a_broken_news_feed_costs_only_the_news_signals(monkeypatch, tmp_path: Path):
+    from data_sources import news_source
+
+    _install_fake_source(monkeypatch, _fresh_snap())
+
+    async def boom(self, company_name: str, *, ticker: str, within_days: int):
+        raise ConnectionError("feed down")
+
+    monkeypatch.setattr(news_source.NewsSource, "fetch_for_company", boom)
+    result = await analyse_ticker("MSFT", data_cache_dir=tmp_path)
+    assert result.score.composite > 0 and result.early_signals == []

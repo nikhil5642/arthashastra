@@ -8,6 +8,12 @@ Every selected suite reads the same observations: each ticker's history is
 fetched once (SEC EDGAR for US filers, screener.in for Indian listings,
 Yahoo for prices and everything else) and scored on every rebalance date.
 
+The universe is one listing per company. A second share class or a
+depositary receipt of a company already in it is the same business scored
+twice — more observations, no more evidence — and a cached quote whose
+price and statements don't reconcile is a receipt whose returns say
+nothing about the scored business. Both are left out, and named.
+
 Exit code 1 when a suite FAILs (the data significantly contradicts its
 claim), else 0 — like a test run.
 """
@@ -31,7 +37,10 @@ from data_sources.fundamentals_source.history import (
     StatementHistory,
     fetch_statement_history,
 )
+from data_sources.fx_source import major_unit
+from data_sources.names import clean_company_name
 from fundamental_engine.config import AnalystConfig
+from fundamental_engine.snapshot_store import SnapshotStore
 from fundamental_engine.ticker import canonical
 from fundamental_engine.universe import load_universe
 from reports.formatting import make_console
@@ -95,7 +104,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     step = Step(args.step)
     horizon = args.horizon or step.months
     console = make_console()
-    histories = asyncio.run(fetch_histories(tickers, cfg.sec_user_agent, console))
+    fetched = asyncio.run(fetch_histories(tickers, cfg.sec_user_agent, console))
+    histories, duplicates = one_listing_per_company(fetched)
+    if duplicates:
+        console.print(
+            f"[dim]One listing per company — left out: {', '.join(duplicates)}[/dim]"
+        )
     result = run_backtest(
         histories,
         rebalance_dates(end=date.today(), years=args.years, step=step),
@@ -104,7 +118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     report = BacktestReport(
         settings=(
-            f"{len(tickers)} tickers · {args.years}y · {step.value}ly rebalance · "
+            f"{len(histories)} tickers · {args.years}y · {step.value}ly rebalance · "
             f"{horizon}-month forward total return · {args.lag}-day reporting lag"
         ),
         result=result,
@@ -129,9 +143,53 @@ def select_suites(names: Sequence[str]) -> list[Suite] | None:
 
 
 def resolve_tickers(targets: Sequence[str], cfg: AnalystConfig) -> list[str]:
-    if [t.lower() for t in targets] == ["all"]:
-        return load_universe(cfg.data_cache_dir)
-    return [canonical(t) for t in targets]
+    """The named tickers, or for 'all' every cached ticker whose quote reconciles."""
+    if [t.lower() for t in targets] != ["all"]:
+        return [canonical(t) for t in targets]
+    snapshots = SnapshotStore(cfg.data_cache_dir)
+    cached = load_universe(cfg.data_cache_dir)
+    receipts = [
+        ticker for ticker in cached
+        if (snapshot := snapshots.get(ticker)) is not None and snapshot.quote_unreliable
+    ]
+    if receipts:
+        print(f"[backtests] Left out (quote doesn't reconcile with the statements): "
+              f"{', '.join(receipts)}")
+    return [ticker for ticker in cached if ticker not in receipts]
+
+
+def one_listing_per_company(
+    histories: Sequence[StatementHistory],
+) -> tuple[list[StatementHistory], list[str]]:
+    """Each company once — and the symbols left out.
+
+    The listing kept is the one priced in the company's own reporting
+    currency, then the one with the longest price history (GOOG over a
+    peso-priced receipt of it; one of GOOG / GOOGL). A listing with no
+    company name can't be matched to another and is always kept.
+    """
+    best: dict[str, StatementHistory] = {}
+    for history in histories:
+        company = _company_key(history)
+        rival = best.get(company)
+        if rival is None or _listing_rank(history) > _listing_rank(rival):
+            best[company] = history
+    kept = [history for history in histories if best[_company_key(history)] is history]
+    left_out = [history.symbol for history in histories if best[_company_key(history)] is not history]
+    return kept, left_out
+
+
+def _company_key(history: StatementHistory) -> str:
+    name = history.metadata.get("company_name")
+    return clean_company_name(name).lower() if name else history.symbol
+
+
+def _listing_rank(history: StatementHistory) -> tuple[bool, int]:
+    """(priced in the reporting currency, days of price history) — higher is preferred."""
+    trading = history.metadata.get("currency")
+    reporting = history.metadata.get("financial_currency")
+    home = bool(trading and reporting) and major_unit(trading)[0] == reporting.upper()
+    return home, len(history.prices)
 
 
 async def fetch_histories(

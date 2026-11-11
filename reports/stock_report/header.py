@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from rich.panel import Panel
 
-from data_sources.fundamentals_source import BalanceSheetSnapshot
+from data_sources.fundamentals_source import BalanceSheetSnapshot, is_bank_snapshot
 from reports.formatting import format_money, format_price
 from scorers.base import StockScore
+from scorers.valuation_scorer import sustainable_earnings
 
 
 def header_panel(snap: BalanceSheetSnapshot, score: StockScore) -> Panel:
@@ -51,17 +52,31 @@ def header_panel(snap: BalanceSheetSnapshot, score: StockScore) -> Panel:
 
 
 def valuation_parts_for(snap: BalanceSheetSnapshot) -> list[str]:
+    """P/E (with the P/E on repeatable earnings when they differ), P/B, yields."""
     parts: list[str] = []
     if snap.pe_ratio is not None:
-        parts.append(f"P/E {snap.pe_ratio:.1f}")
+        parts.append(_pe_part(snap, snap.pe_ratio))
     pb = snap.price_to_book if snap.price_to_book is not None else _price_to_book(snap)
     if pb is not None:
         parts.append(f"P/B {pb:.2f}")
-    if snap.fcf_yield is not None:
-        parts.append(f"FCF yield {snap.fcf_yield:.2f}%")
+    # A lender's cash flows are its loan book moving, not free cash flow.
+    if snap.fcf_yield is not None and not is_bank_snapshot(snap):
+        window = f" ({snap.cash_flow_window.value})" if snap.cash_flow_window else ""
+        parts.append(f"FCF yield {snap.fcf_yield:.2f}%{window}")
     if snap.dividend_yield is not None:
         parts.append(f"Div yield {snap.dividend_yield:.2f}%")
     return parts
+
+
+def _pe_part(snap: BalanceSheetSnapshot, pe: float) -> str:
+    """'P/E 14.9 (core 26.7)' — the reported multiple, and the one the valuation uses."""
+    reported = f"P/E {pe:.1f}"
+    earnings = sustainable_earnings(snap)
+    if earnings.ratio >= 1:
+        return reported
+    if earnings.ratio <= 0:
+        return f"{reported} (no repeatable earnings)"
+    return f"{reported} ({earnings.label} {pe / earnings.ratio:.1f})"
 
 
 def analyst_parts_for(snap: BalanceSheetSnapshot) -> list[str]:

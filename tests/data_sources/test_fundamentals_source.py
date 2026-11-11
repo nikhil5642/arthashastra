@@ -93,10 +93,11 @@ def test_merge_prefers_screener_for_roe_roce():
 
 
 def test_source_tag_variants():
-    assert _source_tag({"a": 1}, {"b": 2}) == "yfinance+screener"
-    assert _source_tag({"a": 1}, {}) == "yfinance"
-    assert _source_tag({}, {"b": 2}) == "screener"
-    assert _source_tag({}, {}) == "empty"
+    assert _source_tag({"a": 1}, {"b": 2}, {}) == "yfinance+screener"
+    assert _source_tag({"a": 1}, {}, {}) == "yfinance"
+    assert _source_tag({"a": 1}, {}, {"sales_annual_trend": [1.0]}) == "yfinance+sec"
+    assert _source_tag({}, {"b": 2}, {}) == "screener"
+    assert _source_tag({}, {}, {}) == "empty"
 
 
 async def test_fetch_merges_mocked_sources(monkeypatch):
@@ -609,3 +610,146 @@ async def test_screener_is_never_called_for_non_indian_listings(monkeypatch):
     monkeypatch.setattr(screener_adapter, "_fetch_html_tree", boom)
     assert await screener_adapter._fetch_screener_in("MSFT") == {}
     assert await screener_adapter.fetch_tables("7203.T") == {}
+
+
+# ── SEC history, one trailing window, FX for cross-currency listings ─────────
+
+
+def test_deeper_history_only_replaces_shorter_series():
+    from data_sources.fundamentals_source.source import _deeper_history
+
+    yf = {"net_margin_annual_trend": [20.0, 22.0, 25.0, 30.0], "roce_annual_trend": [18.0, 19.0, 21.0, 24.0]}
+    sec = {
+        "net_margin_annual_trend": [12.0, 18.0, 21.0, 20.0, 22.0, 25.0, 30.0],  # seven years
+        "roce_annual_trend": [19.0, 21.0, 24.0],  # shallower than Yahoo's
+    }
+    assert _deeper_history(yf, sec) == {"net_margin_annual_trend": sec["net_margin_annual_trend"]}
+    assert _deeper_history(yf, {}) == {}
+
+
+def test_trailing_figures_of_another_window_are_dropped():
+    from data_sources.fundamentals_source.source import _keep_one_trailing_window
+
+    yf = {"ttm_period_end": "2026-06-30", "ttm_free_cash_flow": 50.0, "core_earnings_ratio_ttm": 0.9}
+    # Screener is a quarter ahead: its window wins, and Yahoo's sums describe other months.
+    merged = {**yf, "ttm_period_end": "2026-09-30", "ttm_revenue": 400.0}
+    _keep_one_trailing_window(merged, yf)
+    assert merged == {"ttm_period_end": "2026-09-30", "ttm_revenue": 400.0}
+
+    same = dict(yf)
+    _keep_one_trailing_window(same, yf)
+    assert same == yf
+
+
+async def test_sec_history_deepens_a_us_filers_trends(monkeypatch):
+    import pandas as pd
+
+    from data_sources.fundamentals_source import sec_adapter
+    from data_sources.fundamentals_source.sec_adapter import SecAnnualFrames
+
+    def fake_yf_sync(ticker: str):
+        return (
+            {"roe": 30.0, "net_margin_annual_trend": [28.0, 33.0], "company_name": "Micron"},
+            [],
+        )
+
+    years = pd.to_datetime([f"{y}-08-31" for y in range(2026, 2019, -1)])  # newest first
+    revenue = [133.0, 37.0, 25.0, 15.5, 30.8, 27.7, 21.4]
+    profit = [85.0, 8.5, 0.8, -5.8, 8.7, 5.9, 2.7]
+    frames = SecAnnualFrames(
+        income=pd.DataFrame([revenue, profit], index=["Total Revenue", "Net Income"], columns=years),
+        balance=pd.DataFrame([[1.0] * 7], index=["Total Assets"], columns=years),
+        cashflow=pd.DataFrame(),
+    )
+    asked: list[tuple[str, str]] = []
+
+    async def fake_sec(symbol: str, *, user_agent: str):
+        asked.append((symbol, user_agent))
+        return frames
+
+    async def no_screener(symbol: str) -> dict:
+        return {}
+
+    monkeypatch.setattr(yfinance_adapter, "_fetch_yfinance_sync", fake_yf_sync)
+    monkeypatch.setattr(screener_adapter, "_fetch_screener_in", no_screener)
+    monkeypatch.setattr(sec_adapter, "fetch_annual_frames", fake_sec)
+
+    snap = await FundamentalsSource(sec_user_agent="tester").fetch("MU")
+    assert asked == [("MU", "tester")]
+    assert snap.source == "yfinance+sec"
+    assert len(snap.net_margin_annual_trend) == 7  # a full cycle, loss year included
+    assert snap.net_margin_annual_trend[3] == round(-5.8 / 15.5 * 100, 2)
+    assert snap.field_sources["net_margin_annual_trend"] == "sec"
+    assert snap.roe == 30.0  # SEC adds history; it never overrides a current ratio
+
+    # Without a user agent, or for a listing with an exchange suffix, SEC is not asked.
+    asked.clear()
+    await FundamentalsSource().fetch("MU")
+    await FundamentalsSource(sec_user_agent="tester").fetch("0700.HK")
+    assert asked == []
+
+
+async def test_cross_currency_listing_is_valued_with_spot_fx(monkeypatch):
+    from data_sources import fx_source
+
+    def fake_yf_sync(ticker: str):
+        return (
+            {
+                "currency": "HKD", "financial_currency": "CNY", "pe_ratio": 16.0, "market_cap": 4000.0,
+                "current_price": 400.0, "net_income": 220.0, "free_cash_flow": 180.0,
+                "shareholders_equity": 1100.0, "roe": 20.0,
+            },
+            [("2026-11-05", 400.0)],
+        )
+
+    async def no_screener(symbol: str) -> dict:
+        return {}
+
+    pairs: list[tuple[str, str]] = []
+
+    def fake_rate(from_currency: str, to_currency: str) -> float:
+        pairs.append((from_currency, to_currency))
+        return 0.9
+
+    monkeypatch.setattr(yfinance_adapter, "_fetch_yfinance_sync", fake_yf_sync)
+    monkeypatch.setattr(screener_adapter, "_fetch_screener_in", no_screener)
+    monkeypatch.setattr(fx_source, "_fetch_major_rate_sync", fake_rate)
+
+    snap = await FundamentalsSource().fetch("0700.HK")
+    assert pairs == [("HKD", "CNY")]
+    assert snap.fcf_yield == round(180 / (4000 * 0.9) * 100, 2)
+    assert snap.price_to_book == round(4000 * 0.9 / 1100, 2)
+
+
+async def test_yfinance_amounts_in_another_currency_never_mix_with_screeners(monkeypatch):
+    """Infosys: Yahoo reports in dollars, screener in rupees. Ratios merge; amounts don't."""
+    def fake_yf_sync(ticker: str):
+        return (
+            {
+                "currency": "INR", "financial_currency": "USD", "market_cap": 6.2e12,
+                "current_price": 1500.0, "current_ratio": 2.2,  # a ratio: kept
+                "net_income": 3.2e9, "free_cash_flow": 3.4e9,  # dollars
+                "ttm_period_end": "2026-09-30", "ttm_free_cash_flow": 3.5e9,
+                "stock_based_compensation": 1.1e8, "core_earnings_ratio_fy": 0.98,
+            },
+            [("2026-11-05", 1500.0)],
+        )
+
+    async def fake_screener(symbol: str) -> dict:
+        return {
+            "currency": "INR", "financial_currency": "INR", "pe_ratio": 23.0,
+            "net_income": 2.7e11, "free_cash_flow": 2.9e11, "shareholders_equity": 9.6e11,
+            "latest_annual_period": "2026-03-31", "eps_history": {"2026-03-31": 65.0},
+        }
+
+    monkeypatch.setattr(yfinance_adapter, "_fetch_yfinance_sync", fake_yf_sync)
+    monkeypatch.setattr(screener_adapter, "_fetch_screener_in", fake_screener)
+
+    snap = await FundamentalsSource().fetch("INFY.NS")
+    assert snap.financial_currency == "INR"
+    assert snap.net_income == 2.7e11 and snap.free_cash_flow == 2.9e11
+    assert snap.ttm_free_cash_flow is None and snap.stock_based_compensation is None
+    assert snap.current_ratio == 2.2 and snap.core_earnings_ratio_fy == 0.98
+    # One currency throughout, so the ratios exist and the quote is trusted.
+    assert not snap.quote_unreliable
+    assert snap.fcf_yield == round(2.9e11 / (2.7e11 / 65.0 * 1500.0) * 100, 2)

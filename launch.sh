@@ -88,6 +88,10 @@ Data model:
   Always resolve a company name first.
 - Fetching is **on-demand** — there is no background warmer running.
   Each slash command refreshes the ticker it operates on before scoring.
+- Every analysis also names **early signals**: concerns and strengths the
+  newest quarters, the balance sheet, the ownership tape and the week's
+  headlines show before any score moves. Read that panel first, and
+  answer every URGENT concern by name in your judgment.
 - CLAUDE.md at the project root has the project rules. Read "Your role"
   and "The rules" before scoring anything. Non-negotiables: no LLM in
   Python, no hardcoding, anti-optimism defaults, verify verdicts from
@@ -98,7 +102,7 @@ Available slash commands:
   /research-founder <name>   leadership research + mode-aware rubric
   /screen-stocks <filters>   screen every listed stock worldwide ("Japan tech, P/E < 15")
   /pick-stocks <amount> [filters]  buy-the-dip picks for a budget, screened globally
-  /market-brief              overview of cached universe + recent signals
+  /market-brief              overview of the cached universe + what changed lately
   /refresh-now <TICKER|all>  force live data refresh
   /explain-score <TICKER>    audit trail for a cached score, no re-fetch
   /resolve-ticker <name>     free-text name → ticker on any exchange

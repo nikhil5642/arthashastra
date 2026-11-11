@@ -17,11 +17,13 @@ RATES = {("USD", "INR"): 90.0, ("BRL", "INR"): 16.5}
 
 
 def _quote(symbol: str, name: str, currency: str, price: float, market_cap: float,
-           volume: float, *, high: float | None = None, pe: float | None = None) -> dict[str, object]:
+           volume: float, *, high: float | None = None, pe: float | None = None,
+           reports_in: str | None = None) -> dict[str, object]:
     return {
         "symbol": symbol, "longName": name, "fullExchangeName": "X", "currency": currency,
         "regularMarketPrice": price, "marketCap": market_cap, "averageDailyVolume3Month": volume,
         "fiftyTwoWeekHigh": high if high is not None else price, "trailingPE": pe,
+        "financialCurrency": reports_in or currency,
     }
 
 
@@ -90,6 +92,32 @@ async def test_receipts_are_skipped_and_reading_continues_past_them(yahoo):
     assert [offset for market, _, _, offset in yahoo.requests] == [0, 250]
     assert [m.listing.symbol for m in result.matches] == ["PETR4.SA", "VALE3.SA"]
     assert (result.untradeable, result.listings_read) == (250, 252)
+
+
+async def test_receipts_with_a_programme_size_market_cap_are_skipped(yahoo, monkeypatch):
+    """CEDEARs trade actively, so turnover can't catch them — their impossible P/E does."""
+    monkeypatch.setitem(RATES, ("ARS", "INR"), 0.065)
+    yahoo.markets["ar"] = [
+        _quote("GOOGL.BA", "Alphabet Inc.", "ARS", 8190.0, 3.47e12, 1.1e6, pe=0.01, reports_in="USD"),
+        _quote("XOM.BA", "Exxon Mobil Corporation", "ARS", 27000.0, 2.2e13, 3e5, pe=0.39, reports_in="USD"),
+        _quote("YPFD.BA", "YPF Sociedad Anónima", "ARS", 6450.0, 2.5e13, 2.1e6, pe=8.2),
+        # A real company on a one-off gain: tiny P/E, but in its own reporting currency.
+        _quote("GAIN.BA", "Ganancia S.A.", "ARS", 100.0, 1e12, 1e7, pe=1.1),
+    ]
+    result = await screen(ScreenRequest(markets=("ar",)), base_currency="INR")
+    assert [m.listing.symbol for m in result.matches] == ["YPFD.BA", "GAIN.BA"]
+    assert result.untradeable == 2
+
+
+async def test_a_home_currency_listing_beats_a_more_traded_receipt(yahoo, monkeypatch):
+    monkeypatch.setitem(RATES, ("TWD", "INR"), 2.9)
+    name = "Taiwan Semiconductor Manufacturing Company Limited"
+    yahoo.markets["us"] = [_quote("TSM", name, "USD", 388.0, 2.0e12, 1.1e7, pe=25.2, reports_in="TWD")]
+    yahoo.markets["tw"] = [_quote("2330.TW", name, "TWD", 2235.0, 5.8e13, 3e7, pe=22.9)]
+    result = await screen(ScreenRequest(markets=("us", "tw")), base_currency="INR")
+    # TSM trades ₹384T a day against 2330.TW's ₹194T, but only 2330.TW is priced in the
+    # currency the company reports in — the listing whose ratios can all be computed.
+    assert [m.listing.symbol for m in result.matches] == ["2330.TW"]
 
 
 async def test_dip_and_pe_filters_and_drawdown_sort(yahoo):

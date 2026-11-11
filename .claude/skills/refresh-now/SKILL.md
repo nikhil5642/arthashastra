@@ -34,8 +34,17 @@ python3 -m fundamental_engine refresh all
 
 ## Step 3 — Report the outcome
 
-For a single ticker, report the composite + verdict. For `refresh all`,
-report the ok / no_data / error counts.
+For a single ticker, report the composite + verdict, the early-signal
+tally (`early signals: 3 concerns (1 urgent) · 1 strength`) and how many
+of them are new since the last look. For `refresh all`, report the
+ok / no_data / error counts and name every ticker whose line shows an
+urgent concern. `python3 -m fundamental_engine brief` then lists what
+changed across the cache.
+
+A refresh re-scores with the cached judgment at its current age: news
+judged more than 30 days ago no longer counts, and leadership / prospects
+judged more than 90 days ago count at lower confidence. If the composite
+moved for that reason alone, say so and suggest `/analyse-stock`.
 
 If no judgment was ever written for the ticker, remind the user to run
 `/analyse-stock <TICKER>` afterwards — a bare refresh leaves the three

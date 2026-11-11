@@ -3,7 +3,9 @@
 Verdicts are what a reader acts on, so the bands must order returns, not
 just the underlying score. Tested on the deterministic composite
 (fundamentals + valuation at their live relative weights): BUY or better
-against AVOID or worse, on excess returns.
+against AVOID or worse, date by date. The table shows every band — read
+the medians and hit rates there, because the weakest band's mean is the
+one a single rebound can carry.
 """
 
 from __future__ import annotations

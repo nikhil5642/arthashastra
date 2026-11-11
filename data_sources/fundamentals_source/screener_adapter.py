@@ -51,6 +51,7 @@ from data_sources.fundamentals_source.primitives import (
     _screener_month_to_iso,
     _value_at_label,
     latest_yoy_growth,
+    trailing_twelve_months,
 )
 from data_sources.fundamentals_source.snapshot import (
     DocumentRecord,
@@ -434,6 +435,9 @@ def _apply_profit_loss(
         annual_profit = _value_at_label(headers, net_profit, annual[-1])
         if annual_profit is not None:
             out["net_income"] = annual_profit * RUPEES_PER_CRORE
+        annual_sales = _value_at_label(headers, sales, annual[-1])
+        if annual_sales is not None and annual_sales > 0:
+            out["revenue"] = annual_sales * RUPEES_PER_CRORE
     eps_history = _annual_eps(annual, _drop_ttm(headers, rows.get("eps in rs")))
     if eps_history:
         out["eps_history"] = eps_history
@@ -441,7 +445,9 @@ def _apply_profit_loss(
     cagr = _screener_cagr(_drop_ttm(headers, sales), years=3)
     if cagr is not None:
         out["rev_3y_cagr"] = cagr
-    cagr = _screener_cagr(_drop_ttm(headers, net_profit), years=3)
+    # A profit that became a loss is the worst growth outcome, not a gap in
+    # the data — see primitives.PROFIT_WIPED_OUT_CAGR.
+    cagr = _screener_cagr(_drop_ttm(headers, net_profit), years=3, wiped_out_counts=True)
     if cagr is not None:
         out["pat_3y_cagr"] = cagr
 
@@ -502,6 +508,16 @@ def _apply_cash_flow(
     latest_fcf = _latest_with_label(cf_headers, cf_rows.get("free cash flow"))
     if latest_fcf is not None:
         out["free_cash_flow"] = latest_fcf[1] * RUPEES_PER_CRORE
+    # Screener's free cash flow is operating cash flow less capex, so the two
+    # rows of one fiscal year give that year's capex.
+    cash_pair = _latest_aligned(
+        cf_rows.get("cash from operating activity"), cf_rows.get("free cash flow")
+    )
+    if cash_pair is not None:
+        operating_cash_flow, free_cash_flow = cash_pair
+        out["operating_cash_flow"] = operating_cash_flow * RUPEES_PER_CRORE
+        if operating_cash_flow >= free_cash_flow:
+            out["capex"] = (operating_cash_flow - free_cash_flow) * RUPEES_PER_CRORE
 
 
 def _cash_to_profit(
@@ -545,11 +561,12 @@ def _apply_quarters(
     headers: list[str],
     rows: dict[str, list[float | None]],
 ) -> None:
-    """Quarterly revenue + PAT (newest-first) with date-matched YoY growth.
+    """Quarterly revenue, PAT and operating margin (newest-first), with what they add up to.
 
     A quarter is kept only when every available series has a value for
     it, so `quarterly_revenue[i]`, `quarterly_pat[i]` and
-    `quarterly_dates[i]` always describe the same quarter.
+    `quarterly_dates[i]` always describe the same quarter. The operating
+    margin is aligned to the same dates, None where it can't be computed.
     """
     sales = rows.get("sales") or rows.get("revenue")
     net_profit = rows.get("net profit")
@@ -558,6 +575,7 @@ def _apply_quarters(
 
     revenue: list[float] = []
     pat: list[float] = []
+    margins: list[float | None] = []
     dates: list[str] = []
     for i, header in enumerate(headers):
         quarter_end = _screener_month_to_iso(header)
@@ -568,18 +586,19 @@ def _apply_quarters(
         if (sales and sale is None) or (net_profit and profit is None):
             continue
         dates.append(quarter_end)
+        margins.append(_core_operating_margin(rows, i))
         if sale is not None:
             revenue.append(sale * RUPEES_PER_CRORE)
         if profit is not None:
             pat.append(profit * RUPEES_PER_CRORE)
 
     # Screener lists oldest → newest; the snapshot stores newest-first.
-    revenue.reverse()
-    pat.reverse()
-    dates.reverse()
+    for series in (revenue, pat, margins, dates):
+        series.reverse()
 
     if dates:
         out["quarterly_dates"] = dates
+        out["quarterly_operating_margin"] = margins
     if revenue:
         out["quarterly_revenue"] = revenue
         growth = latest_yoy_growth(revenue, dates)
@@ -590,6 +609,37 @@ def _apply_quarters(
         growth = latest_yoy_growth(pat, dates)
         if growth is not None:
             out["latest_yoy_pat_growth"] = growth
+    _apply_trailing_twelve_months(out, revenue, pat, dates)
+
+
+def _core_operating_margin(rows: dict[str, list[float | None]], i: int) -> float | None:
+    """(Operating profit − depreciation) ÷ sales for column `i`, in percent.
+
+    Depreciation comes off because screener's operating profit is pre-
+    depreciation, while the yfinance path's Operating Income is after it —
+    one definition of the operating margin, whatever the source.
+    """
+    sale = _cell(rows.get("sales") or rows.get("revenue"), i)
+    operating_profit = _cell(rows.get("operating profit"), i)
+    depreciation = _cell(rows.get("depreciation"), i)
+    if not sale or sale <= 0 or operating_profit is None or depreciation is None:
+        return None
+    return round((operating_profit - depreciation) / sale * 100, 2)
+
+
+def _apply_trailing_twelve_months(
+    out: SnapshotFields, revenue: list[float], pat: list[float], dates: list[str]
+) -> None:
+    """Twelve-month revenue and profit from the four newest consecutive quarters."""
+    ttm_revenue = trailing_twelve_months(revenue, dates) if len(revenue) == len(dates) else None
+    ttm_profit = trailing_twelve_months(pat, dates) if len(pat) == len(dates) else None
+    if ttm_revenue is None and ttm_profit is None:
+        return
+    out["ttm_period_end"] = dates[0]
+    if ttm_revenue is not None:
+        out["ttm_revenue"] = ttm_revenue
+    if ttm_profit is not None:
+        out["ttm_net_income"] = ttm_profit
 
 
 def _cell(row: list[float | None] | None, i: int) -> float | None:
@@ -775,24 +825,24 @@ def _apply_multi_year_trends(
     if roce_series:
         out["roce_annual_trend"] = [v for v in roce_series if v is not None]
 
-    # Operating margin trend computed from P&L annual rows.
+    # Sales, profit and margins by fiscal year, from the annual P&L rows.
     sales = _drop_ttm(pl_headers, pl_rows.get("sales") or pl_rows.get("revenue"))
     op_profit = _drop_ttm(pl_headers, pl_rows.get("operating profit"))
     net_profit = _drop_ttm(pl_headers, pl_rows.get("net profit"))
 
     if sales:
-        out["sales_annual_trend"] = [v for v in sales if v is not None]
+        out["sales_annual_trend"] = [v * RUPEES_PER_CRORE for v in sales if v is not None]
     if net_profit:
-        out["net_profit_annual_trend"] = [v for v in net_profit if v is not None]
+        out["net_profit_annual_trend"] = [
+            v * RUPEES_PER_CRORE for v in net_profit if v is not None
+        ]
 
-    if sales and op_profit:
-        trend: list[float] = []
-        for s, op in zip(sales, op_profit):
-            if s is None or op is None or s <= 0:
-                continue
-            trend.append(round(op / s * 100, 2))
-        if trend:
-            out["operating_margin_annual_trend"] = trend
+    operating_margins = _margin_trend(op_profit, sales)
+    if operating_margins:
+        out["operating_margin_annual_trend"] = operating_margins
+    net_margins = _margin_trend(net_profit, sales)
+    if net_margins:
+        out["net_margin_annual_trend"] = net_margins
 
     # Borrowings trajectory — is debt expanding or shrinking? Fiscal-year
     # columns only: a trailing half-year balance sheet ("Sep 2025") would
@@ -805,7 +855,7 @@ def _apply_multi_year_trends(
     if borrowings_series:
         clean = [v for v in borrowings_series if v is not None]
         if clean:
-            out["borrowings_annual_trend"] = clean
+            out["borrowings_annual_trend"] = [v * RUPEES_PER_CRORE for v in clean]
             if len(clean) >= 4:
                 latest = clean[-1]
                 three_years_ago = clean[-4]
@@ -818,6 +868,17 @@ def _apply_multi_year_trends(
                     out["borrowings_went_from_zero"] = True
                 else:
                     out["borrowings_delta_3y_pct"] = 0.0
+
+
+def _margin_trend(
+    part: list[float | None], sales: list[float | None]
+) -> list[float]:
+    """`part / sales × 100` for every fiscal year where both exist, oldest → newest."""
+    return [
+        round(numerator / sale * 100, 2)
+        for numerator, sale in zip(part, sales)
+        if numerator is not None and sale is not None and sale > 0
+    ]
 
 
 def _fiscal_year_values(

@@ -9,9 +9,11 @@ This package is split along the axes you'd expect:
   yfinance_adapter.py  — yfinance fetcher (the global baseline)
   screener_adapter.py  — screener.in fetcher + section appliers (wins for .NS / .BO)
   sec_adapter.py       — SEC EDGAR companyfacts → as-filed annual frames
-  valuation.py         — price-vs-statement ratios (P/E, FCF yield, P/B, P/E history)
+  valuation.py         — price-vs-statement ratios (P/E, FCF yield, P/B, P/E history),
+                         spot FX for cross-currency listings, receipt detection
   history.py           — point-in-time snapshots for backtests
   source.py            — `FundamentalsSource` async facade + merge logic
+                         (SEC adds up to ten fiscal years of history for US filers)
 
 Callers import the public API below from this package. Tests that need a
 private helper import it from the submodule that defines it, and
@@ -23,6 +25,7 @@ from data_sources.fundamentals_source.snapshot import (
     BalanceSheetSnapshot,
     DataConflict,
     SCORED_FIELDS,
+    StatementWindow,
     is_bank_snapshot,
 )
 from data_sources.fundamentals_source.source import (
@@ -32,8 +35,10 @@ from data_sources.fundamentals_source.source import (
 )
 from data_sources.fundamentals_source.primitives import (
     HTTP_TIMEOUT_SECONDS,
+    PROFIT_WIPED_OUT_CAGR,
     SCREENER_BASE_URL,
     SCREENER_USER_AGENT,
+    change_by_date,
     latest_yoy_growth,
     pct_change_by_date,
 )
@@ -44,8 +49,11 @@ __all__ = [
     "DataConflict",
     "FetchResult",
     "FundamentalsSource",
+    "PROFIT_WIPED_OUT_CAGR",
     "PriceRow",
     "SCORED_FIELDS",
+    "StatementWindow",
+    "change_by_date",
     "is_bank_snapshot",
     "latest_yoy_growth",
     "pct_change_by_date",

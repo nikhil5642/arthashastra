@@ -1,8 +1,11 @@
 """Signal bus — append-only JSON log of analyst events.
 
-The cache warmer writes signals. CLI commands (analyse / pick / brief) read
-them to enrich reports. All communication happens through a JSON file
-whose path is always supplied explicitly by the caller (typically
+Every `analyse` / `refresh` records what changed since the previous look
+at a ticker (a new verdict, a new or worsened early concern, a new
+strength); `pick` adds the dips it found; `brief` reads the log back.
+
+All communication happens through a JSON file whose path is always
+supplied explicitly by the caller (typically
 `AnalystConfig.data_cache_dir / "signals.json"`) — there is no module-level
 default path that could silently disagree with DATA_CACHE_DIR.
 """
@@ -11,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -24,40 +28,32 @@ MAX_SIGNALS_KEPT = 500
 
 
 class Severity(StrEnum):
-    INFO = "INFO"       # FYI — no action needed
-    ALERT = "ALERT"     # worth surfacing in next brief
-    URGENT = "URGENT"   # surface on next CLI invocation regardless of freshness
+    """Least to most severe — `rank` follows the definition order."""
+
+    INFO = "INFO"       # context — no action needed
+    ALERT = "ALERT"     # material — worth surfacing in the next brief
+    URGENT = "URGENT"   # read before trusting the headline numbers
+
+    @property
+    def rank(self) -> int:
+        """INFO 0 < ALERT 1 < URGENT 2."""
+        return tuple(Severity).index(self)
 
 
 class SignalType(StrEnum):
-    # System / lifecycle
+    """Everything the bus carries. Each type has an emitter — no placeholders."""
+
+    # Lifecycle
     UNIVERSE_REFRESHED = "UNIVERSE_REFRESHED"
     SCORE_UPDATED = "SCORE_UPDATED"
-    BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
-    DATA_STALE = "DATA_STALE"
-    FEED_ERROR = "FEED_ERROR"
 
-    # Dip / buy triggers
+    # What changed between two looks at one ticker (fundamental_engine.tracking)
+    VERDICT_CHANGED = "VERDICT_CHANGED"
+    EARLY_CONCERN = "EARLY_CONCERN"
+    EARLY_STRENGTH = "EARLY_STRENGTH"
+
+    # Buy triggers (pick)
     DIP_DETECTED = "DIP_DETECTED"
-    QUALITY_DIP = "QUALITY_DIP"
-    DEEP_VALUE = "DEEP_VALUE"
-
-    # Leadership
-    LEADERSHIP_NEWS = "LEADERSHIP_NEWS"
-    LEADERSHIP_RED_FLAG = "LEADERSHIP_RED_FLAG"
-
-    # Fundamentals events
-    EARNINGS_BEAT = "EARNINGS_BEAT"
-    EARNINGS_MISS = "EARNINGS_MISS"
-    PROMOTER_SELLING = "PROMOTER_SELLING"
-    PROMOTER_BUYING = "PROMOTER_BUYING"
-    PLEDGE_INCREASE = "PLEDGE_INCREASE"
-    CREDIT_DOWNGRADE = "CREDIT_DOWNGRADE"
-    AUDITOR_CHANGE = "AUDITOR_CHANGE"
-
-    # Price action
-    PRICE_GAP = "PRICE_GAP"
-    VOLUME_SPIKE = "VOLUME_SPIKE"
 
 
 @dataclass
@@ -121,12 +117,18 @@ class SignalBus:
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
     def emit(self, signal: Signal) -> None:
+        self.emit_many([signal])
+
+    def emit_many(self, signals: Sequence[Signal]) -> None:
+        """Append several signals in one locked read-modify-write."""
+        if not signals:
+            return
         with file_lock(self._path):
-            signals = self._load_raw()
-            signals.append(signal.to_dict())
-            if len(signals) > self._max_kept:
-                signals = signals[-self._max_kept:]
-            atomic_write_text(self._path, json.dumps(signals, indent=2))
+            rows = self._load_raw()
+            rows.extend(signal.to_dict() for signal in signals)
+            if len(rows) > self._max_kept:
+                rows = rows[-self._max_kept:]
+            atomic_write_text(self._path, json.dumps(rows, indent=2))
 
     def read_all(self) -> list[Signal]:
         parsed = (Signal.from_dict(d) for d in self._load_raw())

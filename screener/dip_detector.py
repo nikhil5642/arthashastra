@@ -1,7 +1,7 @@
 """Dip detection — a quality stock the market has marked down.
 
 A stock becomes a DipSignal only when ALL of these hold:
-  1. it isn't blocked (integrity veto / leadership red flag)
+  1. it isn't blocked (integrity veto)
   2. composite >= min_composite (default 75) AND verdict in allowed_verdicts
   3. at least MIN_CLOSES_FOR_DIP daily closes (~6 months) — a "52-week
      high" drawn from a few weeks of history is meaningless
@@ -97,7 +97,7 @@ def check_dip(
     )
 
     if score.ticker in (blocked_tickers or set()):
-        return _reject("blocked: integrity veto or LEADERSHIP_RED_FLAG signal")
+        return _reject("blocked: integrity veto")
     if score.composite < min_composite:
         return _reject(f"composite {score.composite} below min {min_composite}")
     if score.verdict not in allowed:

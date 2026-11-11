@@ -4,6 +4,11 @@ Reads cached scores, signals, and dip candidates and prints a structured
 summary. No LLM narrative — Claude produces the commentary in the
 `/market-brief` skill after reading this deterministic baseline.
 
+Besides the ranking, the brief is where the early-signal layer pays off
+across a whole watchlist: which names carry urgent concerns, which show
+fresh strengths, and what changed (a verdict, a new concern) since each
+was last looked at.
+
 Every piece of data this command touches is loaded as a typed object
 (`ExtendedScore`, `DipCandidateRecord`, `Signal`) — there are no raw
 JSON-dict lookups with fallback defaults anywhere in this file.
@@ -22,15 +27,30 @@ from rich.table import Table
 from fundamental_engine.config import AnalystConfig
 from fundamental_engine.dip_candidate import DipCandidateRecord
 from fundamental_engine.extended_score import ExtendedScore
+from fundamental_engine.tracking import SIGNALS_FILENAME
 from fundamental_engine.universe import load_dip_candidates, load_scores
 from reports.formatting import make_console
 from scorers.base import Gate
-from signals.signal_bus import Signal, SignalBus, SignalType
+from scorers.early_signals import EarlySignal, Tone, of_tone, tally
+from signals.signal_bus import Severity, Signal, SignalBus, SignalType
 
 log = logging.getLogger(__name__)
 
 # Cached rows older than this should be refreshed before acting on them.
 STALE_AFTER = timedelta(days=2)
+# How far back "what changed" looks, and how much of it is shown.
+CHANGES_WINDOW = timedelta(days=14)
+MAX_CHANGES_SHOWN = 15
+MAX_SIGNAL_ROWS = 12
+
+_CHANGE_TYPES: frozenset[SignalType] = frozenset(
+    {SignalType.VERDICT_CHANGED, SignalType.EARLY_CONCERN, SignalType.EARLY_STRENGTH}
+)
+_CHANGE_MARKERS: dict[SignalType, str] = {
+    SignalType.VERDICT_CHANGED: "◆",
+    SignalType.EARLY_CONCERN: "▼",
+    SignalType.EARLY_STRENGTH: "▲",
+}
 
 
 def run_brief_command() -> int:
@@ -40,8 +60,7 @@ def run_brief_command() -> int:
 
     scores = load_scores(cache_dir)
     dip_candidates = load_dip_candidates(cache_dir)
-    bus = SignalBus(path=cache_dir / "signals.json")
-    signals = bus.read_all()
+    signals = SignalBus(path=cache_dir / SIGNALS_FILENAME).read_all()
 
     sector_counter: Counter[str] = Counter(
         extended.sector
@@ -49,8 +68,10 @@ def run_brief_command() -> int:
         if extended.sector and extended.sector != "Unknown"
     )
 
-    red_flags = _red_flag_lines(scores, signals)
-    score_updates = [s for s in signals if s.signal_type == SignalType.SCORE_UPDATED]
+    vetoes = _integrity_veto_lines(scores)
+    concerns = _signal_lines(scores, Tone.CONCERN)
+    strengths = _signal_lines(scores, Tone.STRENGTH)
+    changes = _recent_changes(signals)
     stale = _stale_tickers(scores)
 
     stale_note = (
@@ -70,16 +91,27 @@ def run_brief_command() -> int:
 
     _render_top_by_composite(console, scores)
     _render_dip_candidates(console, dip_candidates)
+    _render_lines(console, vetoes, title="Integrity vetoes", border_style="red")
+    _render_lines(
+        console, concerns, title="Early concerns — urgent and material", border_style="red"
+    )
+    _render_lines(console, strengths, title="Early strengths", border_style="green")
+    _render_lines(
+        console,
+        changes,
+        title=f"What changed in the last {CHANGES_WINDOW.days} days",
+        border_style="yellow",
+    )
     _render_sector_coverage(console, sector_counter)
-    _render_red_flags(console, red_flags)
-    _render_score_updates(console, score_updates)
     _render_stale(console, stale)
 
     reports_dir = cache_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     fp = reports_dir / f"brief_{datetime.now().strftime('%Y-%m-%d')}.md"
     fp.write_text(
-        _render_markdown(scores, dip_candidates, red_flags, sector_counter, stale)
+        _render_markdown(
+            scores, dip_candidates, vetoes, concerns, strengths, changes, sector_counter, stale
+        )
     )
     console.print(f"\n[dim]Report saved: {fp}[/dim]")
 
@@ -94,21 +126,52 @@ def run_brief_command() -> int:
 # ── Derived views ───────────────────────────────────────────────────────────
 
 
-def _red_flag_lines(
-    scores: dict[str, ExtendedScore], signals: list[Signal]
-) -> list[str]:
-    """Integrity vetoes from cached scores + LEADERSHIP_RED_FLAG signals."""
-    lines = [
+def _integrity_veto_lines(scores: dict[str, ExtendedScore]) -> list[str]:
+    return [
         f"{ticker}: integrity veto in cached judgment — composite capped"
         for ticker, extended in sorted(scores.items())
         if Gate.INTEGRITY_VETO in extended.score.gates_applied
     ]
-    lines.extend(
-        f"{s.ticker}: {s.message}"
-        for s in signals
-        if s.signal_type == SignalType.LEADERSHIP_RED_FLAG
-    )
-    return lines
+
+
+def _signal_lines(scores: dict[str, ExtendedScore], tone: Tone) -> list[str]:
+    """One line per ticker with material signals of `tone`: the worst first.
+
+    INFO-level signals stay in each ticker's own report; the brief is for
+    what deserves attention across the whole universe.
+    """
+    rows: list[tuple[int, int, str]] = []
+    for ticker, extended in scores.items():
+        material = [
+            s for s in of_tone(extended.early_signals, tone) if s.severity is not Severity.INFO
+        ]
+        if not material:
+            continue
+        urgent = sum(1 for s in material if s.severity is Severity.URGENT)
+        rows.append((urgent, len(material), f"{ticker}: {_headline(material)}"))
+    rows.sort(key=lambda row: (-row[0], -row[1], row[2]))
+    return [line for _, _, line in rows[:MAX_SIGNAL_ROWS]]
+
+
+def _headline(signals: list[EarlySignal]) -> str:
+    """The most severe signal in full, and how many more there are."""
+    first = signals[0]  # detect_early_signals sorts most severe first
+    tag = "URGENT · " if first.severity is Severity.URGENT else ""
+    more = f"  (+{len(signals) - 1} more)" if len(signals) > 1 else ""
+    return f"{tag}{first.message}{more}"
+
+
+def _recent_changes(signals: list[Signal]) -> list[str]:
+    """Verdict moves and newly appeared early signals, newest first."""
+    cutoff = (datetime.now() - CHANGES_WINDOW).isoformat()
+    recent = [
+        s for s in signals if s.signal_type in _CHANGE_TYPES and s.timestamp >= cutoff
+    ]
+    recent.sort(key=lambda s: s.timestamp, reverse=True)
+    return [
+        f"{_CHANGE_MARKERS[s.signal_type]} {s.timestamp[:10]}  {s.ticker}: {s.message}"
+        for s in recent[:MAX_CHANGES_SHOWN]
+    ]
 
 
 def _stale_tickers(scores: dict[str, ExtendedScore]) -> list[str]:
@@ -142,14 +205,14 @@ def _render_top_by_composite(
     top_table.add_column("Composite", justify="right")
     top_table.add_column("Verdict")
     top_table.add_column("Sector")
-    top_table.add_column("Source")
+    top_table.add_column("Early signals")
     for entry in ranked[:10]:
         top_table.add_row(
             entry.score.ticker,
             f"{entry.score.composite:.1f}",
             entry.score.verdict.value,
             entry.sector or "—",
-            entry.source or "—",
+            tally(entry.early_signals) or "—",
         )
     console.print(top_table)
 
@@ -181,31 +244,27 @@ def _render_dip_candidates(
     console.print(dip_table)
 
 
-def _render_sector_coverage(console: Console, sector_counter: Counter[str]) -> None:
-    if not sector_counter:
+def _render_lines(
+    console: Console, lines: list[str], *, title: str, border_style: str
+) -> None:
+    if not lines:
         return
-    lines = [
-        f"• {sector}: {count}" for sector, count in sector_counter.most_common()
-    ]
     console.print(
         Panel(
-            "\n".join(lines),
-            title="Sector coverage (cached universe)",
+            "\n".join(f"• {line}" for line in lines),
+            title=title,
             title_align="left",
+            border_style=border_style,
         )
     )
 
 
-def _render_red_flags(console: Console, red_flags: list[str]) -> None:
-    if not red_flags:
-        return
-    console.print(
-        Panel(
-            "\n".join(f"• {line}" for line in red_flags[:10]),
-            title="Integrity vetoes and leadership red flags",
-            title_align="left",
-            border_style="red",
-        )
+def _render_sector_coverage(console: Console, sector_counter: Counter[str]) -> None:
+    _render_lines(
+        console,
+        [f"{sector}: {count}" for sector, count in sector_counter.most_common()],
+        title="Sector coverage (cached universe)",
+        border_style="dim",
     )
 
 
@@ -222,30 +281,16 @@ def _render_stale(console: Console, stale: list[str]) -> None:
     )
 
 
-def _render_score_updates(console: Console, score_updates: list[Signal]) -> None:
-    if not score_updates:
-        return
-    recent = score_updates[-5:]
-    su_lines = [
-        f"• {s.ticker} → {s.message} ({s.timestamp[:19]})" for s in recent
-    ]
-    console.print(
-        Panel(
-            "\n".join(su_lines),
-            title="Recent score updates",
-            title_align="left",
-            border_style="dim",
-        )
-    )
-
-
 # ── Markdown mirror ─────────────────────────────────────────────────────────
 
 
 def _render_markdown(
     scores: dict[str, ExtendedScore],
     dip_candidates: dict[str, DipCandidateRecord],
-    red_flags: list[str],
+    vetoes: list[str],
+    concerns: list[str],
+    strengths: list[str],
+    changes: list[str],
     sector_counter: Counter[str],
     stale: list[str],
 ) -> str:
@@ -254,7 +299,8 @@ def _render_markdown(
         "",
         f"- Cached universe: {len(scores)} tickers",
         f"- Dip candidates: {len(dip_candidates)}",
-        f"- Integrity vetoes / red flags: {len(red_flags)}",
+        f"- Integrity vetoes: {len(vetoes)}",
+        f"- Tickers with material early concerns: {len(concerns)}",
         f"- Stale rows (> {STALE_AFTER.days}d): {len(stale)}",
         "",
     ]
@@ -264,21 +310,22 @@ def _render_markdown(
             scores.values(), key=lambda e: e.score.composite, reverse=True
         )
         for entry in ranked[:10]:
+            signals = tally(entry.early_signals)
             lines.append(
                 f"- **{entry.score.ticker}** — composite "
                 f"{entry.score.composite:.1f}, "
                 f"{entry.score.verdict.value}, "
-                f"{entry.sector or '—'}"
+                f"{entry.sector or '—'}" + (f" — {signals}" if signals else "")
             )
         lines.append("")
     if dip_candidates:
         lines.append("## Active dip candidates")
-        ranked = sorted(
+        ranked_dips = sorted(
             dip_candidates.values(),
             key=lambda r: r.dip.composite_score,
             reverse=True,
         )
-        for record in ranked[:10]:
+        for record in ranked_dips[:10]:
             lines.append(
                 f"- **{record.ticker}** — composite "
                 f"{record.dip.composite_score:.1f}, "
@@ -286,14 +333,20 @@ def _render_markdown(
                 f"severity {record.dip.severity.value}"
             )
         lines.append("")
+    for heading, section in (
+        ("Integrity vetoes", vetoes),
+        ("Early concerns — urgent and material", concerns),
+        ("Early strengths", strengths),
+        (f"What changed in the last {CHANGES_WINDOW.days} days", changes),
+    ):
+        if section:
+            lines.append(f"## {heading}")
+            lines.extend(f"- {line}" for line in section)
+            lines.append("")
     if sector_counter:
         lines.append("## Sector coverage")
         for sector, count in sector_counter.most_common():
             lines.append(f"- {sector}: {count}")
-        lines.append("")
-    if red_flags:
-        lines.append("## Integrity vetoes and leadership red flags")
-        lines.extend(f"- {line}" for line in red_flags[:10])
         lines.append("")
     if stale:
         lines.append("## Stale rows")

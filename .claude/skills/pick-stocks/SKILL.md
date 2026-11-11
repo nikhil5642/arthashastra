@@ -44,6 +44,11 @@ check each exchange's lot size (e.g. 100-share units in Japan) before
 ordering. The command also writes `data_cache/dip_candidates.json`, and
 names any chosen ticker that isn't cached.
 
+Each pick shows its early-signal tally, and an "Urgent concerns among
+the picks" panel spells out every URGENT one. Early signals never block
+a pick — a dip usually comes with concerns — so reading them is your
+job, not the gate's.
+
 ## Step 4 — Interpret an empty result
 
 1. **Nothing judged yet** — composites sit near 50–70 until Step 2 runs;
@@ -66,6 +71,11 @@ python3 -m fundamental_engine inspect <TICKER>
 ```
 
 Tell the user:
+- **What the market may already know.** For each pick, the early
+  concerns on its `score` (`early_signals`) — revenue shrinking, margins
+  compressing, free cash flow falling, a governance burst — are the
+  likeliest reasons the price fell. A dip with an URGENT concern you
+  can't explain away is a falling knife: say so, and don't rank it first.
 - Why this dip is genuinely interesting (beyond the mechanical reason) —
   check the quarterly trend: a profit "jump" can be a year-ago one-off
 - Which candidate you'd actually put money into first

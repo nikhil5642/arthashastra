@@ -21,8 +21,11 @@ from backtests.suites import (
     bank_rubric,
     combined_score,
     dip_signals,
+    early_concerns,
+    early_strengths,
     fundamentals_score,
     growth_veto,
+    peak_margin_guard,
     valuation_score,
     value_trap_guard,
     verdict_bands,
@@ -96,6 +99,25 @@ def value_trap_history(sign: int) -> list[Observation]:
     )
 
 
+def peak_margin_history(sign: int) -> list[Observation]:
+    """The cheapest third (four tickers) holds one company on peak margins per date."""
+    return history(
+        lambda i, j: {
+            "earnings_yield": 12.0 - j, "peak_margin": j == (i % 2),
+            "forward_return_pct": sign * (-4.0 if j == (i % 2) else 0.0) + noise(i, j) / 2,
+        }
+    )
+
+
+def signalled(field: str, sign: int) -> list[Observation]:
+    """Half the tickers carry one material early signal; they return 4% more (+1) or less (−1)."""
+    return history(
+        lambda i, j: {
+            field: 1 if j % 2 == 0 else 0, "forward_return_pct": sign * 4.0 * (j % 2 == 0) + noise(i, j),
+        }
+    )
+
+
 CASES: list[tuple[Suite, Callable[[int], list[Observation]]]] = [
     (fundamentals_score.SUITE, lambda sign: ranked_by("fundamentals", sign)),
     (valuation_score.SUITE, lambda sign: ranked_by("valuation", sign)),
@@ -103,6 +125,9 @@ CASES: list[tuple[Suite, Callable[[int], list[Observation]]]] = [
     (verdict_bands.SUITE, bands_history),
     (growth_veto.SUITE, lambda sign: flagged("slow_growth", -sign)),
     (value_trap_guard.SUITE, value_trap_history),
+    (peak_margin_guard.SUITE, peak_margin_history),
+    (early_concerns.SUITE, lambda sign: signalled("material_concerns", -sign)),
+    (early_strengths.SUITE, lambda sign: signalled("material_strengths", sign)),
     (dip_signals.SUITE, lambda sign: flagged("dip_signal", sign)),
     (bank_rubric.SUITE, lambda sign: ranked_by("fundamentals", sign, is_bank=True)),
 ]

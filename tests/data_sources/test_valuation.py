@@ -113,3 +113,126 @@ def test_zero_eps_never_divides():
     snap = msft(eps_history={"2025-06-30": 0.0})
     apply_valuation(snap, PRICES)
     assert snap.pe_ratio is None and snap.fcf_yield is None
+
+
+# ── Which twelve months each ratio covers ────────────────────────────────────
+
+
+def test_source_pe_is_trailing_and_a_derived_one_is_the_fiscal_year():
+    from data_sources.fundamentals_source.snapshot import StatementWindow
+
+    published = msft(pe_ratio=35.0)
+    apply_valuation(published, PRICES)
+    assert published.earnings_window is StatementWindow.TTM
+
+    derived = msft()
+    apply_valuation(derived, PRICES)
+    assert derived.earnings_window is StatementWindow.FISCAL_YEAR
+
+
+def test_fcf_yield_uses_the_trailing_twelve_months_when_the_quarters_are_in():
+    from data_sources.fundamentals_source.snapshot import StatementWindow
+
+    # FCF fell from 90 (fiscal year) to 30 (trailing): today's price buys today's cash.
+    snap = msft(ttm_period_end="2025-09-30", ttm_free_cash_flow=30.0)
+    apply_valuation(snap, PRICES)
+    assert snap.fcf_yield == round(30 / (10 * 420) * 100, 2)
+    assert snap.cash_flow_window is StatementWindow.TTM
+
+    # A trailing window older than the fiscal year adds nothing — the year wins.
+    stale = msft(ttm_period_end="2025-03-31", ttm_free_cash_flow=30.0)
+    apply_valuation(stale, PRICES)
+    assert stale.fcf_yield == round(9 / 420 * 100, 2)
+    assert stale.cash_flow_window is StatementWindow.FISCAL_YEAR
+
+
+def test_core_earnings_ratio_follows_the_pe_window():
+    snap = msft(pe_ratio=35.0, ttm_period_end="2025-09-30",
+                core_earnings_ratio_ttm=0.56, core_earnings_ratio_fy=0.85)
+    apply_valuation(snap, PRICES)
+    assert snap.core_earnings_ratio == 0.56  # a trailing P/E → the trailing ratio
+
+    fiscal = msft(ttm_period_end="2025-09-30", core_earnings_ratio_ttm=0.56, core_earnings_ratio_fy=0.85)
+    apply_valuation(fiscal, PRICES)
+    assert fiscal.core_earnings_ratio == 0.85  # a fiscal-year P/E → the fiscal-year ratio
+
+    no_quarters = msft(pe_ratio=35.0, core_earnings_ratio_fy=0.85)
+    apply_valuation(no_quarters, PRICES)
+    assert no_quarters.core_earnings_ratio == 0.85  # the freshest ratio there is
+
+
+def test_market_cap_stands_in_when_the_share_count_cannot_be_derived():
+    snap = msft(latest_annual_period="2026-06-30", market_cap=4200.0)  # no EPS for the newest year
+    apply_valuation(snap, PRICES)
+    assert snap.fcf_yield == round(90 / 4200 * 100, 2)
+    assert snap.price_to_book == round(4200 / 300, 2)
+
+
+# ── Listings that trade in one currency and report in another ────────────────
+
+
+def tencent(**overrides: object) -> BalanceSheetSnapshot:
+    """HKD price, CNY statements: market cap HK$4,000 for 220 of profit."""
+    return msft(ticker="0700.HK", currency="HKD", financial_currency="CNY", pe_ratio=16.5,
+                market_cap=4000.0, **overrides)
+
+
+def test_spot_fx_gives_a_cross_currency_listing_its_fcf_yield_and_book_multiple():
+    snap = tencent()
+    apply_valuation(snap, PRICES, fx_to_reporting=0.9)  # HK$1 = CN¥0.90
+    assert snap.fcf_yield == round(90 / (4000 * 0.9) * 100, 2)
+    assert snap.price_to_book == round(4000 * 0.9 / 300, 2)
+    assert snap.pe_history == []  # each past year-end would need its own FX rate
+    assert not snap.quote_unreliable
+
+
+def test_published_book_value_is_ignored_across_currencies():
+    snap = tencent(book_value_per_share=42.0)  # CNY per share against an HKD price
+    apply_valuation(snap, PRICES, fx_to_reporting=0.9)
+    assert snap.price_to_book == round(4000 * 0.9 / 300, 2)
+
+
+def test_a_cross_currency_quote_below_one_and_a_half_times_earnings_is_a_receipt():
+    """A CEDEAR: Yahoo's P/E of 0.01 divides one instrument's price by another's earnings."""
+    cedear = msft(ticker="GOOGL.BA", currency="ARS", financial_currency="USD", pe_ratio=0.01,
+                  market_cap=3.5e12)
+    apply_valuation(cedear, PRICES, fx_to_reporting=0.0007)
+    assert cedear.quote_unreliable
+    assert (cedear.pe_ratio, cedear.earnings_yield, cedear.fcf_yield, cedear.price_to_book) == (
+        None, None, None, None
+    )
+    assert cedear.earnings_window is None and cedear.pe_history == []
+
+
+def test_a_receipt_is_also_caught_by_its_fx_converted_market_cap():
+    # P/E looks plausible, but the "market cap" is the receipt programme's:
+    # 150 of value against 120 of annual profit is 1.25× earnings.
+    receipt = msft(ticker="TSLA.BA", currency="ARS", financial_currency="USD", pe_ratio=9.0,
+                   market_cap=150_000.0)
+    apply_valuation(receipt, PRICES, fx_to_reporting=0.001)
+    assert receipt.quote_unreliable and receipt.pe_ratio is None
+
+
+def test_a_mislabelled_statement_currency_is_caught_by_the_same_reconciliation():
+    """Yahoo tags some Hong Kong listings USD while the figures are in yuan (7× too big)."""
+    newborn = msft(ticker="9911.HK", currency="HKD", financial_currency="USD", pe_ratio=10.0,
+                   market_cap=12_000.0, net_income=900.0)  # 900 "USD" is really CNY
+    apply_valuation(newborn, PRICES, fx_to_reporting=0.128)  # → 1,536 of value: 1.7× "earnings"
+    assert newborn.quote_unreliable and newborn.fcf_yield is None and newborn.pe_ratio is None
+
+
+def test_an_unverifiable_cross_currency_quote_keeps_its_pe_but_mixes_nothing():
+    # No published P/E (or a loss): the FX basis can't be proven either way.
+    loss_maker = msft(ticker="BABA", currency="USD", financial_currency="CNY", market_cap=4000.0,
+                      net_income=-50.0, eps_history={"2025-06-30": -5.0})
+    apply_valuation(loss_maker, PRICES, fx_to_reporting=7.1)
+    assert not loss_maker.quote_unreliable
+    assert (loss_maker.fcf_yield, loss_maker.price_to_book) == (None, None)
+
+
+def test_a_tiny_same_currency_pe_is_a_real_number_not_a_receipt():
+    # A one-off gain can make a real company's trailing P/E tiny; the
+    # earnings-quality layer handles that, not the receipt rule.
+    snap = msft(pe_ratio=1.2)
+    apply_valuation(snap, PRICES)
+    assert not snap.quote_unreliable and snap.pe_ratio == 1.2

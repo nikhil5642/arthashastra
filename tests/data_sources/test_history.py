@@ -211,3 +211,41 @@ async def test_fetch_survives_every_source_failing(monkeypatch):
     fetched = await history.fetch_statement_history("005930.KS", sec_user_agent="ua")
     assert (fetched.prices, fetched.frames, fetched.screener) == ([], None, {})
     assert fetched.fundamentals_source == "none"
+
+
+def test_past_snapshots_carry_margin_history_and_year_on_year_balance_changes():
+    """What the peak-margin guard and the early signals need, point-in-time."""
+    cols = pd.to_datetime(["2025-06-30", "2024-06-30", "2023-06-30", "2022-06-30"])
+    income = pd.DataFrame(
+        [[280.0, 245.0, 211.0, 198.0], [98.0, 61.0, 21.0, 40.0], [10.0, 6.0, 2.0, 4.0]],
+        index=["Total Revenue", "Net Income", "Diluted EPS"], columns=cols,
+    )
+    balance = pd.DataFrame(
+        [[600.0, 510.0, 410.0, 360.0], [300.0, 260.0, 200.0, 170.0], [120.0, 60.0, 50.0, 40.0],
+         [10.0, 10.0, 10.0, 10.0]],
+        index=["Total Assets", "Stockholders Equity", "Total Debt", "Ordinary Shares Number"],
+        columns=cols,
+    )
+    history = StatementHistory(
+        symbol="MSFT",
+        frames=AnnualFrames(income=income, balance=balance, cashflow=None, source="sec"),
+        metadata={"currency": "USD", "financial_currency": "USD"},
+        splits=[("2024-12-01", 2.0)],
+    )
+
+    mid = snapshot_as_of(history, date(2024, 12, 31))
+    assert mid is not None
+    # Only fiscal years public by then: 2022 → 2024.
+    assert mid.net_margin_annual_trend == [round(40 / 198 * 100, 2), round(21 / 211 * 100, 2),
+                                           round(61 / 245 * 100, 2)]
+    assert mid.balance_sheet_date == "2024-06-30"
+    assert mid.debt_change_1y_pct == 20.0
+    assert mid.share_count_change_1y_pct == 0.0  # the split came after this year-end
+    assert mid.ttm_period_end == ""  # nothing quarterly is replayed
+
+    latest = snapshot_as_of(history, date(2025, 12, 31))
+    assert latest is not None
+    assert latest.debt_change_1y_pct == 100.0
+    assert latest.latest_debt_to_equity == 0.4
+    # A split inside the year to 2025-06-30 makes the share counts incomparable.
+    assert latest.share_count_change_1y_pct is None

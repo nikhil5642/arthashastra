@@ -20,6 +20,14 @@ every ratio. One set of formulas for every source.
 Coverage is US-registered filers reporting in US GAAP; anything with an
 exchange suffix is skipped without a request. SEC asks automated clients
 to identify themselves: the caller passes `SEC_USER_AGENT` from config.
+
+History follows the registrant, not the ticker. When a company
+reorganises under a new registrant (a holding company, a redomiciliation)
+its ticker moves to a new CIK whose facts start at the reorganisation, and
+SEC publishes no link back to the old one — so the history starts over
+(Alphabet in 2015, Broadcom in 2018), or is empty until the new registrant
+files its first 10-K (ExxonMobil Holdings, 2026). The caller falls back
+to Yahoo's four years; the gap is logged, never bridged by a guess.
 """
 
 from __future__ import annotations
@@ -135,7 +143,14 @@ async def fetch_annual_frames(symbol: str, *, user_agent: str) -> SecAnnualFrame
     facts = await _get_json(SEC_COMPANY_FACTS_URL.format(cik=cik), user_agent)
     if not isinstance(facts, dict):
         return None
-    return build_annual_frames(facts)
+    frames = build_annual_frames(facts)
+    if frames is None:
+        log.info(
+            "SEC has no annual US-GAAP facts for %s under CIK %d (%s) — a new registrant "
+            "or an IFRS filer; history falls back to Yahoo's",
+            symbol, cik, facts.get("entityName") or "unnamed",
+        )
+    return frames
 
 
 def build_annual_frames(company_facts: dict[str, object]) -> SecAnnualFrames | None:

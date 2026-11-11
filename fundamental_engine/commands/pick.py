@@ -13,14 +13,16 @@ Picks are diversified across sectors AND countries. `--tickers` narrows the
 universe to a chosen set — typically the names `screen --score` just
 cached from a global screen.
 
-Blocked tickers: anything whose cached score carries the integrity gate,
-plus any ticker with a LEADERSHIP_RED_FLAG signal on the bus.
+Blocked tickers: anything whose cached score carries the integrity gate.
+Early signals never block a pick — a dip usually comes with concerns —
+but every pick shows its tally, and urgent concerns are spelled out under
+the table so they are read before money moves.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from rich.console import Console
@@ -41,6 +43,7 @@ from reports.formatting import (
     make_console,
 )
 from scorers.base import Gate, Verdict
+from scorers.early_signals import EarlySignal, Tone, of_tone, tally
 from screener.dip_detector import (
     DEFAULT_MIN_COMPOSITE,
     DipSignal,
@@ -49,7 +52,7 @@ from screener.dip_detector import (
     dip_rank_key,
 )
 from screener.price_history import PriceHistoryStore, PriceSnapshot
-from signals.signal_bus import Signal, SignalBus, SignalType
+from signals.signal_bus import Severity, Signal, SignalBus, SignalType
 
 log = logging.getLogger(__name__)
 
@@ -73,21 +76,16 @@ class Candidate:
     composite: float
     verdict: Verdict
     dip: DipSignal
+    early_signals: list[EarlySignal] = field(default_factory=list)
 
 
-def _blocked_tickers(scores: dict[str, ExtendedScore], bus: SignalBus) -> set[str]:
-    """Integrity-vetoed tickers (from cached scores) + red-flag signals."""
-    vetoed = {
+def _blocked_tickers(scores: dict[str, ExtendedScore]) -> set[str]:
+    """Tickers whose cached score carries the integrity gate."""
+    return {
         ticker
         for ticker, extended in scores.items()
         if Gate.INTEGRITY_VETO in extended.score.gates_applied
     }
-    flagged = {
-        s.ticker
-        for s in bus.read_all()
-        if s.signal_type == SignalType.LEADERSHIP_RED_FLAG
-    }
-    return vetoed | flagged
 
 
 def _gather_candidates(
@@ -138,6 +136,7 @@ def _gather_candidates(
                     composite=extended.score.composite,
                     verdict=extended.score.verdict,
                     dip=check.dip,
+                    early_signals=extended.early_signals,
                 )
             )
     return candidates, missing_history
@@ -263,6 +262,7 @@ def _render(
     table.add_column("Verdict")
     table.add_column("Drawdown", justify="right")
     table.add_column("Severity")
+    table.add_column("Early signals")
     table.add_column("Shares", justify="right")
     table.add_column("Allocation", justify="right")
 
@@ -287,10 +287,12 @@ def _render(
             f"[{verdict_style}]{c.verdict}[/{verdict_style}]",
             f"{c.dip.drawdown_pct:.1f}%",
             c.dip.severity,
+            tally(c.early_signals) or "—",
             shares_str,
             alloc_str,
         )
     console.print(table)
+    _render_urgent_concerns(picks, console)
 
     sector_breakdown: dict[str, float] = {}
     for c in picks:
@@ -320,6 +322,25 @@ def _render(
             title_align="left",
         )
     )
+
+
+def _render_urgent_concerns(picks: list[Candidate], console: Console) -> None:
+    """Spell out every urgent concern among the picks — read before buying."""
+    lines = [
+        f"• [bold]{c.ticker}[/bold]: {signal.message}"
+        for c in picks
+        for signal in of_tone(c.early_signals, Tone.CONCERN)
+        if signal.severity is Severity.URGENT
+    ]
+    if lines:
+        console.print(
+            Panel(
+                "\n".join(lines),
+                title="Urgent concerns among the picks — read before buying",
+                title_align="left",
+                border_style="red",
+            )
+        )
 
 
 def run_pick_command(
@@ -354,7 +375,7 @@ def run_pick_command(
         cfg.data_cache_dir,
         min_composite=min_composite,
         allowed_verdicts=allowed_verdicts,
-        blocked=_blocked_tickers(scores, bus),
+        blocked=_blocked_tickers(scores),
     )
 
     ranked = sorted(candidates, key=lambda c: dip_rank_key(c.dip), reverse=True)

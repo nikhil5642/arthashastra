@@ -110,3 +110,26 @@ def test_integrity_veto_round_trips_through_the_store(tmp_path: Path):
 
 def test_integrity_veto_requires_a_leadership_pillar():
     assert not Judgment(ticker="X", integrity_veto=True).integrity_veto
+
+
+def test_pillar_scores_are_held_to_the_0_100_scale():
+    assert PillarJudgment.from_dict({"score": 150}).score == 100.0  # type: ignore[union-attr]
+    assert PillarJudgment.from_dict({"score": -20}).score == 0.0  # type: ignore[union-attr]
+    assert PillarJudgment.from_dict({"score": 72.5}).score == 72.5  # type: ignore[union-attr]
+    # Not a number at all is no score at all.
+    assert PillarJudgment.from_dict({"score": "eighty"}) is None
+    assert PillarJudgment.from_dict({"score": True}) is None
+    assert PillarJudgment.from_dict({"score": float("nan")}) is None
+
+
+def test_judgment_age_in_days():
+    from datetime import datetime
+
+    from fundamental_engine.judgments import age_in_days
+
+    now = datetime(2026, 11, 10, 12, 0)
+    assert age_in_days("2026-11-09T11:40:00", now=now) == 1
+    assert age_in_days("2026-10-01T00:00:00+05:30", now=now) == 40
+    assert age_in_days("2027-01-01T00:00:00", now=now) == 0  # a clock skew never gives a negative age
+    assert age_in_days("", now=now) is None and age_in_days("yesterday", now=now) is None
+    assert Judgment(ticker="X").age_days == 0

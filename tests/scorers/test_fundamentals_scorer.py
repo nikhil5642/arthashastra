@@ -547,3 +547,36 @@ def test_mature_global_compounder_gets_the_same_curves_as_anyone():
     result = score_fundamentals(snap)
     assert result.score == 50.0
     assert any("< 3%" in ev for ev in result.evidence)
+
+
+# ── Known-bad is never scored as unknown ─────────────────────────────────────
+
+
+def test_negative_equity_scores_zero_on_leverage_instead_of_dropping_out():
+    healthy_rest = dict(interest_coverage=12.0, current_ratio=2.2, quick_ratio=1.6)
+    unknown_equity = score_fundamentals(_snap(**healthy_rest))
+    negative_equity = score_fundamentals(_snap(**healthy_rest, shareholders_equity=-500.0))
+
+    assert unknown_equity.score == 100.0  # D/E simply missing
+    # D/E axis (30 of 85 balance-sheet weight) now counts as 0.
+    assert negative_equity.score == round(100 * 55 / 85, 1)
+    assert any("Shareholders' equity is negative" in line for line in negative_equity.evidence)
+
+
+def test_roe_of_a_negative_equity_company_is_explained_not_scored():
+    result = score_fundamentals(_snap(roce=12.0, shareholders_equity=-1.0))
+    assert any(line.startswith("ROE not meaningful") for line in result.evidence)
+
+
+def test_profit_that_turned_into_a_loss_fires_the_growth_veto():
+    """PAT CAGR −100 is 'all of it gone' — with weak revenue the cap must apply."""
+    strong_balance_sheet = dict(debt_to_equity=0.1, interest_coverage=20.0, current_ratio=2.5,
+                                quick_ratio=2.0, roe=22.0, roce=25.0, ocf_to_pat=1.3)
+    collapsed = score_fundamentals(_snap(**strong_balance_sheet, rev_3y_cagr=1.5, pat_3y_cagr=-100.0))
+    assert collapsed.score == 50.0
+    assert any(line.startswith("VETO") and "PAT turned to a loss" in line for line in collapsed.evidence)
+    assert any(line == "PAT over 3 years: profit turned into a loss → 0/100" for line in collapsed.evidence)
+
+    # Unknown PAT growth (a loss that became a profit) still can't fire the veto.
+    unknown = score_fundamentals(_snap(**strong_balance_sheet, rev_3y_cagr=1.5))
+    assert unknown.score > 50.0

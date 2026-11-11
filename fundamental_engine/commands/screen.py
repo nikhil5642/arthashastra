@@ -9,8 +9,9 @@ Three stages, cheapest first:
      read until `--scan` tradeable listings are in hand (see `_tradeable`:
      depositary receipts and foreign copies are skipped).
   2. Here: market cap in the base currency (live FX per listing), distance
-     below the 52-week high, and one listing per company — the most traded
-     one, so RELIANCE.NS beats RELIANCE.BO.
+     below the 52-week high, and one listing per company — a listing in
+     the company's own reporting currency first, then the most traded, so
+     2330.TW beats the TSM receipt and RELIANCE.NS beats RELIANCE.BO.
   3. `--score N`: the top N go through the same live fetch and deterministic
      scoring as `refresh` and join the cache, so `pick --tickers`, `brief`
      and `/analyse-stock` can use them.
@@ -35,6 +36,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from data_sources import universe_source
+from data_sources.fundamentals_source.valuation import MIN_PLAUSIBLE_PE
 from data_sources.fx_source import conversion_rate, major_unit
 from data_sources.names import clean_company_name
 from data_sources.universe_source import PAGE_SIZE, Criteria, Listing
@@ -213,18 +215,39 @@ async def _read_market(
 
 
 def _tradeable(listing: Listing) -> bool:
-    """Trades at least 0.001% of its market cap on an average day.
+    """A real listing of the company: it trades, and its quote describes the company.
 
-    Depositary receipts and foreign copies — Brazil's BDRs, Canada's CDRs,
-    Frankfurt and Zurich copies of US stocks — carry the whole company's
-    market cap but trade next to nothing (0.0000001%–0.0001% a day), and
-    they crowd the top of their markets: 236 of Brazil's 246 largest
-    "listings" are BDRs. Primary listings trade 0.001% or more; even Saudi
-    Aramco, with a 2% free float, trades 0.003%. Below the floor the market
-    cap describes another instrument, and the quote can't be dealt at.
+    Two kinds of depositary receipt and foreign copy crowd the top of
+    their markets, and each fails one test:
+
+      - Whole-company market cap, almost no trading — Brazil's BDRs,
+        Frankfurt and Zurich copies of US stocks (236 of Brazil's 246
+        largest "listings" are BDRs). They trade 0.0000001%–0.0001% of
+        their market cap a day; primary listings trade 0.001% or more
+        (even Saudi Aramco, with a 2% free float, trades 0.003%).
+      - Real trading, a market cap that is only the receipt programme's —
+        Argentine CEDEARs, Singapore SDRs, fractional Canadian receipts.
+        Their price and earnings sit on different share bases, which shows
+        as an impossible P/E (`_receipt_quote`).
     """
     turnover = listing.daily_turnover
-    return turnover is not None and turnover >= MIN_DAILY_TURNOVER
+    if turnover is None or turnover < MIN_DAILY_TURNOVER:
+        return False
+    return not _receipt_quote(listing)
+
+
+def _receipt_quote(listing: Listing) -> bool:
+    """Priced below 1.5× annual earnings, in a currency the company doesn't report in.
+
+    No profitable company trades there; a quote that says so is dividing
+    one instrument's price by another's earnings. Same-currency listings
+    are left alone — a tiny P/E there is a real (one-off-inflated) number.
+    """
+    return (
+        listing.cross_currency
+        and listing.trailing_pe is not None
+        and listing.trailing_pe < MIN_PLAUSIBLE_PE
+    )
 
 
 async def _with_local_bounds(
@@ -275,12 +298,21 @@ def _match(listing: Listing, market: str, rate: float, request: ScreenRequest) -
 
 
 def _one_per_company(matches: list[Match]) -> list[Match]:
-    """Keep each company's most traded listing: NSE over BSE, Nasdaq over Frankfurt."""
+    """Keep one listing per company: its home-currency listing, then the most traded.
+
+    A listing that trades in the company's reporting currency is the one
+    whose statements, per-share figures and price all line up, so it beats
+    a receipt even when the receipt trades more (2330.TW over TSM). Among
+    equals the most traded wins: NSE over BSE, Nasdaq over Frankfurt.
+    """
+    def preference(match: Match) -> tuple[bool, float]:
+        return (not match.listing.cross_currency, match.traded_value_base or 0.0)
+
     best: dict[str, Match] = {}
     for match in matches:
         key = clean_company_name(match.listing.name).lower() or match.listing.symbol
         current = best.get(key)
-        if current is None or (match.traded_value_base or 0) > (current.traded_value_base or 0):
+        if current is None or preference(match) > preference(current):
             best[key] = match
     return list(best.values())
 
@@ -438,13 +470,14 @@ def _render_scored(
     for column, justify in (
         ("Ticker", "left"), ("Country", "left"), ("Fundamentals", "right"),
         ("Valuation", "right"), ("Composite", "right"), ("Verdict", "left"),
+        ("Early signals", "left"),
     ):
         table.add_column(column, justify=justify)
     ok: list[str] = []
     for result in scored:
         extended = scores.get(result.ticker)
         if result.status != RefreshStatus.OK or extended is None:
-            table.add_row(result.ticker, "—", "—", "—", "—", f"[dim]{result.status}[/dim]")
+            table.add_row(result.ticker, "—", "—", "—", "—", f"[dim]{result.status}[/dim]", "")
             continue
         ok.append(result.ticker)
         score = extended.score
@@ -456,11 +489,13 @@ def _render_scored(
             f"{score.valuation_score:.1f}",
             f"{score.composite:.1f}",
             f"[{style}]{score.verdict}[/{style}]",
+            result.early_signals or "—",
         )
     console.print(table)
     console.print(
         "[dim]Leadership, prospects and news sit at a neutral 50 until "
-        "/analyse-stock judges them; pick's default bar (75) needs those judgments.[/dim]"
+        "/analyse-stock judges them; pick's default bar (75) needs those judgments. "
+        "`inspect <TICKER>` lists each early signal.[/dim]"
     )
     if ok:
         console.print(f"Cached: {' '.join(ok)}")

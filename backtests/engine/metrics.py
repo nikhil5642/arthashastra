@@ -5,9 +5,12 @@
     saying whether the average is distinguishable from zero.
   - Terciles: each date's tickers split into thirds by score.
   - Verdict bands: forward returns grouped by the verdict a score maps to.
-  - Group comparison: two groups' excess returns (each return minus its
-    date's average) with Welch's t-stat. Excess returns take the market's
-    move out, so a group isn't flattered by happening to sit in 2009.
+  - Group comparison: on each date both groups appear, one group's mean
+    return minus the other's; then a t-stat across dates. One number per
+    date, because returns on one date move together — pooling them would
+    count one unusual year as many confirmations.
+  - Excess return: a return minus its date's average, shown in the tables
+    so a group isn't flattered by happening to sit in 2009.
 
 Every ranking function takes the `ScoreKind` to rank by, so the same
 statistics answer "does fundamentals work?", "does valuation work?" and
@@ -22,6 +25,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
+from statistics import median
 
 from scorers.base import VERDICT_BANDS, Pillar, Verdict, verdict_for
 from scorers.composite_scorer import PILLAR_WEIGHTS
@@ -52,8 +56,11 @@ class Observation:
     forward_return_pct: float | None  # None when the window isn't complete yet
     excess_return_pct: float | None = None  # forward return minus the date's average
     slow_growth: bool = False  # both 3y CAGRs in growth-veto territory
-    earnings_yield: float | None = None  # %, 100 / P/E
+    earnings_yield: float | None = None  # %, 100 / P/E, on reported earnings
     dip_signal: bool = False
+    peak_margin: bool = False  # net margin above 1.5× the company's own median
+    material_concerns: int = 0  # ALERT / URGENT early concerns on the as-of date
+    material_strengths: int = 0  # ALERT / URGENT early strengths
 
     @property
     def combined(self) -> float:
@@ -92,6 +99,7 @@ class DatedIC:
 class ReturnStats:
     count: int
     mean_return_pct: float | None
+    median_return_pct: float | None  # the typical name — a mean can be one outlier
     mean_excess_pct: float | None
     hit_rate: float | None  # share of observations with a positive return
 
@@ -102,6 +110,7 @@ class ReturnStats:
         return cls(
             count=len(returns),
             mean_return_pct=_mean(returns),
+            median_return_pct=median(returns) if returns else None,
             mean_excess_pct=_mean(excess),
             hit_rate=sum(1 for r in returns if r > 0) / len(returns) if returns else None,
         )
@@ -115,12 +124,25 @@ class BandRow:
 
 @dataclass(slots=True)
 class GroupComparison:
-    """Group A vs group B on excess returns, with Welch's t on the difference."""
+    """Group A vs group B, compared date by date.
+
+    `by_date` holds one difference per date both groups appear on (A's mean
+    return minus B's); the claim is judged on its mean and t-stat, the same
+    footing as the rank IC. `a` and `b` are pooled across dates and only
+    feed the table.
+    """
 
     a: ReturnStats
     b: ReturnStats
-    difference_pct: float | None  # mean excess(A) − mean excess(B)
-    t_stat: float | None
+    by_date: MeanTest
+
+    @property
+    def difference_pct(self) -> float | None:
+        return self.by_date.mean
+
+    @property
+    def t_stat(self) -> float | None:
+        return self.by_date.t_stat
 
 
 # ── Preparing observations ───────────────────────────────────────────────────
@@ -129,7 +151,7 @@ class GroupComparison:
 def attach_excess_returns(observations: Sequence[Observation]) -> None:
     """Set each observation's return minus the average return on its date."""
     for group in _by_date(observations).values():
-        average = sum(_return(o) for o in group) / len(group)
+        average = _mean_return(group)
         for obs in group:
             obs.excess_return_pct = _return(obs) - average
 
@@ -182,9 +204,7 @@ def tercile_spread(observations: Sequence[Observation], kind: ScoreKind) -> Mean
     """Per date: top third's average return minus the bottom third's."""
     spreads: list[float] = []
     for bottom, _, top in _terciles_by_date(observations, kind):
-        spreads.append(
-            sum(_return(o) for o in top) / len(top) - sum(_return(o) for o in bottom) / len(bottom)
-        )
+        spreads.append(_mean_return(top) - _mean_return(bottom))
     return mean_test(spreads)
 
 
@@ -209,17 +229,15 @@ def band_returns(observations: Sequence[Observation], kind: ScoreKind) -> list[B
 
 
 def compare_groups(group_a: Sequence[Observation], group_b: Sequence[Observation]) -> GroupComparison:
-    """Welch's t-test on the two groups' excess returns."""
-    a = [o.excess_return_pct for o in group_a if o.excess_return_pct is not None]
-    b = [o.excess_return_pct for o in group_b if o.excess_return_pct is not None]
-    stats_a, stats_b = ReturnStats.of(group_a), ReturnStats.of(group_b)
-    if not a or not b:
-        return GroupComparison(stats_a, stats_b, difference_pct=None, t_stat=None)
-    difference = sum(a) / len(a) - sum(b) / len(b)
-    t_stat: float | None = None
-    if len(a) >= 2 and len(b) >= 2:
-        t_stat = _t(difference, math.sqrt(_variance(a) / len(a) + _variance(b) / len(b)))
-    return GroupComparison(stats_a, stats_b, difference_pct=difference, t_stat=t_stat)
+    """Per date both groups appear on: A's mean return minus B's; then a t-test across dates."""
+    a_by_date, b_by_date = _by_date(group_a), _by_date(group_b)
+    differences = [
+        _mean_return(a_by_date[day]) - _mean_return(b_by_date[day])
+        for day in sorted(a_by_date.keys() & b_by_date.keys())
+    ]
+    return GroupComparison(
+        a=ReturnStats.of(group_a), b=ReturnStats.of(group_b), by_date=mean_test(differences)
+    )
 
 
 def mean_test(values: Sequence[float]) -> MeanTest:
@@ -251,6 +269,10 @@ def _with_returns(observations: Sequence[Observation]) -> list[Observation]:
 
 def _return(obs: Observation) -> float:
     return obs.forward_return_pct if obs.forward_return_pct is not None else 0.0
+
+
+def _mean_return(group: Sequence[Observation]) -> float:
+    return sum(_return(o) for o in group) / len(group)
 
 
 def _by_date(observations: Sequence[Observation]) -> dict[date, list[Observation]]:

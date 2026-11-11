@@ -57,8 +57,8 @@ def _install_source(
             return ticker_to_result.get(ticker, default)
 
     # Engine imports FundamentalsSource from fundamentals_source.
-    monkeypatch.setattr(fs_module, "FundamentalsSource", lambda: FakeSource())
-    monkeypatch.setattr(engine_module, "FundamentalsSource", lambda: FakeSource())
+    monkeypatch.setattr(fs_module, "FundamentalsSource", lambda **_: FakeSource())
+    monkeypatch.setattr(engine_module, "FundamentalsSource", lambda **_: FakeSource())
     monkeypatch.setattr(engine_module, "conversion_rate", _fake_rate)
 
 

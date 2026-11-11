@@ -15,22 +15,27 @@ to confirm — it must always come back empty.
 data_sources/
 ├── fundamentals_source/     # split by responsibility
 │   ├── __init__.py          #   public API only
-│   ├── snapshot.py          #   BalanceSheetSnapshot + SnapshotFields TypedDict
+│   ├── snapshot.py          #   BalanceSheetSnapshot + SnapshotFields TypedDict + StatementWindow
 │   │                        #   + DataConflict + SCORED_FIELDS + is_bank_snapshot
 │   ├── source.py            #   FundamentalsSource facade + merge rules + _SCREENER_WINS
 │   │                        #   + provenance (field_sources) + conflict detection
-│   ├── yfinance_adapter.py  #   global baseline: every listing on any exchange
+│   │                        #   + one currency and one trailing window per snapshot
+│   ├── yfinance_adapter.py  #   global baseline: every listing on any exchange — fiscal year,
+│   │                        #   trailing twelve months, year-on-year balance sheet, long trends
 │   ├── screener_adapter.py  #   screener.in — Indian (.NS / .BO) listings only
 │   ├── sec_adapter.py       #   SEC EDGAR — US filers, ~18 years of first-filed 10-K values
-│   ├── valuation.py         #   P/E, earnings / FCF yield, P/B, P/E history (live + backtest)
+│   ├── valuation.py         #   P/E, earnings / FCF yield, P/B, P/E history (live + backtest),
+│   │                        #   spot FX for cross-currency listings, quote reconciliation
 │   ├── history.py           #   point-in-time snapshots for backtests + SEC EPS rebasing
 │   └── primitives.py        #   parse helpers + period alignment + date-matched YoY
+│                            #   + trailing_twelve_months + cagr_pct
 ├── price_series.py          # PriceSeries — split-adjusted closes + date lookups
 ├── universe_source.py       # Yahoo's global screener: every listing in 59 markets, filtered server-side
 ├── fx_source.py             # live FX via Yahoo pairs, bridged through USD + minor units (GBp, ZAc, ILA, KWF)
 ├── names.py                 # company-name cleaning for search-style queries
 ├── research_source.py       # Wikipedia API + Brave Search + WebHit TypedDict
-└── news_source.py           # Google News RSS + FeedEntry TypedDict + NewsCategory enum
+└── news_source.py           # Google News RSS → de-noised, de-duplicated stories (NewsItem)
+                             # + NewsCategory enum + digest() → NewsDigest (a week's counts)
 ```
 
 ## Market independence
@@ -52,9 +57,21 @@ data_sources/
   unit of the trading currency; statement amounts (quarterly revenue /
   PAT, bank deposits, NII) are in the reporting currency.
 - **Valuation never mixes currencies.** `valuation.apply_valuation`
-  divides a price by a statement amount (FCF per share, book per share,
-  past EPS) only when the trading currency's major unit equals the
-  reporting currency; an ADR keeps only the source's published P/E.
+  divides a price by a statement amount only when both are in one
+  currency. When the trading and reporting currencies differ (an ADR, a
+  Hong Kong share of a mainland company, a London share with dollar
+  accounts) the live path converts the market cap with spot FX, so FCF
+  yield and P/B still exist; backtests have no past FX rate and leave
+  them out. P/E history is same-currency only.
+- **A cross-currency quote must reconcile before it is used.** Two
+  tests, and failing either marks the snapshot `quote_unreliable` and
+  discards every price-based ratio: a profitable company cannot trade
+  below 1.5× earnings (`MIN_PLAUSIBLE_PE`), and the FX-converted market
+  cap ÷ profit must land within 3× of the source's own P/E
+  (`RECONCILE_TOLERANCE`). This catches depositary receipts whose
+  "market cap" is the receipt programme's (Argentine CEDEARs, Singapore
+  and Canadian receipts) and statements carrying the wrong currency
+  label. Wrong numbers are worse than none.
 - **Every per-share number is on today's share basis.** Closes are
   split-adjusted but not dividend-adjusted (`auto_adjust=False`, Yahoo's
   "Close"): dividend adjustment would quietly shrink every past price
@@ -66,6 +83,57 @@ data_sources/
 - **News uses one global English edition.** The query is the
   company's everyday name (`names.news_query_name`), so "Reliance
   Industries Limited" searches as "Reliance Industries".
+
+## Fresher than the fiscal year
+
+The scored ratios describe the latest audited fiscal year, which can be
+most of a year old. The snapshot also carries what has been published
+since, and a longer look back, for the valuation pillar and the early
+signals (`scorers/early_signals.py`):
+
+| What | Fields | Rule |
+|---|---|---|
+| Trailing twelve months | `ttm_period_end`, `ttm_revenue`, `ttm_net_income`, `ttm_operating_cash_flow`, `ttm_capex`, `ttm_free_cash_flow`, `ttm_stock_based_compensation` | The sum of four *consecutive* quarters (`primitives.trailing_twelve_months`) or nothing — a missing middle quarter, or a half-yearly reporter, gets no TTM. All `ttm_` figures share one window. |
+| Which twelve months a ratio used | `earnings_window`, `cash_flow_window` (`StatementWindow`) | Set by `apply_valuation`; `snap.trailing(name)` returns the trailing figure when it is newer than the fiscal year, else the fiscal-year one, with its window. |
+| Fiscal-year flows | `revenue`, `net_income`, `operating_cash_flow`, `capex`, `free_cash_flow`, `stock_based_compensation` | Absolute amounts in the reporting currency; capex is positive. |
+| Core earnings | `core_earnings_ratio_fy`, `core_earnings_ratio_ttm` | Yahoo's "Normalized Income" ÷ net income for that window. Only where Yahoo publishes it — SEC frames and screener have no such row, so the ratio is absent there, never assumed to be 1. |
+| Latest quarters | `quarterly_dates`, `quarterly_revenue`, `quarterly_pat`, `quarterly_operating_margin`, `latest_yoy_revenue_growth`, `latest_yoy_pat_growth` | Newest first, aligned across series; year-on-year is matched by date (`change_by_date`), never by position. |
+| Balance sheet, a year on | `balance_sheet_date`, `debt_change_1y_pct`, `latest_debt_to_equity`, `debt_to_equity_1y_ago`, `receivables_change_1y_pct`, `inventory_change_1y_pct`, `goodwill_change_1y_pct`, `latest_goodwill_to_equity`, `share_count_change_1y_pct` | The latest quarterly balance sheet against the one a year earlier (the annual ones when there are no quarters). The share-count change is skipped across a stock split. |
+| Long trends | `sales_annual_trend`, `net_profit_annual_trend`, `operating_margin_annual_trend`, `net_margin_annual_trend`, `roce_annual_trend` | Oldest first. Yahoo has four fiscal years; SEC extends US filers to ten; screener gives Indian listings about twelve. |
+
+SEC in the live path: `FundamentalsSource(sec_user_agent=…)` fetches
+SEC's annual frames for US filers and uses them **only** for the long
+trends — a current ratio never comes from SEC. The source tag reads
+`yfinance+sec`.
+
+SEC history follows the registrant, not the ticker. A company that
+reorganised under a new registrant starts over there — Alphabet in 2015,
+Broadcom in 2018 — and one that has just done so has no annual facts at
+all until its first 10-K (ExxonMobil Holdings in 2026: 19 fiscal years
+sit under the old registrant, none under the new). SEC publishes no link
+between the two, so the gap is logged and Yahoo's four years are used;
+it is never bridged with a hardcoded identifier.
+
+## News
+
+`NewsSource.fetch_for_company(name)` runs one exact-phrase Google News
+query. The raw feed is mostly noise, so before anything reads it:
+
+- quote pages, chart pages and 13F filing spam are dropped
+  (`_NOISE_PATTERN`);
+- syndicated copies of one headline are merged into one story whose
+  `coverage` counts the outlets that carried it;
+- the publisher's name is taken from the feed and stripped from the
+  headline, dates are ISO, stories are newest first;
+- each story is tagged with a `NewsCategory` by keywords matched at
+  word starts, in severity order. `RATING` means credit ratings only —
+  a broker's upgrade or downgrade is opinion, not a rating action.
+
+`digest(stories)` counts the last seven days' stories per category
+(`NewsDigest`: total stories, and per category the count, the most
+widely carried headline and its outlet count). Those counts are the
+facts behind the governance and credit-rating early signals; judging
+what the stories mean is Claude's job in `/analyse-stock`.
 
 ## The global universe (screening)
 
@@ -118,8 +186,22 @@ this live in the root `backtests/` folder.
   pair TTM with annual or FY profit with half-year assets.
 - **One definition per metric.** Interest coverage is core operating
   EBIT / interest on both sources (screener: operating profit −
-  depreciation; yfinance: Operating Income). Negative coverage is kept —
-  a core operating loss is known-bad, not missing.
+  depreciation; yfinance: Operating Income — never Yahoo's "EBIT" row,
+  which carries investment gains and other income). Negative coverage is
+  kept — a core operating loss is known-bad, not missing.
+- **Known-bad is not unknown.** A profit that turned into a loss has no
+  growth rate, so `cagr_pct(..., wiped_out_counts=True)` returns
+  `PROFIT_WIPED_OUT_CAGR` (−100%) instead of nothing; a loss that
+  narrowed or a profit from a loss stays unknown. Negative equity is
+  kept on the snapshot so the scorer can say so.
+- **One trailing window.** When screener supplies the trailing twelve
+  months, yfinance's sums over a different window are dropped
+  (`_keep_one_trailing_window`) — a ratio never divides one source's
+  twelve months by another's.
+- **One currency per merge.** Screener's statements are in rupees. When
+  Yahoo reports the same company in another currency (Infosys files in
+  dollars), yfinance's absolute amounts are dropped and only its ratios
+  kept (`_in_screeners_currency`).
 - **Quarterly series stay aligned.** A quarter is kept only when every
   series has it, and YoY growth is matched by date, not position.
 - **Disagreements are recorded, not hidden.** When both adapters answer

@@ -16,10 +16,11 @@ and downstream code works with typed `ExtendedScore` objects.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from scorers.base import Gate, Pillar, StockScore, Verdict
+from scorers.early_signals import EarlySignal
 
 if TYPE_CHECKING:
     from fundamental_engine.analyse_pipeline import AnalysisResult
@@ -54,6 +55,10 @@ class ExtendedScore:
     # "earnings still growing while the price fell" without a re-fetch.
     latest_yoy_revenue_growth: float | None = None
     latest_yoy_pat_growth: float | None = None
+    # Concerns and strengths found at refresh time — `brief`, `pick` and
+    # `screen` show them without a re-fetch, and the next refresh diffs
+    # against them to say what is new.
+    early_signals: list[EarlySignal] = field(default_factory=list)
 
     # ── Constructors ────────────────────────────────────────────────────────
 
@@ -79,6 +84,7 @@ class ExtendedScore:
             fx_rate_to_base=fx_rate_to_base,
             latest_yoy_revenue_growth=snap.latest_yoy_revenue_growth,
             latest_yoy_pat_growth=snap.latest_yoy_pat_growth,
+            early_signals=list(result.early_signals),
         )
 
     @classmethod
@@ -141,6 +147,7 @@ class ExtendedScore:
                 data.get("latest_yoy_revenue_growth")
             ),
             latest_yoy_pat_growth=_optional_float(data.get("latest_yoy_pat_growth")),
+            early_signals=_parse_early_signals(data.get("early_signals")),
         )
 
     # ── Serialization ───────────────────────────────────────────────────────
@@ -171,6 +178,7 @@ class ExtendedScore:
                 "fx_rate_to_base": self.fx_rate_to_base,
                 "latest_yoy_revenue_growth": self.latest_yoy_revenue_growth,
                 "latest_yoy_pat_growth": self.latest_yoy_pat_growth,
+                "early_signals": [signal.to_dict() for signal in self.early_signals],
             }
         )
         return d
@@ -211,6 +219,14 @@ def _as_str(v: object, *, default: str) -> str:
     if isinstance(v, str):
         return v or default
     return str(v)
+
+
+def _parse_early_signals(raw: object) -> list[EarlySignal]:
+    """A JSON list of early-signal rows; rows that don't fit are skipped, not fatal."""
+    if not isinstance(raw, list):
+        return []
+    parsed = (EarlySignal.from_dict(row) for row in raw if isinstance(row, dict))
+    return [signal for signal in parsed if signal is not None]
 
 
 def _parse_gates(raw: object) -> list[Gate]:

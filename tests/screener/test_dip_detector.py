@@ -122,7 +122,7 @@ def test_blocked_ticker_short_circuits():
         score=_score(), prices=_prices(), blocked_tickers={"TEST"}
     )
     assert not check.qualifies
-    assert any("RED_FLAG" in r for r in check.reasons)
+    assert any("integrity veto" in r for r in check.reasons)
 
 
 def test_earnings_divergence_upgrades_severity_to_urgent():

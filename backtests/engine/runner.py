@@ -9,6 +9,14 @@ and records the total return over the next period.
 The dip gate's quality bar is the deterministic composite (fundamentals +
 valuation at their live relative weights): Claude's qualitative pillars
 have no history to replay.
+
+Each observation also records the early signals the past snapshot shows.
+What can fire there is what the history can replay: the signals built on
+fiscal-year statements for every listing (a margin above its own median,
+debt or goodwill jumping year on year, negative equity, the share count
+where the source reports it), plus the quarterly and shareholding signals
+for Indian listings over the three or so years screener publishes. News,
+price-drawdown and trailing-cash-flow signals never fire in a backtest.
 """
 
 from __future__ import annotations
@@ -27,11 +35,13 @@ from data_sources.fundamentals_source.history import (
 )
 from data_sources.price_series import PriceSeries
 from scorers.base import StockScore, verdict_for
+from scorers.early_signals import Tone, detect_early_signals, of_tone
 from scorers.fundamentals_scorer import score_fundamentals
 from scorers.fundamentals_scorer.industrial import growth_deceleration_cap
-from scorers.valuation_scorer import score_valuation
+from scorers.valuation_scorer import score_valuation, sustainable_earnings
 from screener.dip_detector import check_dip
 from screener.price_history import snapshot_from_closes
+from signals.signal_bus import Severity
 
 # The qualitative pillars have no history; the dip gate never reads them.
 UNKNOWN_PILLAR_SCORE = 50.0
@@ -95,6 +105,12 @@ def run_backtest(
 def _observe(snap: BalanceSheetSnapshot, as_of: date, forward_return_pct: float | None) -> Observation:
     fundamentals = score_fundamentals(snap)
     valuation = score_valuation(snap)
+    # The statement-age signal is about today's cache, not about a past date.
+    material = [
+        signal
+        for signal in detect_early_signals(snap, today=as_of)
+        if signal.severity is not Severity.INFO
+    ]
     return Observation(
         ticker=snap.ticker,
         as_of=as_of,
@@ -105,6 +121,9 @@ def _observe(snap: BalanceSheetSnapshot, as_of: date, forward_return_pct: float 
         forward_return_pct=forward_return_pct,
         slow_growth=growth_deceleration_cap(snap) is not None,
         earnings_yield=snap.earnings_yield,
+        peak_margin=sustainable_earnings(snap).above_cycle,
+        material_concerns=len(of_tone(material, Tone.CONCERN)),
+        material_strengths=len(of_tone(material, Tone.STRENGTH)),
     )
 
 
