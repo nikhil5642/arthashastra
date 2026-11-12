@@ -94,6 +94,14 @@ def score(snap: BalanceSheetSnapshot) -> ScorerResult:
 
     total_weight = sum(w for _, _, w in components)
     weighted = sum(s * w for _, s, w in components) / total_weight
+    scored = {name for name, _, _ in components}
+    missing = [name for name in IndustrialComponent if name not in scored]
+    if missing:
+        # Unknown is not good: say what the score does not rest on.
+        evidence.append(
+            f"Not scored for lack of data ({100 - total_weight}% of the rubric): "
+            + ", ".join(name.value.replace("_", " ") for name in missing)
+        )
     result_score = round(weighted, 1)
 
     result_score = _apply_pledge_veto(snap, result_score, evidence)

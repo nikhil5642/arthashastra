@@ -580,3 +580,12 @@ def test_profit_that_turned_into_a_loss_fires_the_growth_veto():
     # Unknown PAT growth (a loss that became a profit) still can't fire the veto.
     unknown = score_fundamentals(_snap(**strong_balance_sheet, rev_3y_cagr=1.5))
     assert unknown.score > 50.0
+
+
+def test_components_left_out_for_lack_of_data_are_named():
+    from data_sources.fundamentals_source import BalanceSheetSnapshot
+    from scorers.fundamentals_scorer import score_fundamentals
+
+    thin = BalanceSheetSnapshot(ticker="THIN", as_of_date="2026-11-12", roe=22.0, roce=25.0)
+    line = next(e for e in score_fundamentals(thin).evidence if e.startswith("Not scored"))
+    assert "growth" in line and "earnings quality" in line and "profitability" not in line
