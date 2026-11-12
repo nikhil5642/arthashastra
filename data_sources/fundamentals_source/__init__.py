@@ -28,6 +28,7 @@ from data_sources.fundamentals_source.snapshot import (
     StatementWindow,
     is_bank_snapshot,
     is_financial_label,
+    is_insurer_label,
 )
 from data_sources.fundamentals_source.source import (
     FetchResult,
@@ -57,6 +58,7 @@ __all__ = [
     "change_by_date",
     "is_bank_snapshot",
     "is_financial_label",
+    "is_insurer_label",
     "latest_yoy_growth",
     "pct_change_by_date",
     # Transport constants

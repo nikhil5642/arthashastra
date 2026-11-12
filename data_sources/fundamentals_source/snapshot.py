@@ -76,6 +76,12 @@ def is_financial_label(text: str) -> bool:
     return any(keyword in lowered for keyword in _FINANCIAL_SECTOR_KEYWORDS)
 
 
+def is_insurer_label(text: str) -> bool:
+    """Does Yahoo's industry name mark an insurer (not a broker, which sells policies)?"""
+    lowered = text.lower()
+    return "insurance" in lowered and "broker" not in lowered
+
+
 def is_bank_snapshot(snap: "BalanceSheetSnapshot") -> bool:
     """Should this snapshot be scored on the bank rubric?
 

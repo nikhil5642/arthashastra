@@ -111,8 +111,25 @@ fundamentals score.
   leadership.
 - **Growth-deceleration VETO** (`VETO: 3y growth decelerating ...`) —
   the company is in the slow bucket and every later anchor caps harder.
-- **Rubric.** "Bank rubric applied" means a bank / lender / insurer;
-  CASA / CRAR (capital adequacy) are never in the data — verify them.
+- **Rubric.** "Bank rubric applied" means a bank or lender; CASA / CRAR
+  (capital adequacy) are never in the data — verify them. "Insurer, scored
+  on the bank rubric" means the score rests on ROE, ROA, profit growth and
+  governance only: what makes or breaks an insurer is not in it. Before
+  scoring prospects, read the latest annual report for:
+  - **combined ratio** (claims + expenses ÷ premiums) over several years —
+    above 100% the insurer loses money on underwriting and lives on its
+    investment income;
+  - **reserve development** — releases from prior years flatter today's
+    profit; repeated strengthening means past profits were overstated;
+  - **solvency ratio** (Solvency II, RBC, or the local equivalent) against
+    the regulator's minimum and the company's own target;
+  - **catastrophe exposure** — a reinsurer's ROE in a quiet catastrophe year
+    is not repeatable: judge it on an average year, not the last one;
+  - **investment portfolio** — credit quality and duration against the
+    liabilities.
+  The bank ROA curve flatters an insurer (3–6% is ordinary for one), so do
+  not read a 100 on ROA as excellence. If you could not check the items
+  above, say so and keep prospects ≤ 60.
 - **Multi-year trend** (ROCE / operating margin / borrowings, where
   history exists) — a 15% ROE that was 25% three years ago is a
   different story from one that was 10%. Factor direction into prospects.

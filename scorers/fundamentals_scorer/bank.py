@@ -29,7 +29,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from enum import StrEnum
 
-from data_sources.fundamentals_source import PROFIT_WIPED_OUT_CAGR, BalanceSheetSnapshot
+from data_sources.fundamentals_source import (
+    PROFIT_WIPED_OUT_CAGR,
+    BalanceSheetSnapshot,
+    is_insurer_label,
+)
 from scorers.base import Pillar, ScorerResult
 from scorers.fundamentals_scorer import ownership
 
@@ -57,6 +61,16 @@ _COMPONENT_WEIGHTS: dict[BankComponent, int] = {
     BankComponent.GOVERNANCE: 10,
 }
 
+def _label(component: BankComponent) -> str:
+    """'asset quality' for BankComponent.ASSET_QUALITY."""
+    return component.value.removeprefix("bank_").replace("_", " ")
+
+
+# Axes built on a loan book and deposits — an insurer has neither.
+_NOT_FOR_INSURERS: frozenset[BankComponent] = frozenset(
+    {BankComponent.ASSET_QUALITY, BankComponent.FRANCHISE}
+)
+
 
 # ── Public entry point ───────────────────────────────────────────────────────
 
@@ -83,12 +97,23 @@ def score(snap: BalanceSheetSnapshot) -> ScorerResult:
     total_weight = sum(w for _, _, w in components)
     weighted = sum(s * w for _, s, w in components) / total_weight
     scored = {name for name, _, _ in components}
+    insurer = is_insurer_label(snap.industry or "")
     missing = [name for name in BankComponent if name not in scored]
-    if missing:
+    # An insurer has no loan book and takes no deposits: those axes do not
+    # apply, which is not the same as data being missing.
+    inapplicable = [name for name in missing if insurer and name in _NOT_FOR_INSURERS]
+    unknown = [name for name in missing if name not in inapplicable]
+    if inapplicable:
+        evidence.append(
+            f"Do not apply to an insurer ({sum(_COMPONENT_WEIGHTS[n] for n in inapplicable)}% "
+            f"of the rubric): " + ", ".join(_label(name) for name in inapplicable)
+            + " — the score rests on the rest, which is not the same as a complete picture."
+        )
+    if unknown:
         # Unknown is not good: say what the score does not rest on.
         evidence.append(
-            f"Not scored for lack of data ({100 - total_weight}% of the rubric): "
-            + ", ".join(name.value.replace("_", " ") for name in missing)
+            f"Not scored for lack of data ({sum(_COMPONENT_WEIGHTS[n] for n in unknown)}% of "
+            f"the rubric): " + ", ".join(_label(name) for name in unknown)
         )
     result_score = round(weighted, 1)
 
@@ -97,7 +122,15 @@ def score(snap: BalanceSheetSnapshot) -> ScorerResult:
         "+ franchise 15% + governance 10%). CASA / CRAR are not exposed by the "
         "data sources — check funding mix and capital adequacy manually."
     )
-    if not any(name == BankComponent.ASSET_QUALITY for name, _, _ in components):
+    if insurer:
+        header = (
+            "Insurer, scored on the bank rubric's profitability, growth and governance "
+            "axes: NPAs and the credit-deposit ratio do not apply. Underwriting (combined "
+            "ratio), reserve development and solvency are not in the data sources — weigh "
+            "them in the judgment. An insurer's ROA runs above a bank's, so the bank ROA "
+            "curve flatters it."
+        )
+    elif not any(name == BankComponent.ASSET_QUALITY for name, _, _ in components):
         header += (
             " No GNPA / NNPA data for this lender — asset quality is unscored "
             "and must be verified manually before trusting the verdict."

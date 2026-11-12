@@ -477,7 +477,7 @@ def test_insurer_without_a_current_ratio_split_uses_the_bank_rubric():
         roe=16.0, roa=1.4, pat_3y_cagr=14.0,
     )
     result = score_fundamentals(snap)
-    assert any("Bank rubric" in ev for ev in result.evidence)
+    assert any("bank rubric" in ev.lower() for ev in result.evidence)
 
 
 # ── Bank asset quality ────────────────────────────────────────────────────────
@@ -589,3 +589,28 @@ def test_components_left_out_for_lack_of_data_are_named():
     thin = BalanceSheetSnapshot(ticker="THIN", as_of_date="2026-11-12", roe=22.0, roce=25.0)
     line = next(e for e in score_fundamentals(thin).evidence if e.startswith("Not scored"))
     assert "growth" in line and "earnings quality" in line and "profitability" not in line
+
+
+
+def test_an_insurer_is_told_which_bank_axes_do_not_apply_not_that_data_is_missing():
+    from data_sources.fundamentals_source import BalanceSheetSnapshot
+    from scorers.fundamentals_scorer import score_fundamentals
+
+    reinsurer = BalanceSheetSnapshot(
+        ticker="HNR1.DE", as_of_date="2026-11-13", sector="Financial Services",
+        industry="Insurance - Reinsurance", roe=20.4, roa=3.7, pat_3y_cagr=12.0,
+    )
+    result = score_fundamentals(reinsurer)
+    text = " | ".join(result.evidence)
+    assert "Insurer, scored on the bank rubric" in text and "combined ratio" in text
+    assert "Do not apply to an insurer (40% of the rubric): asset quality, franchise" in text
+    assert "No GNPA" not in text
+    # Governance had no ownership data: that one *is* missing, and says so.
+    assert "Not scored for lack of data (10% of the rubric): governance" in text
+    assert result.data_completeness_pct == 50.0  # inapplicable axes still count as not scored
+
+    bank = BalanceSheetSnapshot(ticker="BANK", as_of_date="2026-11-13", sector="Financial Services",
+                                industry="Banks - Regional", roe=15.0, roa=1.2)
+    bank_text = " | ".join(score_fundamentals(bank).evidence)
+    assert "No GNPA" in bank_text and "Not scored for lack of data" in bank_text
+    assert "insurer" not in bank_text.lower()
