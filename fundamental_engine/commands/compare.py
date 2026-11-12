@@ -74,7 +74,8 @@ def render_shortlist(console: Console, shortlist: Shortlist, *, base_currency: s
             "[dim]Volatility is the yearly swing of the share price and Traded / day what "
             "changes hands on an average day: risk is measured per company, not assumed from "
             "its size. Risk-adj. is Both less a discount for price swings, loss years and a "
-            "short record; it orders this list and changes no verdict.[/dim]"
+            "short record; it orders this list and changes no verdict. Scale is market cap as a "
+            "share of the largest company here.[/dim]"
         )
         console.print(
             "[dim]Ranked on the deterministic pillars. Leadership, prospects and news are "
@@ -99,7 +100,7 @@ def _table(shortlist: Shortlist, base_currency: str) -> Table:
         ("#", "right"), ("Ticker", "left"), ("Company", "left"), ("Country", "left"),
         ("Market cap", "right"), ("Volatility", "right"), ("Traded / day", "right"),
         ("Fundamentals", "right"), ("Valuation", "right"),
-        ("Both", "right"), ("Risk-adj.", "right"), ("Composite", "left"), ("Early signals", "left"),
+        ("Both", "right"), ("Risk-adj.", "right"), ("Scale", "right"), ("Composite", "left"), ("Early signals", "left"),
     ):
         table.add_column(column, justify=justify)
     for rank, card in enumerate(shortlist.cards, start=1):
@@ -116,6 +117,7 @@ def _table(shortlist: Shortlist, base_currency: str) -> Table:
             f"{card.valuation:.1f}" if card.valuation is not None else "[dim]unscored[/dim]",
             f"{card.both:.1f}",
             f"{card.risk_adjusted:.1f}",
+            f"{card.scale_vs_largest_pct:.3g}%" if card.scale_vs_largest_pct is not None else "—",
             _composite_cell(card),
             tally(card.early_signals) or "—",
         )

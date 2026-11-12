@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -226,8 +226,25 @@ async def score_tickers(
             )
             continue
         shortlist.cards.append(Scorecard.of(extended, reused=result is None))
+    shortlist.cards = _with_scale(shortlist.cards)
     shortlist.cards.sort(key=lambda card: card.rank_value(rank_by), reverse=True)
     return shortlist
+
+
+def _with_scale(cards: list[Scorecard]) -> list[Scorecard]:
+    """Each card's market cap as a share of the largest company scored beside it.
+
+    A screen replaces this with the share of the largest company it matched.
+    """
+    largest = max((card.market_cap_base or 0.0 for card in cards), default=0.0)
+    if largest <= 0:
+        return cards
+    return [
+        replace(card, scale_vs_largest_pct=round(card.market_cap_base / largest * 100, 3))
+        if card.market_cap_base
+        else card
+        for card in cards
+    ]
 
 
 def in_base_currency(extended: ExtendedScore, amount: float | None) -> float | None:

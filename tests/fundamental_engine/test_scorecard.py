@@ -197,3 +197,12 @@ def test_a_card_carries_measured_risk_in_the_base_currency():
 
     unknown = Scorecard.of(_extended("NEW", 80.0, 60.0), reused=False).to_dict()["risk"]
     assert unknown["volatility_1y_pct"] is None and unknown["traded_per_day_base"] is None
+
+
+def test_scale_is_each_company_against_the_largest_beside_it():
+    big, small, unknown = (Scorecard.of(_extended(t, 80.0, 60.0), reused=False) for t in "ABC")
+    big = scorecard.replace(big, market_cap_base=4_000.0)
+    small = scorecard.replace(small, market_cap_base=100.0)
+    scaled = scorecard._with_scale([big, small, unknown])
+    assert [card.scale_vs_largest_pct for card in scaled] == [100.0, 2.5, None]
+    assert scorecard._with_scale([unknown]) == [unknown]  # no size known, nothing claimed
