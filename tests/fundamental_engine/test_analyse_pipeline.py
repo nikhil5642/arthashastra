@@ -321,3 +321,15 @@ async def test_a_broken_news_feed_costs_only_the_news_signals(monkeypatch, tmp_p
     monkeypatch.setattr(news_source.NewsSource, "fetch_for_company", boom)
     result = await analyse_ticker("MSFT", data_cache_dir=tmp_path)
     assert result.score.composite > 0 and result.early_signals == []
+
+
+def test_no_data_says_the_symbol_may_have_changed(tmp_path):
+    """A retired symbol (Tata Motors after its demerger) should point to `resolve`, not just fail."""
+    import pytest
+    from data_sources.fundamentals_source import BalanceSheetSnapshot
+    from fundamental_engine.analyse_pipeline import NoDataError, score_snapshot
+
+    with pytest.raises(NoDataError) as raised:
+        score_snapshot(BalanceSheetSnapshot(ticker="TATAMOTORS.NS", as_of_date="2026-11-13"),
+                       data_cache_dir=tmp_path)
+    assert "TATAMOTORS.NS" in str(raised.value) and "resolve" in str(raised.value)

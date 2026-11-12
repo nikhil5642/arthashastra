@@ -105,7 +105,11 @@ def score_snapshot(
 ) -> AnalysisResult:
     """Pure scoring — no network. Use when the caller already has a snapshot."""
     if snap.data_completeness_pct == 0.0:
-        raise NoDataError(f"No fundamentals data for {snap.ticker}")
+        raise NoDataError(
+            f"No fundamentals data for {snap.ticker}. If the company still trades, its symbol "
+            f"may have changed (a merger, demerger or rename) — `resolve \"<company name>\"` "
+            f"finds the current one."
+        )
 
     judgment = JudgmentStore(data_cache_dir).get(snap.ticker)
     age_days = judgment.age_days if judgment else None

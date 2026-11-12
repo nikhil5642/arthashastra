@@ -131,11 +131,15 @@ to fix; if any is the neutral prior, that is a data bug.
   Check whether that is the dip gates being strict (fine) or the new
   volatility sizing / verdict filter removing everything (not fine); the
   message blames a cold cache, which is not the reason here.
-- **`TATAMOTORS.NS` → no_data** (the company demerged and its symbols
-  changed). The not-scored line could suggest `resolve` for a ticker Yahoo
-  no longer knows.
-- **Volatility unknown** for `GOKEX.BO` and `SPCX`: expected for SPCX (five
-  months listed); check why a long-listed `.BO` stock has under 120 closes.
+- ~~**`TATAMOTORS.NS` → no_data**~~ **Done:** a no-data result now says the
+  symbol may have changed and points to `resolve`.
+- ~~**Volatility unknown** for `GOKEX.BO`~~ **Done:** Yahoo holds one close
+  for GOKEX.BO (twenty years for GOKEX.NS) and dates the BSE symbol's first
+  trade to 2026, so the stock also carried a false "listed about 1 month
+  ago" alert. The `RECENTLY_LISTED` message now states the record ("under a
+  month of trading on record for this listing") and both readings. The
+  screen's one-listing-per-company rule already prefers the most traded
+  listing; GOKEX.NS was simply not among that screen's matches.
 - **Scored size mix leans large** at `--score 8` (software 5/3/0, pharma
   6/2/0, gold 4/2/0 large/mid/small). At the default `--score 25` this was
   balanced on two industries; re-check on these three before concluding

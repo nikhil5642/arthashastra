@@ -861,17 +861,30 @@ def _stale_statements(facts: _Facts) -> EarlySignal | None:
 
 
 def _recently_listed(facts: _Facts) -> EarlySignal | None:
+    """Under a year of trading on record for this listing.
+
+    That is a new listing — or a symbol the price source holds little history
+    for while the company trades longer elsewhere (Yahoo has one close for
+    GOKEX.BO and twenty years for GOKEX.NS, and dates the BSE symbol's first
+    trade to 2026). The data cannot tell the two apart, so the message states
+    the record and both readings, never "listed N months ago".
+    """
     years = facts.snap.price_history_years
     if years is None or years >= RECENT_LISTING_YEARS:
         return None
-    months = max(1, round(years * 12))
+    months = round(years * 12)
+    record = (
+        "Under a month of trading" if months < 1
+        else f"Only {months} month{'s' if months != 1 else ''} of trading"
+    )
     return _concern(
         EarlySignalKind.RECENTLY_LISTED,
         Severity.ALERT,
-        f"Listed about {months} month{'s' if months != 1 else ''} ago: the 52-week range, the "
-        f"measured volatility and the worst fall cover only that period, and there is no P/E "
-        f"history to compare with. Insiders' lock-up periods usually end within the first "
-        f"year — check the prospectus for the date.",
+        f"{record} on record for this listing. If the company listed recently, the 52-week "
+        f"range, measured volatility and worst fall cover only that stretch, there is no P/E "
+        f"history, and insiders' lock-ups usually end within the first year — check the "
+        f"prospectus. If it has traded longer under another symbol, read that listing: the "
+        f"risk figures here are then missing, not low.",
     )
 
 

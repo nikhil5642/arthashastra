@@ -398,9 +398,12 @@ def test_stale_statements_and_receipts():
 def test_a_listing_under_a_year_old_is_named():
     recent = only(snap(price_history_years=0.42), EarlySignalKind.RECENTLY_LISTED)
     assert (recent.tone, recent.severity) == (Tone.CONCERN, Severity.ALERT)
-    assert "Listed about 5 months ago" in recent.message
+    assert "Only 5 months of trading on record for this listing" in recent.message
     assert "no P/E history" in recent.message and "lock-up" in recent.message
-    assert "1 month ago" in only(snap(price_history_years=0.01), EarlySignalKind.RECENTLY_LISTED).message
+    # A long-listed company whose symbol the price source barely covers: no claim of a new listing.
+    gap = only(snap(price_history_years=0.0), EarlySignalKind.RECENTLY_LISTED).message
+    assert gap.startswith("Under a month of trading on record") and "another symbol" in gap
+    assert "Listed about" not in gap
     assert kinds(snap(price_history_years=1.0)) == {}
     assert kinds(snap(price_history_years=None)) == {}  # unknown is not a signal
 

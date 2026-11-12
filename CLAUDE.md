@@ -721,9 +721,12 @@ against the fiscal year (free cash flow, capex, stock pay), the latest
 balance sheet against the one a year back (debt, receivables, inventory,
 goodwill, share count), the ownership tape (insiders, foreign
 institutions, retail), bank NPAs, the price against its 52-week high,
-how long the price record is (under a year of trading is
-`RECENTLY_LISTED`: every price-based measure covers only that stretch and
-the insiders' lock-up has usually not ended), and a week of headlines (`news_source.digest`): a governance burst is
+how long the price record is (under a year of trading on record for the
+listing is `RECENTLY_LISTED`: a new listing, whose price-based measures
+cover only that stretch and whose lock-ups may not have ended — or a
+symbol the price source barely covers while the company trades longer
+elsewhere, whose risk figures are then missing, not low; the data cannot
+tell the two apart, so the message states the record and both readings), and a week of headlines (`news_source.digest`): a governance burst is
 several governance-tagged stories AND ≥ 15% of the week's coverage — or,
 for a company few outlets cover, two or more stories that are half of
 everything written about it (story counts scale with fame; the share
