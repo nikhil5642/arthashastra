@@ -66,7 +66,11 @@ Then branch:
 ## Step 2 — Read the prospectus and transcribe the statements
 
 Fetch `latest_prospectus.url` with the web fetch tool (Python does not
-fetch the document; SEC refuses its generic client). A prospectus is
+fetch the document; SEC refuses its generic client). A large prospectus
+(over 10 MB) is refused by the fetch tool for its size: download it to the
+scratchpad instead with `curl` and a generic browser-style User-Agent —
+never a person's name or email — strip the HTML to text, and search that
+file for the sections below rather than reading it whole. A prospectus is
 long: find "Summary consolidated financial data", the audited
 consolidated statements of operations, balance sheets and cash flows,
 "Use of proceeds", "Principal and selling stockholders", "Shares eligible
@@ -134,7 +138,12 @@ Rules for the file:
 - **Pro forma:** when preferred stock converts at listing, use the
   prospectus's pro forma balance sheet for the latest year (the as-reported
   one shows the preferred outside equity) and say so in `notes`. Never mix
-  pro forma and as-reported figures without a note.
+  pro forma and as-reported figures without a note. When the only pro
+  forma balance sheet is at an interim date, keep the audited year-end
+  figures in the file — an interim balance sheet beside full-year flows
+  breaks "one period per ratio" — and put the pro forma equity in `notes`
+  and in your answer: the negative-equity score and signal are then an
+  artefact of the preferred stock, and you must say so.
 - **Leave a line out rather than guess.** A missing line stays unknown and
   drops out of the score; a guessed one is a fabricated number.
 - **`offering`** only from the prospectus: the range on the cover once it
@@ -182,8 +191,12 @@ the prospectus:
 - **Related-party dealings.** Leases, loans, supply or services with
   insiders or their companies; an unexplained one lowers integrity.
 - **Short or restated audited history.** A restatement, a material
-  weakness, or a change of auditor is the integrity veto (step 8, anchor
-  1) exactly as for a listed company. Two audited years is a thin record:
+  weakness, an auditor's resignation or a qualified opinion is the
+  integrity veto (step 8, anchor 1) exactly as for a listed company. A
+  change of auditor before listing is not by itself the veto: read the
+  filing's "change in accountants" section — reported disagreements or
+  reportable events make it one; none reported is a point to name in
+  `red_flags`, not a gate. Two audited years is a thin record:
   say so, score what exists (step 7.5).
 
 **Prospects**
@@ -193,7 +206,10 @@ the prospectus:
   customer or one supplier carrying the business → the position-risk
   anchor applies.
 - **Cash burn against cash raised.** For a loss-maker: months of runway
-  = (cash after the offering) ÷ (yearly operating cash burn + capex) × 12.
+  = (cash after the offering) ÷ (yearly operating cash burn + capex +
+  purchase commitments due in the next twelve months, from the
+  contractual-obligations table) × 12. Past burn alone understates what
+  a company with large committed spend will consume.
   Under 24 months, the listing is funding survival, not growth → prospects
   ≤ 55 unless the path to positive cash flow is in the audited trend.
 - **Revenue quality.** One-off contracts, revenue from related parties,

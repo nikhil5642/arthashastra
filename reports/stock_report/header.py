@@ -12,7 +12,7 @@ from rich.panel import Panel
 from data_sources.fundamentals_source import BalanceSheetSnapshot, is_bank_snapshot
 from reports.formatting import format_money, format_price
 from scorers.base import StockScore
-from scorers.risk_profile import risk_profile
+from scorers.risk_profile import risk_discount, risk_profile
 from scorers.valuation_scorer import sustainable_earnings
 
 
@@ -39,8 +39,11 @@ def header_panel(snap: BalanceSheetSnapshot, score: StockScore) -> Panel:
         lines.append("Valuation: " + "  ·  ".join(valuation_parts))
 
     risk_parts = risk_parts_for(snap)
-    if risk_parts:
-        lines.append("Risk, measured: " + "  ·  ".join(risk_parts))
+    discount = risk_discount(risk_profile(snap))
+    lines.append(
+        "Risk, measured: " + ("  ·  ".join(risk_parts) or "nothing measurable yet")
+        + f"  ·  {discount:.1f} points off when ranked against others"
+    )
 
     analyst_parts = analyst_parts_for(snap)
     if analyst_parts:

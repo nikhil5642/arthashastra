@@ -134,7 +134,7 @@ def pending_judgment(pillar: Pillar | str) -> ScorerResult:
         confidence=0.0,
         evidence=[
             f"{pillar_enum.value} pillar pending Claude judgment — "
-            f"run /analyse-stock in Claude Code to generate it."
+            f"run /analyse-stock (or /analyse-ipo before listing) in Claude Code to generate it."
         ],
         data_completeness_pct=PENDING_COMPLETENESS_PCT,
     )
