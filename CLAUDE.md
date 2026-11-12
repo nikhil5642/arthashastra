@@ -536,7 +536,7 @@ callers get IDE autocomplete and exhaustive iteration.
 | `SizeBand`            | `fundamental_engine/commands/screen.py`            | LARGE · MID · SMALL (thirds of a screen's companies, by market cap) |
 | `Order`               | `fundamental_engine/commands/screen.py`            | PREVIEW · SIZE_SPREAD (too many to preview) · AS_SORTED |
 | `RankBy`              | `fundamental_engine/scorecard.py`                  | FUNDAMENTALS · VALUATION · BOTH · RISK_ADJUSTED (the default: both less `risk_discount`) |
-| `IpoStage`            | `data_sources/ipo_source.py`                       | DRAFT · FILED · PRICED · TRADING (read off the SEC filing list) |
+| `IpoStage`            | `data_sources/ipo_source.py`                       | DRAFT · FILED · PRICED · TRADING · WITHDRAWN (read off the SEC filing list) |
 | `StatementRow`        | `data_sources/fundamentals_source/prospectus.py`   | REVENUE · COST_OF_REVENUE · … · LONG_TERM_DEBT · CURRENT_DEBT (the lines a prospectus file may carry) |
 | `Measure`             | `data_sources/universe_source.py`                  | RETURN_ON_EQUITY · RETURN_ON_CAPITAL · RETURN_ON_ASSETS · DEBT_TO_EQUITY · CURRENT_RATIO · QUICK_RATIO · REVENUE_GROWTH · PROFIT_GROWTH (ratios the screener can be asked about) |
 | `Step`                | `backtests/engine/schedule.py`                     | YEAR · QUARTER |

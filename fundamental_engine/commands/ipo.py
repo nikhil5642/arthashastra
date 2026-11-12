@@ -37,6 +37,7 @@ from data_sources import ipo_source
 from data_sources.fundamentals_source import BalanceSheetSnapshot
 from data_sources.fundamentals_source.prospectus import (
     ProspectusStatements,
+    missing_lines,
     snapshot_from_prospectus,
 )
 from data_sources.ipo_source import IpoRegistration, IpoStage, Registrant
@@ -56,6 +57,7 @@ _STAGE_WORDS: dict[IpoStage, str] = {
     IpoStage.FILED: "filed publicly — a prospectus is on file, not priced yet",
     IpoStage.PRICED: "priced — the final prospectus is filed; trading usually starts within days",
     IpoStage.TRADING: "already trading",
+    IpoStage.WITHDRAWN: "registration withdrawn — no offering is on file now",
 }
 
 
@@ -69,6 +71,7 @@ class _Lookup:
     statements_path: Path  # where the statements are, or where /analyse-ipo should write them
     statements: ProspectusStatements | None
     statements_unreadable: bool = False
+    sec_answered: bool = True  # False: the search failed, so "nothing found" can't be claimed
 
 
 def run_ipo_command(name: str, *, offer_price: float | None = None, as_json: bool = False) -> int:
@@ -94,13 +97,14 @@ def run_ipo_command(name: str, *, offer_price: float | None = None, as_json: boo
 
 
 def _look_up(query: str, cfg: AnalystConfig) -> _Lookup:
-    async def fetch() -> tuple[list[Registrant], IpoRegistration | None]:
+    async def fetch() -> tuple[list[Registrant] | None, IpoRegistration | None]:
         found = await ipo_source.find_registrants(query, user_agent=cfg.sec_user_agent)
         if not found:
-            return [], None
+            return found, None
         return found, await ipo_source.fetch_registration(found[0].cik, user_agent=cfg.sec_user_agent)
 
-    registrants, registration = asyncio.run(fetch())
+    answer, registration = asyncio.run(fetch())
+    registrants = answer or []
     registered_name = (
         registration.name if registration else registrants[0].name if registrants else ""
     )
@@ -114,6 +118,7 @@ def _look_up(query: str, cfg: AnalystConfig) -> _Lookup:
         statements_path=path,
         statements=statements,
         statements_unreadable=path.exists() and statements is None,
+        sec_answered=answer is not None,
     )
 
 
@@ -132,7 +137,8 @@ def _score(
         return None, ""
     snap = snapshot_from_prospectus(lookup.statements, as_of=date.today(), offer_price=offer_price)
     if snap is None:
-        return None, "the statements file has no fiscal year that can be scored"
+        missing = ", ".join(row.value for row in missing_lines(lookup.statements))
+        return None, f"no ratio can be worked out from it — the newest fiscal year lacks {missing}"
     try:
         return score_snapshot(snap, data_cache_dir=cache_dir), ""
     except NoDataError as e:
@@ -150,6 +156,11 @@ def _render_registration(console: Console, lookup: _Lookup) -> None:
             console.print(
                 f"[yellow]SEC lists {first.name} (CIK {first.cik}) as a registrant, but did not "
                 f"return its filing list — try again later.[/yellow]"
+            )
+        elif not lookup.sec_answered:
+            console.print(
+                f"[yellow]SEC did not answer the search for {lookup.query} — nothing can be "
+                f"said about whether it has filed. Try again in a minute.[/yellow]"
             )
         else:
             console.print(
@@ -258,6 +269,11 @@ def _transcription_note(
         "own past and the newest-quarter signals are UNKNOWN — not clean.",
         _valuation_basis(statements, snap, offer_price),
     ]
+    if snap.rev_3y_cagr is None and snap.pat_3y_cagr is None:
+        lines.append(
+            f"Growth is NOT scored: a three-year growth rate needs four fiscal years and the "
+            f"file has {len(statements.fiscal_years)}. The growth veto is silent here, not passed."
+        )
     return Panel("\n".join(lines), title="Prospectus figures", title_align="left",
                  border_style="yellow")
 
@@ -290,6 +306,7 @@ def _payload(
     found = lookup.statements is not None
     return {
         "query": lookup.query,
+        "sec_answered": lookup.sec_answered,
         "registration": lookup.registration.to_dict() if lookup.registration else None,
         "other_matches": [r.to_dict() for r in lookup.registrants[1:]],
         "statements_file": str(lookup.statements_path) if found else None,

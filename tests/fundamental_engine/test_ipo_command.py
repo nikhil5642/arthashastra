@@ -52,10 +52,10 @@ def cache(tmp_path: Path, monkeypatch) -> Path:
     return tmp_path
 
 
-def _sec(monkeypatch, registrants: list[Registrant], registration: IpoRegistration | None) -> list[str]:
+def _sec(monkeypatch, registrants: list[Registrant] | None, registration: IpoRegistration | None) -> list[str]:
     asked: list[str] = []
 
-    async def find(name: str, *, user_agent: str) -> list[Registrant]:
+    async def find(name: str, *, user_agent: str) -> list[Registrant] | None:
         assert user_agent and "@" not in user_agent
         asked.append(name)
         return registrants
@@ -102,6 +102,13 @@ def test_nothing_found_says_it_is_not_proof_of_not_filing(cache, capsys, monkeyp
     assert "bigco_ai.json" in out
 
 
+def test_a_failed_search_is_not_reported_as_nothing_found(cache, capsys, monkeypatch):
+    _sec(monkeypatch, None, None)
+    assert run_ipo_command("Bigco AI") == 0
+    out = capsys.readouterr().out
+    assert "SEC did not answer" in out and "no public registration statement" not in out
+
+
 def test_a_registrant_without_a_filing_list(cache, capsys, monkeypatch):
     _sec(monkeypatch, FOUND, None)
     assert run_ipo_command("fictional") == 0
@@ -130,6 +137,14 @@ def test_transcribed_statements_are_scored_and_labelled(cache, capsys, monkeypat
     assert "Fundamentals" in out  # the ordinary stock report follows
     assert "/analyse-ipo fictional labs" in out  # no judgment yet
     assert not (cache / "scores.json").exists() and not (cache / "signals.json").exists()
+
+
+def test_a_short_record_says_growth_is_not_scored(cache, capsys, monkeypatch):
+    _sec(monkeypatch, [], None)
+    _write(cache, "fictional", _statements())
+    assert run_ipo_command("fictional") == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "Growth is NOT scored" in out and "silent here, not passed" in out
 
 
 def test_the_query_slug_is_the_fallback_and_price_overrides_the_range(cache, capsys, monkeypatch):
@@ -161,7 +176,8 @@ def test_an_unreadable_or_unscorable_file_is_named(cache, capsys, monkeypatch):
     path.write_text(json.dumps({"company": "Thin", "currency": "USD", "fiscal_years": [
         {"fiscal_year_end": "2025-12-31", "revenue": 1}]}))
     assert run_ipo_command("fictional") == 0
-    assert "can't be scored" in capsys.readouterr().out
+    out = " ".join(capsys.readouterr().out.split())
+    assert "can't be scored" in out and "net_income" in out and "stockholders_equity" in out
 
 
 def test_json_shape_with_a_judgment(cache, capsys, monkeypatch):

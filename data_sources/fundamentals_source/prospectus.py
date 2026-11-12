@@ -192,6 +192,12 @@ class ProspectusStatements:
         }
 
 
+def missing_lines(statements: ProspectusStatements) -> list[StatementRow]:
+    """The statement lines the newest fiscal year does not carry."""
+    newest = statements.fiscal_years[0].values if statements.fiscal_years else {}
+    return [row for row in StatementRow if row not in newest]
+
+
 def snapshot_from_prospectus(
     statements: ProspectusStatements, *, as_of: date, offer_price: float | None = None
 ) -> BalanceSheetSnapshot | None:

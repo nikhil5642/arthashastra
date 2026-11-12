@@ -186,12 +186,12 @@ def test_entry_points_ask_sec_with_the_given_user_agent(monkeypatch):
     assert {agent for _, agent in calls} == {"research-tool/1.0"}
 
 
-def test_an_unanswered_request_finds_nothing(monkeypatch):
+def test_an_unanswered_request_is_not_an_empty_answer(monkeypatch):
     async def no_answer(url: str, user_agent: str) -> object | None:
         return None
 
     monkeypatch.setattr(ipo_source, "_get_json", no_answer)
-    assert asyncio.run(ipo_source.find_registrants("x", user_agent="ua")) == []
+    assert asyncio.run(ipo_source.find_registrants("x", user_agent="ua")) is None
     assert asyncio.run(ipo_source.fetch_registration(1, user_agent="ua")) is None
 
 
@@ -238,3 +238,25 @@ def _fake_client(response: _Response | Exception):
 def test_get_json_returns_the_body_or_none(monkeypatch, response, expected):
     monkeypatch.setattr(ipo_source.httpx, "AsyncClient", _fake_client(response))
     assert asyncio.run(ipo_source._get_json("https://example.test", "ua")) == expected
+
+
+def test_a_withdrawn_attempt_does_not_date_the_one_that_followed():
+    def registration(forms: list[str], days: list[str]) -> ipo_source.IpoRegistration:
+        parsed = ipo_source.parse_registration({
+            "cik": "42", "name": "Second Try Inc.", "tickers": [], "exchanges": [None],
+            "filings": {"recent": {"form": forms, "filingDate": days,
+                                   "accessionNumber": ["0000000042-26-000001"] * len(forms),
+                                   "primaryDocument": ["doc.htm"] * len(forms)}},
+        })
+        assert parsed is not None
+        return parsed
+
+    refiled = registration(["S-1/A", "S-1", "RW", "S-1/A", "S-1"],
+                           ["2026-04-20", "2026-04-01", "2025-06-01", "2024-11-01", "2024-09-30"])
+    assert refiled.stage is ipo_source.IpoStage.FILED and refiled.amendments == 1
+    assert refiled.first_public_filing is not None
+    assert refiled.first_public_filing.filed.isoformat() == "2026-04-01"
+    assert len(refiled.filings) == 5  # the whole timeline is still shown
+
+    gone = registration(["RW", "S-1"], ["2025-06-01", "2024-09-30"])
+    assert gone.stage is ipo_source.IpoStage.WITHDRAWN and gone.latest_prospectus is None

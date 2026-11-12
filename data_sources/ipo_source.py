@@ -47,6 +47,7 @@ _REGISTRATION_FORMS = ("S-1", "F-1")
 _DRAFT_FORMS = frozenset({"DRS", "DRS/A"})
 _PROSPECTUS_FORMS = frozenset({"S-1", "S-1/A", "F-1", "F-1/A"})
 _PRICED_FORMS = frozenset({"424B4", "424B1"})
+_WITHDRAWAL_FORMS = frozenset({"RW"})  # the company asked SEC to withdraw the registration
 # Reports only a company with listed shares files.
 _LISTED_COMPANY_FORMS = frozenset({"10-Q", "10-K", "20-F", "6-K"})
 
@@ -60,6 +61,7 @@ class IpoStage(StrEnum):
     FILED = "filed"  # a public prospectus, no final price yet
     PRICED = "priced"  # the priced prospectus is filed; trading starts within days
     TRADING = "trading"  # SEC lists an exchange, or the company files listed-company reports
+    WITHDRAWN = "withdrawn"  # the registration was withdrawn and nothing has been filed since
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,10 +100,22 @@ class IpoRegistration:
     reports_as_listed: bool = False
 
     @property
+    def current_filings(self) -> list[IpoFiling]:
+        """The filings of the live attempt: everything since the last withdrawal, newest first."""
+        current: list[IpoFiling] = []
+        for filing in self.filings:
+            if filing.form in _WITHDRAWAL_FORMS:
+                break
+            current.append(filing)
+        return current
+
+    @property
     def stage(self) -> IpoStage:
-        forms = {filing.form for filing in self.filings}
+        forms = {filing.form for filing in self.current_filings}
         if self.exchange or self.reports_as_listed:
             return IpoStage.TRADING
+        if not forms and self.filings:
+            return IpoStage.WITHDRAWN
         if forms & _PRICED_FORMS:
             return IpoStage.PRICED
         if forms & _PROSPECTUS_FORMS:
@@ -112,16 +126,16 @@ class IpoRegistration:
     def latest_prospectus(self) -> IpoFiling | None:
         """The newest full prospectus: the priced one if filed, else the latest amendment."""
         wanted = _PRICED_FORMS | _PROSPECTUS_FORMS
-        return next((filing for filing in self.filings if filing.form in wanted), None)
+        return next((filing for filing in self.current_filings if filing.form in wanted), None)
 
     @property
     def first_public_filing(self) -> IpoFiling | None:
-        public = [filing for filing in self.filings if filing.form in _PROSPECTUS_FORMS]
+        public = [filing for filing in self.current_filings if filing.form in _PROSPECTUS_FORMS]
         return public[-1] if public else None
 
     @property
     def amendments(self) -> int:
-        return sum(1 for filing in self.filings if filing.form in ("S-1/A", "F-1/A"))
+        return sum(1 for filing in self.current_filings if filing.form in ("S-1/A", "F-1/A"))
 
     def to_dict(self) -> dict[str, object]:
         latest, first = self.latest_prospectus, self.first_public_filing
@@ -143,10 +157,14 @@ class IpoRegistration:
 # ── Public entry points ──────────────────────────────────────────────────────
 
 
-async def find_registrants(name: str, *, user_agent: str) -> list[Registrant]:
-    """Companies whose name matches and that have a registration statement on file."""
+async def find_registrants(name: str, *, user_agent: str) -> list[Registrant] | None:
+    """Companies whose name matches and that have a registration statement on file.
+
+    None when SEC did not answer — which is not the same as an empty list.
+    """
     query = urlencode({"q": "", "entityName": name.strip(), "forms": ",".join(_REGISTRATION_FORMS)})
-    return parse_registrants(await _get_json(f"{SEC_ENTITY_SEARCH_URL}?{query}", user_agent))
+    payload = await _get_json(f"{SEC_ENTITY_SEARCH_URL}?{query}", user_agent)
+    return None if payload is None else parse_registrants(payload)
 
 
 async def fetch_registration(cik: int, *, user_agent: str) -> IpoRegistration | None:
@@ -183,7 +201,7 @@ def parse_registration(payload: object) -> IpoRegistration | None:
     if cik is None or not isinstance(name, str):
         return None
     forms, filed, accessions, documents = _recent_columns(payload)
-    offering_forms = _DRAFT_FORMS | _PROSPECTUS_FORMS | _PRICED_FORMS
+    offering_forms = _DRAFT_FORMS | _PROSPECTUS_FORMS | _PRICED_FORMS | _WITHDRAWAL_FORMS
     filings = [
         IpoFiling(form, day, _document_url(cik, accession, document))
         for form, day, accession, document in zip(forms, filed, accessions, documents)
