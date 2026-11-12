@@ -260,6 +260,13 @@ this live in the root `backtests/` folder.
   Net NPA %. Banks report them standalone only, so when the
   consolidated table's NPA cells are empty the adapter reads the
   standalone page.
+- **Consolidated first, standalone when it is empty.** Screener answers
+  the consolidated URL of a company without subsidiaries with a page that
+  loads but has no statement tables; such a page counts as absent and the
+  standalone page is read instead (`_has_statements`). Taking it at face
+  value used to drop every screener statement for those companies — 7 of
+  38 cached Indian listings in November 2026, three banks among them with
+  no NPAs at all.
 
 ## Conventions
 

@@ -265,6 +265,46 @@ async def test_html_tree_prefers_consolidated_then_standalone(mock_http):
     assert [url.rsplit("/company/", 1)[1] for url in seen] == ["ACME/consolidated/", "ACME/"]
 
 
+async def test_an_empty_consolidated_page_falls_back_to_standalone(mock_http):
+    """Screener serves a table-less consolidated page for companies without subsidiaries."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path.endswith("/consolidated/"):
+            return httpx.Response(200, text="<h1>Karur Vysya Bank</h1>")  # loads, no tables
+        return httpx.Response(200, text=_industrial_page())
+
+    mock_http(handler)
+    tree, consolidated = await screener_adapter._fetch_html_tree("KARURVYSYA")
+    assert consolidated is False
+    assert screener_adapter._has_statements(tree)
+    assert len(seen) == 2
+
+
+async def test_a_consolidated_page_with_statements_is_used_without_a_second_fetch(mock_http):
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, text=_industrial_page())
+
+    mock_http(handler)
+    _, consolidated = await screener_adapter._fetch_html_tree("ACME")
+    assert consolidated is True and len(seen) == 1
+
+
+async def test_an_empty_consolidated_page_is_kept_when_standalone_fails(mock_http):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/consolidated/"):
+            return httpx.Response(200, text="<h1>Only ratios</h1>")
+        return httpx.Response(503)
+
+    mock_http(handler)
+    tree, consolidated = await screener_adapter._fetch_html_tree("ACME")
+    assert consolidated is True and tree.css_first("h1").text() == "Only ratios"
+
+
 async def test_html_tree_is_none_when_both_pages_fail(mock_http):
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("offline", request=request)

@@ -180,16 +180,31 @@ async def _fetch_html_tree(ticker: str) -> "tuple[HTMLParser, bool] | None":
     """Fetch the company page → (parsed tree, is_consolidated), or None.
 
     The consolidated view is preferred; companies without consolidated
-    accounts fall back to the standalone page.
+    accounts fall back to the standalone page. Screener answers the
+    consolidated URL of such a company with a page that loads but has no
+    statement tables, so a consolidated page without a profit-and-loss
+    table counts as absent. (Taking it at face value silently dropped every
+    statement for companies without subsidiaries — most often the small
+    ones — and left banks with no NPAs at all.)
     """
     consolidated = await _fetch_page(f"{SCREENER_BASE_URL}/{ticker.upper()}/consolidated/")
-    if consolidated is not None:
+    if consolidated is not None and _has_statements(consolidated):
         return consolidated, True
     standalone = await _fetch_page(f"{SCREENER_BASE_URL}/{ticker.upper()}/")
     if standalone is not None:
         return standalone, False
+    if consolidated is not None:
+        # The standalone page failed: the empty consolidated one still
+        # carries the headline ratios and the shareholding table.
+        return consolidated, True
     log.warning("screener.in has no page for %s", ticker)
     return None
+
+
+def _has_statements(tree: "HTMLParser") -> bool:
+    """Does the page carry a profit-and-loss table with at least one figure?"""
+    _, rows = _parse_section(tree, "profit-loss")
+    return any(value is not None for values in rows.values() for value in values)
 
 
 async def _fetch_page(url: str) -> "HTMLParser | None":
