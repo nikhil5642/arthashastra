@@ -41,6 +41,8 @@ from reports.stock_report.financial_profile import (
 )
 from reports.stock_report.header import (
     header_panel,
+    provisional_note,
+    scored_line,
     valuation_parts_for,
 )
 from scorers.base import Pillar, StockScore
@@ -101,9 +103,11 @@ def render_stock_report(
         )
 
     console.print()
+    provisional = provisional_note(score)
     verdict_body = Group(
         verdict_text(score.verdict, score.confidence),
         *(Text(GATE_LABELS[gate], style="bold red") for gate in score.gates_applied),
+        *((Text(provisional, style="yellow"),) if provisional else ()),
     )
     console.print(
         Panel(
@@ -132,9 +136,9 @@ def _render_markdown(
         f"# {score.ticker} — {snap.company_name or ''}",
         "",
         f"**Verdict:** {score.verdict} (confidence {score.confidence:.0%})",
-        f"**Composite:** {score.composite}/100 | "
-        f"Data completeness: {score.data_completeness_pct:.0f}%"
+        f"**Composite:** {score.composite}/100 | {scored_line(score)}"
         + (" | **LOW CONFIDENCE**" if score.low_confidence else ""),
+        *((f"_{provisional_note(score)}_",) if score.unscored else ()),
         "",
     ]
     for gate in score.gates_applied:

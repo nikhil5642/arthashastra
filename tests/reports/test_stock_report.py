@@ -330,3 +330,43 @@ def test_the_header_states_measured_risk():
     assert parts[2].startswith("trades ¥29.69M a day") and "0.21% of the company" in parts[2]
     assert parts[3] == "1 loss year(s) in 4"
     assert risk_parts_for(BalanceSheetSnapshot(ticker="NEW", as_of_date="2026-11-12")) == []
+
+
+
+def test_a_verdict_built_on_placeholders_says_it_is_provisional(tmp_path: Path):
+    snap = _strong_snap()
+    score = blend(
+        ticker=snap.ticker,
+        leadership=pending_judgment("leadership"),
+        fundamentals=score_fundamentals(snap),
+        valuation=score_valuation(snap),
+        prospects=pending_judgment("prospects"),
+        news=pending_judgment("news"),
+    )
+    from scorers.composite_scorer import PILLAR_WEIGHTS
+
+    share = sum(PILLAR_WEIGHTS[pillar] for pillar in score.unscored)
+    console = _quiet()
+    fp = render_stock_report(snap, score, output_dir=tmp_path, console=console)
+    shown = " ".join(console.file.getvalue().split())
+    assert f"Provisional: {share:.0%} of the composite is a neutral placeholder" in shown
+    assert "leadership, prospects, news not scored" in shown and "/analyse-stock" in shown
+    assert f"Pillars scored: {5 - len(score.unscored)} of 5" in shown
+    assert "Data completeness" not in shown
+    assert fp is not None and f"Provisional: {share:.0%}" in fp.read_text()
+
+
+def test_a_fully_scored_verdict_carries_no_provisional_note():
+    from reports.stock_report.header import provisional_note
+
+    snap = _strong_snap()
+    score = blend(
+        ticker=snap.ticker,
+        leadership=pending_judgment("leadership"),
+        fundamentals=score_fundamentals(snap),
+        valuation=score_valuation(snap),
+        prospects=pending_judgment("prospects"),
+        news=pending_judgment("news"),
+    )
+    score.unscored = []
+    assert provisional_note(score) == ""

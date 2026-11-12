@@ -11,7 +11,8 @@ from rich.panel import Panel
 
 from data_sources.fundamentals_source import BalanceSheetSnapshot, is_bank_snapshot
 from reports.formatting import format_money, format_price
-from scorers.base import StockScore
+from scorers.base import Pillar, StockScore
+from scorers.composite_scorer import PILLAR_WEIGHTS
 from scorers.risk_profile import risk_discount, risk_profile
 from scorers.valuation_scorer import sustainable_earnings
 
@@ -49,14 +50,43 @@ def header_panel(snap: BalanceSheetSnapshot, score: StockScore) -> Panel:
     if analyst_parts:
         lines.append("Analyst bundle: " + "  ·  ".join(analyst_parts))
 
-    lines.append(
-        f"Data completeness: {score.data_completeness_pct:.0f}%  ·  "
-        f"Source: {source_tag}{low_conf_tag}"
-    )
+    lines.append(f"{scored_line(score)}  ·  Source: {source_tag}{low_conf_tag}")
     return Panel("\n".join(lines), title="Stock Analysis", title_align="left")
 
 
 # ── Helpers (also consumed by the markdown writer) ───────────────────────────
+
+
+_JUDGED: frozenset[Pillar] = frozenset({Pillar.LEADERSHIP, Pillar.PROSPECTS, Pillar.NEWS})
+
+
+def scored_line(score: StockScore) -> str:
+    """What the numbers rest on: the fundamentals rubric's coverage and the pillars scored.
+
+    Replaces a single "data completeness" figure that averaged data and
+    judgments, so writing a judgment moved it from 25% to 76% while no
+    figure changed.
+    """
+    scored = len(Pillar) - len(score.unscored)
+    return (
+        f"Fundamentals on {score.fundamentals_coverage_pct:.0f}% of the rubric  ·  "
+        f"Pillars scored: {scored} of {len(Pillar)}"
+    )
+
+
+def provisional_note(score: StockScore) -> str:
+    """'' when every pillar is scored; otherwise how much of the composite is a placeholder."""
+    if not score.unscored:
+        return ""
+    share = sum(PILLAR_WEIGHTS[pillar] for pillar in score.unscored)
+    names = ", ".join(pillar.value for pillar in score.unscored)
+    note = (
+        f"Provisional: {share:.0%} of the composite is a neutral placeholder ({names} "
+        f"not scored), so this verdict is not yet a view of the company."
+    )
+    if any(pillar in _JUDGED for pillar in score.unscored):
+        note += " Judge it with /analyse-stock (/analyse-ipo before listing)."
+    return note
 
 
 def valuation_parts_for(snap: BalanceSheetSnapshot) -> list[str]:
