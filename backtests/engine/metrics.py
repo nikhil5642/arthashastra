@@ -58,6 +58,7 @@ class Observation:
     earnings_yield: float | None = None  # %, 100 / P/E, on reported earnings
     dip_signal: bool = False
     peak_margin: bool = False  # net margin above 1.5× the company's own median
+    repeatable_pe: float | None = None  # P/E on the earnings the valuation counts
     material_concerns: int = 0  # ALERT / URGENT early concerns on the as-of date
     material_strengths: int = 0  # ALERT / URGENT early strengths
 

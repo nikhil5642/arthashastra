@@ -38,7 +38,7 @@ from scorers.base import StockScore, verdict_for
 from scorers.early_signals import Tone, detect_early_signals, of_tone
 from scorers.fundamentals_scorer import score_fundamentals
 from scorers.fundamentals_scorer.industrial import growth_deceleration_cap
-from scorers.valuation_scorer import score_valuation, sustainable_earnings
+from scorers.valuation_scorer import repeatable_pe, score_valuation, sustainable_earnings
 from screener.dip_detector import check_dip
 from screener.price_history import snapshot_from_closes
 from signals.signal_bus import Severity
@@ -122,6 +122,7 @@ def _observe(snap: BalanceSheetSnapshot, as_of: date, forward_return_pct: float 
         slow_growth=growth_deceleration_cap(snap) is not None,
         earnings_yield=snap.earnings_yield,
         peak_margin=sustainable_earnings(snap).above_cycle,
+        repeatable_pe=repeatable_pe(snap),
         material_concerns=len(of_tone(material, Tone.CONCERN)),
         material_strengths=len(of_tone(material, Tone.STRENGTH)),
     )

@@ -26,6 +26,7 @@ from backtests.suites import (
     fundamentals_score,
     growth_veto,
     peak_margin_guard,
+    priced_for_doubt,
     valuation_score,
     value_trap_guard,
     verdict_bands,
@@ -109,6 +110,16 @@ def peak_margin_history(sign: int) -> list[Observation]:
     )
 
 
+def doubt_history(sign: int) -> list[Observation]:
+    """Half the tickers trade under 5× repeatable earnings, half at 7×; the doubted return 4% less (+1)."""
+    return history(
+        lambda i, j: {
+            "repeatable_pe": 3.0 if j < TICKERS // 2 else 7.0,
+            "forward_return_pct": sign * (-4.0 if j < TICKERS // 2 else 0.0) + noise(i, j) / 2,
+        }
+    )
+
+
 def signalled(field: str, sign: int) -> list[Observation]:
     """Half the tickers carry one material early signal; they return 4% more (+1) or less (−1)."""
     return history(
@@ -126,6 +137,7 @@ CASES: list[tuple[Suite, Callable[[int], list[Observation]]]] = [
     (growth_veto.SUITE, lambda sign: flagged("slow_growth", -sign)),
     (value_trap_guard.SUITE, value_trap_history),
     (peak_margin_guard.SUITE, peak_margin_history),
+    (priced_for_doubt.SUITE, doubt_history),
     (early_concerns.SUITE, lambda sign: signalled("material_concerns", -sign)),
     (early_strengths.SUITE, lambda sign: signalled("material_strengths", sign)),
     (dip_signals.SUITE, lambda sign: flagged("dip_signal", sign)),

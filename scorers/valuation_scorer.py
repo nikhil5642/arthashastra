@@ -331,6 +331,19 @@ _SUB_SCORERS: dict[ValuationComponent, _SubScorerFn] = {
 # ── Guards + curve helper ────────────────────────────────────────────────────
 
 
+def repeatable_pe(
+    snap: BalanceSheetSnapshot, earnings: SustainableEarnings | None = None
+) -> float | None:
+    """The P/E on the profit the valuation counts (one-offs out, cyclical peaks capped).
+
+    None for a loss, an unknown P/E, or a profit none of which is repeatable.
+    """
+    earnings = earnings if earnings is not None else sustainable_earnings(snap)
+    if snap.pe_ratio is None or snap.pe_ratio <= 0 or earnings.ratio <= 0:
+        return None
+    return snap.pe_ratio / min(earnings.ratio, 1.0)
+
+
 def _apply_doubt_cap(
     snap: BalanceSheetSnapshot, earnings: SustainableEarnings, score: float, evidence: list[str]
 ) -> float:
@@ -340,13 +353,11 @@ def _apply_doubt_cap(
     peaks capped): a low P/E those adjustments already explain is not doubted
     twice.
     """
-    if snap.pe_ratio is None or snap.pe_ratio <= 0 or earnings.ratio <= 0:
-        return score
-    repeatable_pe = snap.pe_ratio / min(earnings.ratio, 1.0)
-    if repeatable_pe >= DOUBT_PE or score <= VALUE_TRAP_CAP:
+    pe = repeatable_pe(snap, earnings)
+    if pe is None or pe >= DOUBT_PE or score <= VALUE_TRAP_CAP:
         return score
     evidence.append(
-        f"CAP: priced for doubt — {repeatable_pe:.1f}× repeatable earnings is cheaper than a "
+        f"CAP: priced for doubt — {pe:.1f}× repeatable earnings is cheaper than a "
         f"lasting profit is ever left; valuation capped at {VALUE_TRAP_CAP:.0f} (uncapped "
         f"{score:.1f}) until the reason the market doubts it is known."
     )
