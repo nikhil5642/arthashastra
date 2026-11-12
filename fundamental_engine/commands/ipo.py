@@ -271,8 +271,9 @@ def _transcription_note(
     ]
     if snap.rev_3y_cagr is None and snap.pat_3y_cagr is None:
         lines.append(
-            f"Growth is NOT scored: a three-year growth rate needs four fiscal years and the "
-            f"file has {len(statements.fiscal_years)}. The growth veto is silent here, not passed."
+            f"Growth is NOT scored: a growth rate needs at least three fiscal years with a "
+            f"positive starting figure, and the file has {len(statements.fiscal_years)} years. "
+            f"The growth veto is silent here, not passed."
         )
     return Panel("\n".join(lines), title="Prospectus figures", title_align="left",
                  border_style="yellow")

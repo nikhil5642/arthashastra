@@ -139,9 +139,16 @@ def test_transcribed_statements_are_scored_and_labelled(cache, capsys, monkeypat
     assert not (cache / "scores.json").exists() and not (cache / "signals.json").exists()
 
 
-def test_a_short_record_says_growth_is_not_scored(cache, capsys, monkeypatch):
+def test_a_short_record_is_scored_on_two_years_of_growth_or_says_it_is_not(cache, capsys, monkeypatch):
     _sec(monkeypatch, [], None)
-    _write(cache, "fictional", _statements())
+    statements = _statements()
+    _write(cache, "fictional", statements)
+    assert run_ipo_command("fictional") == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "Revenue 2y (short record) CAGR" in out and "Growth is NOT scored" not in out
+
+    statements["fiscal_years"] = statements["fiscal_years"][:2]  # two years: no rate at all
+    _write(cache, "fictional", statements)
     assert run_ipo_command("fictional") == 0
     out = " ".join(capsys.readouterr().out.split())
     assert "Growth is NOT scored" in out and "silent here, not passed" in out

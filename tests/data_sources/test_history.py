@@ -99,7 +99,8 @@ def test_frames_are_truncated_to_public_fiscal_years():
     assert snap is not None
     assert snap.latest_annual_period == "2024-06-30"
     assert snap.roe == round(88 / 260 * 100, 2)
-    assert snap.rev_3y_cagr is None  # only three years visible
+    # Only three years visible: growth falls back to two years, and says so.
+    assert (snap.rev_3y_cagr, snap.growth_years) == (11.24, 2)
 
 
 def test_deep_frames_give_cagr_once_four_years_are_public():

@@ -156,6 +156,10 @@ class BalanceSheetSnapshot:
     # ── Scored: growth ───────────────────────────────────────────────────────
     rev_3y_cagr: float | None = None
     pat_3y_cagr: float | None = None
+    # How many years the two growth rates above actually span. 3 normally; 2
+    # when the record holds only three fiscal years (a new listing, an IPO) —
+    # a shorter, noisier measure, and every label that shows it says so.
+    growth_years: int = 3
 
     # ── Scored: earnings quality ─────────────────────────────────────────────
     ocf_to_pat: float | None = None
@@ -517,6 +521,7 @@ class SnapshotFields(TypedDict, total=False):
     # Scored: growth
     rev_3y_cagr: float | None
     pat_3y_cagr: float | None
+    growth_years: int
 
     # Scored: earnings quality
     ocf_to_pat: float | None

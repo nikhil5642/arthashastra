@@ -644,7 +644,10 @@ missing inputs — but known-bad is scored, not dropped: negative equity
 is 0 on the D/E axis, and a profit that became a loss is a −100% PAT
 CAGR. Pledge > 10% clamps the score to 40. Growth-deceleration veto caps
 the score at 70/60/50 when both 3y CAGRs fall below 7/5/3%. All inputs
-are the latest audited fiscal year.
+are the latest audited fiscal year. A record of only three fiscal years
+(a new listing, an IPO) is scored on two years of growth instead of
+three (`growth_years`), labelled "2y (short record)" — so growth and the
+veto are not silent for it.
 
 **Bank / NBFC / levered financials**: profitability 30% (ROE + ROA +
 NIM on bank-calibrated curves — ROA 1.5% is good, not 12%), asset

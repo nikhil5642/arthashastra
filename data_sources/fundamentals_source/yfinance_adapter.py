@@ -94,6 +94,8 @@ _GOODWILL_AND_INTANGIBLES = (
     "Other Intangible Assets",
     "Goodwill",
 )
+SHORT_RECORD_GROWTH_YEARS = 2  # the fallback span when only three fiscal years exist
+
 _SHARES_OUTSTANDING = ("Ordinary Shares Number", "Share Issued")
 
 
@@ -416,14 +418,22 @@ def _fill_income_statement_derived(
         if capital_employed > 0:
             out["roce"] = round(ebit / capital_employed * 100, 2)
 
-    rev_cagr = _compute_cagr(is_, _REVENUE, years=3)
-    if rev_cagr is not None:
-        out["rev_3y_cagr"] = rev_cagr
-    # A profit that became a loss is the worst growth outcome, not a gap in
-    # the data — see primitives.PROFIT_WIPED_OUT_CAGR.
-    pat_cagr = _compute_cagr(is_, _NET_INCOME, years=3, wiped_out_counts=True)
-    if pat_cagr is not None:
-        out["pat_3y_cagr"] = pat_cagr
+    # Three years of growth where the record allows; two when it holds only
+    # three fiscal years, so a short record is scored (and can be vetoed) on
+    # what exists instead of dropping growth altogether.
+    for years in (3, SHORT_RECORD_GROWTH_YEARS):
+        rev_cagr = _compute_cagr(is_, _REVENUE, years=years)
+        # A profit that became a loss is the worst growth outcome, not a gap
+        # in the data — see primitives.PROFIT_WIPED_OUT_CAGR.
+        pat_cagr = _compute_cagr(is_, _NET_INCOME, years=years, wiped_out_counts=True)
+        if rev_cagr is None and pat_cagr is None:
+            continue
+        if rev_cagr is not None:
+            out["rev_3y_cagr"] = rev_cagr
+        if pat_cagr is not None:
+            out["pat_3y_cagr"] = pat_cagr
+        out["growth_years"] = years
+        break
 
     if revenue is not None and revenue > 0:
         out["revenue"] = revenue

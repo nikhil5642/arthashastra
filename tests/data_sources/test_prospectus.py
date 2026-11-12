@@ -101,7 +101,7 @@ def test_a_priced_offering_is_valued_on_the_shares_after_it():
     assert snap.current_price == 20.0
     assert snap.pe_ratio is not None and round(snap.pe_ratio, 2) == 13.33  # 2B / 150M
     # Three fiscal years are two years of growth: a 3-year CAGR needs a fourth.
-    assert snap.rev_3y_cagr is None
+    assert (snap.rev_3y_cagr, snap.growth_years) == (29.1, 2)  # three years on file: a 2-year rate
     four = _statements(fiscal_years=[*_file()["fiscal_years"], _year("2022-12-31", 400, 40)])  # type: ignore[misc]
     assert snapshot_from_prospectus(four, as_of=AS_OF).rev_3y_cagr is not None  # type: ignore[union-attr]
     assert snap.price_history_years is None and snap.volatility_1y_pct is None  # unknown, not calm

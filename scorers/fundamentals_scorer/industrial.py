@@ -330,14 +330,19 @@ def _score_profitability(
     return sum(sub_scores) / len(sub_scores), evidence
 
 
+def _growth_span(snap: BalanceSheetSnapshot) -> str:
+    """'3y', or '2y (short record)' when only three fiscal years exist."""
+    return "3y" if snap.growth_years >= 3 else f"{snap.growth_years}y (short record)"
+
+
 def _score_growth(
     snap: BalanceSheetSnapshot,
 ) -> tuple[float | None, list[str]]:
     sub_scores: list[float] = []
     evidence: list[str] = []
     for name, val in (
-        ("Revenue 3y CAGR", snap.rev_3y_cagr),
-        ("PAT 3y CAGR", snap.pat_3y_cagr),
+        (f"Revenue {_growth_span(snap)} CAGR", snap.rev_3y_cagr),
+        (f"PAT {_growth_span(snap)} CAGR", snap.pat_3y_cagr),
     ):
         if val is None:
             continue
