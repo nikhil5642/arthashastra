@@ -198,3 +198,19 @@ def test_a_quote_that_does_not_reconcile_is_left_unscored():
     result = score_valuation(receipt)
     assert (result.score, result.confidence) == (50.0, 0.0)
     assert "price and the statements don't reconcile" in result.evidence[0]
+
+
+def test_a_price_under_five_times_repeatable_earnings_is_capped_not_rewarded():
+    from data_sources.fundamentals_source import BalanceSheetSnapshot
+    from scorers.valuation_scorer import VALUE_TRAP_CAP, score_valuation
+
+    def valuation(pe: float):
+        snap = BalanceSheetSnapshot(ticker="CHEAP", as_of_date="2026-11-13", pe_ratio=pe,
+                                    earnings_yield=round(100 / pe, 2), fcf_yield=round(100 / pe, 2),
+                                    rev_3y_cagr=20.0, pat_3y_cagr=25.0)
+        return score_valuation(snap)
+
+    doubted, cheap = valuation(2.6), valuation(8.0)
+    assert doubted.score == VALUE_TRAP_CAP and any("priced for doubt" in e for e in doubted.evidence)
+    assert cheap.score > VALUE_TRAP_CAP  # honestly cheap is still rewarded
+    assert not any("priced for doubt" in e for e in cheap.evidence)

@@ -693,7 +693,11 @@ Today's price is set against today's business:
 Anti-optimism: a loss-maker (over the freshest twelve months) scores 0
 on earnings yield, and the **value-trap guard** caps valuation at 70 for
 slow growers (the same both-CAGRs-below-7% test as the growth veto) —
-cheap because shrinking is not a bargain. Cross-currency listings are
+cheap because shrinking is not a bargain. The **priced-for-doubt cap** does the
+same for a price under 5× repeatable earnings (`DOUBT_PE`): a market that
+pays that little for a real profit doubts the profit, the accounts, or that
+the money can reach shareholders, so cheaper stops scoring better until the
+reason is known. Cross-currency listings are
 valued with spot FX once the quote reconciles (rule 9); P/E history is
 same-currency only. Per-share numbers are all on today's share basis
 (split-adjusted closes; SEC's first-filed EPS is rebased by Yahoo's split

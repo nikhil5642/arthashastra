@@ -46,6 +46,12 @@ from scorers.fundamentals_scorer.industrial import growth_deceleration_cap, pat_
 BANK_COST_OF_EQUITY_PCT = 11.0
 MIN_PE_HISTORY = 3
 VALUE_TRAP_CAP = 70.0
+# Below this multiple of repeatable earnings, cheaper stops meaning better. A
+# market that pays under five times a real, lasting profit is not asleep: it
+# doubts the profit, the accounts, or that the money can reach shareholders.
+# Until that doubt is explained the price is a question, so the score is held
+# at the same ceiling as the other "cheap for a reason" case, the value trap.
+DOUBT_PE = 5.0
 
 # Mid-cycle earnings. A margin up to 1.5× the company's own median counts as
 # earned — businesses do improve — and anything above is treated as the top
@@ -218,6 +224,7 @@ def score_valuation(snap: BalanceSheetSnapshot) -> ScorerResult:
     total_weight = sum(weight for _, weight in scored)
     result = round(sum(s * w for s, w in scored) / total_weight, 1)
     result = _apply_value_trap_cap(snap, result, evidence)
+    result = _apply_doubt_cap(snap, earnings, result, evidence)
     return ScorerResult(
         pillar=Pillar.VALUATION,
         score=result,
@@ -322,6 +329,28 @@ _SUB_SCORERS: dict[ValuationComponent, _SubScorerFn] = {
 
 
 # ── Guards + curve helper ────────────────────────────────────────────────────
+
+
+def _apply_doubt_cap(
+    snap: BalanceSheetSnapshot, earnings: SustainableEarnings, score: float, evidence: list[str]
+) -> float:
+    """Hold the score at the cap when the price is under `DOUBT_PE` × repeatable earnings.
+
+    Measured on the earnings the score itself counted (one-offs out, cyclical
+    peaks capped): a low P/E those adjustments already explain is not doubted
+    twice.
+    """
+    if snap.pe_ratio is None or snap.pe_ratio <= 0 or earnings.ratio <= 0:
+        return score
+    repeatable_pe = snap.pe_ratio / min(earnings.ratio, 1.0)
+    if repeatable_pe >= DOUBT_PE or score <= VALUE_TRAP_CAP:
+        return score
+    evidence.append(
+        f"CAP: priced for doubt — {repeatable_pe:.1f}× repeatable earnings is cheaper than a "
+        f"lasting profit is ever left; valuation capped at {VALUE_TRAP_CAP:.0f} (uncapped "
+        f"{score:.1f}) until the reason the market doubts it is known."
+    )
+    return VALUE_TRAP_CAP
 
 
 def _apply_value_trap_cap(snap: BalanceSheetSnapshot, score: float, evidence: list[str]) -> float:

@@ -56,7 +56,7 @@ from data_sources.fundamentals_source import (
 )
 from data_sources.news_source import NewsCategory, NewsDigest
 from scorers.fundamentals_scorer.industrial import has_negative_equity
-from scorers.valuation_scorer import SustainableEarnings, sustainable_earnings
+from scorers.valuation_scorer import DOUBT_PE, SustainableEarnings, sustainable_earnings
 from signals.signal_bus import Severity
 
 # ── Thresholds ───────────────────────────────────────────────────────────────
@@ -140,7 +140,6 @@ WIDE_COVERAGE_URGENT_OUTLETS = 10
 
 # Tape and data.
 DRAWDOWN_INFO_PCT = 30.0
-DOUBT_PE = 5.0  # below this, a positive P/E is a question, not a bargain
 DRAWDOWN_ALERT_PCT = 50.0
 # A fiscal year's audited numbers normally land within ~3 months of
 # year-end, so anything older than 12 + 3 months means a missed filing,
@@ -806,7 +805,7 @@ def _priced_for_doubt(facts: _Facts) -> EarlySignal | None:
         Severity.ALERT,
         f"The price is {pe:.1f}× earnings. A profit this cheap usually means the market doubts "
         f"it will last, doubts the accounts, or cannot get its money out — or the data is "
-        f"wrong. The valuation score takes the figure at face value: find the reason first.",
+        f"wrong. The valuation score is capped until the reason is known: find it first.",
     )
 
 
