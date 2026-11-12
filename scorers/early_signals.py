@@ -56,6 +56,7 @@ from data_sources.fundamentals_source import (
 )
 from data_sources.news_source import NewsCategory, NewsDigest
 from scorers.fundamentals_scorer.industrial import has_negative_equity
+from scorers.risk_profile import risk_profile
 from scorers.valuation_scorer import DOUBT_PE, SustainableEarnings, sustainable_earnings
 from signals.signal_bus import Severity
 
@@ -140,6 +141,7 @@ WIDE_COVERAGE_URGENT_OUTLETS = 10
 
 # Tape and data.
 DRAWDOWN_INFO_PCT = 30.0
+MIN_YEARS_FOR_RECORD = 4  # fewer fiscal years than this is a short record, said elsewhere
 DRAWDOWN_ALERT_PCT = 50.0
 # A fiscal year's audited numbers normally land within ~3 months of
 # year-end, so anything older than 12 + 3 months means a missed filing,
@@ -199,6 +201,7 @@ class EarlySignalKind(StrEnum):
     # Tape and data
     PRICE_DRAWDOWN = "price_drawdown"
     PRICED_FOR_DOUBT = "priced_for_doubt"
+    UNPROVEN_PROFIT = "unproven_profit"
     STALE_STATEMENTS = "stale_statements"
     UNRELIABLE_QUOTE = "unreliable_quote"
     RECENTLY_LISTED = "recently_listed"
@@ -795,6 +798,27 @@ def _credit_rating_news(facts: _Facts) -> EarlySignal | None:
 # ── Tape and data ────────────────────────────────────────────────────────────
 
 
+def _unproven_profit(facts: _Facts) -> EarlySignal | None:
+    """Profitable now, but in loss for half or more of the years on record.
+
+    The fundamentals rubric reads the latest audited year, so one good year
+    scores like ten. The record says how much of that has been shown before.
+    """
+    record = risk_profile(facts.snap)
+    profit = facts.snap.net_income
+    if profit is None or profit <= 0 or record.fiscal_years < MIN_YEARS_FOR_RECORD:
+        return None
+    if record.loss_years * 2 < record.fiscal_years:
+        return None
+    return _concern(
+        EarlySignalKind.UNPROVEN_PROFIT,
+        Severity.ALERT,
+        f"Profitable in the latest year, but {record.loss_years} of the {record.fiscal_years} "
+        f"fiscal years on record ended in a loss. The fundamentals score reads the latest year "
+        f"only — this profit has not yet been held through a cycle.",
+    )
+
+
 def _priced_for_doubt(facts: _Facts) -> EarlySignal | None:
     """A profitable company at a handful of times earnings: the market doubts something."""
     pe = facts.snap.pe_ratio
@@ -885,6 +909,7 @@ _DETECTORS: tuple[_Detector, ...] = (
     _asset_quality_shift,
     _governance_news,
     _credit_rating_news,
+    _unproven_profit,
     _priced_for_doubt,
     _price_drawdown,
     _stale_statements,

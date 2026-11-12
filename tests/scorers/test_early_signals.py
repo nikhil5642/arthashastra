@@ -486,3 +486,19 @@ def test_a_profit_priced_at_a_few_times_earnings_is_a_question_not_a_bargain():
     assert EarlySignalKind.PRICED_FOR_DOUBT not in kinds(12.0)
     assert EarlySignalKind.PRICED_FOR_DOUBT not in kinds(None)  # unknown says nothing
     assert EarlySignalKind.PRICED_FOR_DOUBT not in kinds(-4.0)  # a loss is flagged elsewhere
+
+
+def test_a_profit_after_mostly_loss_years_is_flagged_as_unproven():
+    from data_sources.fundamentals_source import BalanceSheetSnapshot
+    from scorers.early_signals import EarlySignalKind, detect_early_signals
+
+    def flagged(margins: list[float], profit: float | None = 1e9) -> bool:
+        snap = BalanceSheetSnapshot(ticker="TURN", as_of_date="2026-11-13", net_income=profit,
+                                    net_margin_annual_trend=margins)
+        return EarlySignalKind.UNPROVEN_PROFIT in {s.kind for s in detect_early_signals(snap)}
+
+    assert flagged([-30.0, -12.0, -4.0, 2.0, 16.0])  # three of five years in loss
+    assert not flagged([8.0, 9.0, -2.0, 11.0, 12.0])  # one bad year is not a pattern
+    assert not flagged([-30.0, -12.0, 16.0])  # too short a record to call
+    assert not flagged([-30.0, -12.0, -4.0, 2.0, -6.0], profit=-1e8)  # still losing: said elsewhere
+    assert not flagged([-30.0, -12.0, -4.0, 2.0, 16.0], profit=None)  # unknown says nothing
