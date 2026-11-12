@@ -27,6 +27,7 @@ from data_sources.fundamentals_source.snapshot import (
     SCORED_FIELDS,
     StatementWindow,
     is_bank_snapshot,
+    is_financial_label,
 )
 from data_sources.fundamentals_source.source import (
     FetchResult,
@@ -55,6 +56,7 @@ __all__ = [
     "StatementWindow",
     "change_by_date",
     "is_bank_snapshot",
+    "is_financial_label",
     "latest_yoy_growth",
     "pct_change_by_date",
     # Transport constants

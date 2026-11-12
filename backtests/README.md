@@ -20,8 +20,8 @@ then the longest price history), and with `all`, a cached quote whose
 price and statements don't reconcile is left out. The run names what it
 left out.
 
-Options: `--tickers` (Yahoo symbols, or `all` for the cached universe —
-the default), `--years` (default 30), `--step year|quarter`, `--horizon`
+Options: `--tickers` (Yahoo symbols, or `all` for the companies you
+follow — the default), `--years` (default 30), `--step year|quarter`, `--horizon`
 (forward-return months, default one step), `--lag` (days after a fiscal
 year ends before its numbers count as public, default 90). The report
 is printed and saved to `data_cache/reports/backtest_<date>.md`. Exit code
@@ -119,6 +119,10 @@ selected suite then reads the same observations.
 
 ## What a backtest can't tell you
 
+- **Who is in it** — `all` is the companies you follow, which lean large
+  and well known; what a screen scored in passing is not included. A
+  result on them says little about small companies. To test those, pass
+  a screen's scored tickers to `--tickers`.
 - **Survivorship and selection** — the universe is today's cache: failed
   and delisted companies are absent, and the names in it were chosen with
   hindsight. Every group's return is lifted, the weakest-scored groups'

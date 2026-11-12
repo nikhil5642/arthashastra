@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from scorers.base import Gate, ScorerResult, verdict_for
+import pytest
+
+from scorers.base import Gate, Pillar, ScorerResult, verdict_for
 from scorers.composite_scorer import (
     INTEGRITY_GATE_CEILING,
     PILLAR_WEIGHTS,
     blend,
+    deterministic_composite,
     pending_judgment,
 )
 
@@ -111,6 +114,33 @@ def test_blend_with_pending_pillars_marks_low_confidence():
     assert score.low_confidence is True
     assert score.data_completeness_pct < 60
     assert any("pending" in ev.lower() for ev in score.evidence["leadership"])
+
+
+def test_a_score_names_the_pillars_that_are_only_placeholders():
+    """A neutral 50 nobody scored must be tellable from a 50 somebody did."""
+    unjudged = blend(
+        ticker="MSFT",
+        fundamentals=_mk("fundamentals", 88),
+        valuation=_mk("valuation", 50, completeness=0.0),  # no usable price ratio
+        leadership=pending_judgment("leadership"),
+        prospects=_mk("prospects", 50),  # a real judgment that happens to be 50
+        news=pending_judgment("news"),
+    )
+    assert unjudged.unscored == [Pillar.VALUATION, Pillar.LEADERSHIP, Pillar.NEWS]
+    assert unjudged.to_dict()["unscored"] == ["valuation", "leadership", "news"]
+
+    complete = blend(
+        ticker="MSFT", fundamentals=_mk("fundamentals", 88), valuation=_mk("valuation", 61),
+        leadership=_mk("leadership", 70), prospects=_mk("prospects", 60), news=_mk("news", 55),
+    )
+    assert complete.unscored == []
+
+
+def test_the_deterministic_composite_is_the_two_python_pillars_at_their_weights():
+    assert deterministic_composite(90.0, 40.0) == pytest.approx((90 * 0.35 + 40 * 0.15) / 0.50)
+    assert deterministic_composite(80.0, 80.0) == pytest.approx(80.0)
+    # An unscored valuation counts as the neutral prior, exactly as in the blend.
+    assert deterministic_composite(90.0, None) == deterministic_composite(90.0, 50.0)
 
 
 def test_evidence_dict_has_all_pillars():

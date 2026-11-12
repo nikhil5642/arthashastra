@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from scorers.base import Gate, Pillar, StockScore, Verdict
 from scorers.early_signals import EarlySignal
+from scorers.risk_profile import RiskProfile, risk_profile
 
 if TYPE_CHECKING:
     from fundamental_engine.analyse_pipeline import AnalysisResult
@@ -59,6 +60,13 @@ class ExtendedScore:
     # `screen` show them without a re-fetch, and the next refresh diffs
     # against them to say what is new.
     early_signals: list[EarlySignal] = field(default_factory=list)
+    # How risky the company is to hold, as far as it can be measured:
+    # price swings, liquidity, the length and steadiness of its record.
+    risk: RiskProfile = field(default_factory=RiskProfile)
+    # Asked about by name (`analyse`, `refresh`), as against only met in a
+    # screen or a comparison. `brief`, `refresh all` and the backtests work
+    # on the followed companies; a screen can score hundreds in passing.
+    followed: bool = True
 
     # ── Constructors ────────────────────────────────────────────────────────
 
@@ -85,6 +93,7 @@ class ExtendedScore:
             latest_yoy_revenue_growth=snap.latest_yoy_revenue_growth,
             latest_yoy_pat_growth=snap.latest_yoy_pat_growth,
             early_signals=list(result.early_signals),
+            risk=risk_profile(snap),
         )
 
     @classmethod
@@ -125,6 +134,7 @@ class ExtendedScore:
                 evidence=_parse_evidence(data.get("evidence")),
                 last_updated=_as_str(data.get("last_updated"), default=""),
                 gates_applied=_parse_gates(data.get("gates_applied")),
+                unscored=_parse_pillars(data.get("unscored")),
             )
         except (KeyError, ValueError, TypeError):
             return None
@@ -148,6 +158,9 @@ class ExtendedScore:
             ),
             latest_yoy_pat_growth=_optional_float(data.get("latest_yoy_pat_growth")),
             early_signals=_parse_early_signals(data.get("early_signals")),
+            risk=RiskProfile.from_dict(data.get("risk")),
+            # Rows written before the field existed were all asked for by name.
+            followed=data.get("followed") is not False,
         )
 
     # ── Serialization ───────────────────────────────────────────────────────
@@ -179,6 +192,8 @@ class ExtendedScore:
                 "latest_yoy_revenue_growth": self.latest_yoy_revenue_growth,
                 "latest_yoy_pat_growth": self.latest_yoy_pat_growth,
                 "early_signals": [signal.to_dict() for signal in self.early_signals],
+                "risk": self.risk.to_dict(),
+                "followed": self.followed,
             }
         )
         return d
@@ -240,6 +255,19 @@ def _parse_gates(raw: object) -> list[Gate]:
         except ValueError:
             continue
     return gates
+
+
+def _parse_pillars(raw: object) -> list[Pillar]:
+    """A JSON list of pillar names; unknown names are skipped, not fatal."""
+    if not isinstance(raw, list):
+        return []
+    pillars: list[Pillar] = []
+    for item in raw:
+        try:
+            pillars.append(Pillar(str(item)))
+        except ValueError:
+            continue
+    return pillars
 
 
 def _parse_evidence(raw: object) -> dict[Pillar, list[str]]:

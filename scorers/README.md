@@ -23,11 +23,13 @@ scorers/
 ├── composite_scorer.py      # blend(...) + integrity gate + pending_judgment(pillar)
 ├── valuation_scorer.py      # score_valuation: price vs what the business can keep earning
 ├── early_signals.py         # detect_early_signals: concerns + strengths beyond the scored ratios
+├── risk_profile.py          # risk_profile(snap): measured price swings, liquidity and record
 └── fundamentals_scorer/     # split by rubric variant
     ├── __init__.py          #   score_fundamentals dispatcher
     ├── industrial.py        #   industrial rubric + 5 sub-scorers
     ├── bank.py              #   bank / NBFC rubric + 5 sub-scorers
-    └── ownership.py         #   shared ownership sub-score
+    ├── ownership.py         #   shared ownership sub-score
+    └── marks.py             #   the rubrics' thresholds as questions a screener can answer
 ```
 
 ## Modules
@@ -35,9 +37,11 @@ scorers/
 | Module | Purpose |
 |---|---|
 | `base.py` | `Verdict`, `Pillar`, and `Gate` `StrEnum`s (members are `str` subclasses so JSON + dict-key usage keep working), `ScorerResult`, `StockScore` (incl. `gates_applied`), `VERDICT_BANDS`, `verdict_for(composite)`. Pure data classes — no imports from the rest of the project. |
-| `composite_scorer.py` | `blend(...)` weights the five pillars by `PILLAR_WEIGHTS` (fundamentals 35, valuation 15, leadership 25, prospects 15, news 10), then applies gates: `integrity_veto=True` caps the composite at 54.0 (AVOID). `pending_judgment(Pillar.LEADERSHIP)` emits a clearly-labelled placeholder when no Claude judgment exists yet. |
+| `composite_scorer.py` | `blend(...)` weights the five pillars by `PILLAR_WEIGHTS` (fundamentals 35, valuation 15, leadership 25, prospects 15, news 10), then applies gates: `integrity_veto=True` caps the composite at 54.0 (AVOID). `pending_judgment(Pillar.LEADERSHIP)` emits a clearly-labelled placeholder when no Claude judgment exists yet, and the blended `StockScore.unscored` names every pillar that is only such a placeholder — a 50 nobody scored must be tellable from a 50 somebody did. `deterministic_composite(fundamentals, valuation)` is the half Python computes, rescaled to 0–100: what two companies can be compared on before either is judged, and what the backtests replay. |
+| `fundamentals_scorer/marks.py` | `INDUSTRIAL_MARKS` / `LENDER_MARKS` — for each rubric input a screener can filter on, the value where its curve reaches 80 (`good`) and where it tops out (`excellent`), with the input's weight in the rubric. A screen's preview asks Yahoo which listings clear them (`fundamental_engine/preview.py`); `tests/scorers/test_marks.py` holds every mark to the curve it was read off. |
 | `valuation_scorer.py` | `score_valuation(snap)` — earnings yield 35% + FCF yield 35% + P/E vs its own history 30%; banks swap FCF yield for P/B vs ROE ÷ 11% cost of equity. Earnings are `sustainable_earnings(snap)`: one-off gains out, cyclical peaks capped (see below). Loss-makers score 0 on earnings yield; the value-trap guard caps slow growers at 70. Unscoreable (no price-vs-statements ratio, or a `quote_unreliable` snapshot) → neutral 50, confidence 0. |
-| `early_signals.py` | `detect_early_signals(snap, news=None)` → `list[EarlySignal]`, concerns first, most severe first. One detector per `EarlySignalKind`; `tally(signals)` gives the "3 concerns (1 urgent) · 2 strengths" line that `brief`, `pick` and `screen` print. Reads the snapshot and an optional `NewsDigest`; touches no score. |
+| `risk_profile.py` | `risk_profile(snap)` → `RiskProfile`: the yearly swing of the share price, its worst fall in three years, what trades on an average day (and what share of the company that is), and the fiscal years and loss years behind the scores. Facts, not a score — they move no pillar. Size is only a proxy for these, and a rough one: smaller companies are riskier on average, but a fifth of the large ones swing more than the typical small one, so each company is measured. Missing data leaves a field None; an unmeasured company is not a low-risk one. `risk_discount(profile)` turns it into 0–30 points taken off when a shortlist is ranked (`RankBy.RISK_ADJUSTED`): half a point per point of volatility above 30% (capped at 20; unknown costs 10), up to 10 for the share of loss years, 5 for a record under four fiscal years. A ranking aid — it never changes a pillar, the composite or a verdict. |
+| `early_signals.py` | `detect_early_signals(snap, news=None)` → `list[EarlySignal]`, concerns first, most severe first. One detector per `EarlySignalKind` (incl. `RECENTLY_LISTED`: under a year of price history — the 52-week range, volatility and worst fall cover only that stretch, there is no P/E history, and the lock-up has usually not ended); `tally(signals)` gives the "3 concerns (1 urgent) · 2 strengths" line that `brief`, `pick` and `screen` print. Reads the snapshot and an optional `NewsDigest`; touches no score. |
 | `fundamentals_scorer/__init__.py` | `score_fundamentals(snap)` — dispatches to industrial or bank based on `is_bank_snapshot(snap)` (structure first: screener's bank P&L shape, or a financial sector with no current-assets split). |
 | `fundamentals_scorer/industrial.py` | Industrial rubric: balance-sheet health 35% + profitability 20% + growth 15% + earnings quality 15% + ownership 15%. Pledge > 10% clamps the final score to 40. Growth-deceleration veto caps at 70/60/50 when both 3y CAGRs fall below 7/5/3% — `growth_deceleration_cap(snap)` is public because the valuation guard and the backtests share the definition. Known-bad facts are scored, not dropped: `has_negative_equity(snap)` puts the D/E axis at 0, and a profit that became a loss arrives as a −100% PAT CAGR (`pat_growth_label` prints it as "profit wiped out"). |
 | `fundamentals_scorer/bank.py` | Bank / NBFC rubric: profitability 30% (ROE + ROA + NIM) + asset quality 25% (gross / net NPA + trend) + growth 20% (PAT 3y CAGR only) + franchise 15% (non-interest income ratio + CD ratio) + governance 10% (shared ownership sub-score). |
@@ -180,6 +184,13 @@ Severity: **URGENT** changes how the headline numbers should be read,
 Why the governance rule counts a *share* of coverage: a megacap draws
 ~80 stories a week and a few always say "antitrust" or "probe". A burst
 is governance taking over the company's news, not appearing in it.
+
+The same share is what lets the radar work for a company few outlets
+cover. It can never produce eight stories on anything, so for it two or
+more governance stories that are half of everything written that week
+are an ALERT, and four or more at 60% are URGENT. Story counts scale
+with fame; a threshold in counts alone would only ever fire for the
+famous.
 
 The news signals are counted from headlines nobody has judged yet. They
 say "read these", not "this is bad" — Claude's news and leadership

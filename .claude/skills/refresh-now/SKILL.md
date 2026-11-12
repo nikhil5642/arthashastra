@@ -26,11 +26,16 @@ Single ticker:
 python3 -m fundamental_engine refresh <TICKER>
 ```
 
-Entire cached universe (one ticker at a time, with a short pause between):
+Every followed company — the ones asked about by name — one at a time,
+with a short pause between:
 
 ```bash
 python3 -m fundamental_engine refresh all
 ```
+
+Companies a screen or a comparison scored in passing are not refreshed
+here; they are re-fetched when a screen next needs them, and
+`refresh <TICKER>` (or `/analyse-stock`) follows one.
 
 ## Step 3 — Report the outcome
 

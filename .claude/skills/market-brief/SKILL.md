@@ -23,6 +23,10 @@ vetoes, and stale rows (older than 2 days). It also saves
 The early signals are as fresh as each row's last refresh — a concern
 only appears after `refresh` / `analyse` has seen it.
 
+The brief covers the companies the user **follows** — the ones asked
+about by name. Companies a screen scored in passing are counted in the
+header and left out; `analyse <TICKER>` follows one.
+
 ## Step 2 — Check freshness
 
 If the brief lists many stale rows, suggest `/refresh-now all` before the

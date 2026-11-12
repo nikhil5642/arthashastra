@@ -12,6 +12,7 @@ from rich.panel import Panel
 from data_sources.fundamentals_source import BalanceSheetSnapshot, is_bank_snapshot
 from reports.formatting import format_money, format_price
 from scorers.base import StockScore
+from scorers.risk_profile import risk_profile
 from scorers.valuation_scorer import sustainable_earnings
 
 
@@ -36,6 +37,10 @@ def header_panel(snap: BalanceSheetSnapshot, score: StockScore) -> Panel:
     valuation_parts = valuation_parts_for(snap)
     if valuation_parts:
         lines.append("Valuation: " + "  ·  ".join(valuation_parts))
+
+    risk_parts = risk_parts_for(snap)
+    if risk_parts:
+        lines.append("Risk, measured: " + "  ·  ".join(risk_parts))
 
     analyst_parts = analyst_parts_for(snap)
     if analyst_parts:
@@ -65,6 +70,23 @@ def valuation_parts_for(snap: BalanceSheetSnapshot) -> list[str]:
         parts.append(f"FCF yield {snap.fcf_yield:.2f}%{window}")
     if snap.dividend_yield is not None:
         parts.append(f"Div yield {snap.dividend_yield:.2f}%")
+    return parts
+
+
+def risk_parts_for(snap: BalanceSheetSnapshot) -> list[str]:
+    """Price swings, the deepest recent fall, what trades a day, and the record's loss years."""
+    risk = risk_profile(snap)
+    parts: list[str] = []
+    if risk.volatility_1y_pct is not None:
+        parts.append(f"1y volatility {risk.volatility_1y_pct:.0f}%")
+    if risk.worst_fall_3y_pct is not None:
+        parts.append(f"worst fall in 3y {risk.worst_fall_3y_pct:.0f}%")
+    if risk.avg_daily_traded_value is not None:
+        traded = format_money(risk.avg_daily_traded_value, snap.market_cap_currency)
+        share = f" ({risk.daily_turnover_pct:.2f}% of the company)" if risk.daily_turnover_pct else ""
+        parts.append(f"trades {traded} a day{share}")
+    if risk.fiscal_years:
+        parts.append(f"{risk.loss_years} loss year(s) in {risk.fiscal_years}")
     return parts
 
 

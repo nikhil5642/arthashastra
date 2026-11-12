@@ -104,6 +104,10 @@ class StockScore:
     low_confidence: bool = False
     # Composite-level caps that fired after the weighted blend.
     gates_applied: list[Gate] = field(default_factory=list)
+    # Pillars sitting at the neutral prior because nothing could be scored:
+    # a Claude judgment not written yet (or expired), a valuation with no
+    # usable price ratio. Their 50 is a placeholder, not a verdict.
+    unscored: list[Pillar] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.last_updated:

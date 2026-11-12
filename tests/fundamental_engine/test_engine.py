@@ -184,3 +184,27 @@ async def test_refresh_without_history_still_succeeds(tmp_path: Path, monkeypatc
     result = await engine.refresh_one("005930.KS")
     assert result.status == "ok"
     assert result.price_rows == 0
+
+
+async def test_refresh_all_leaves_companies_scored_in_passing_alone(tmp_path: Path, monkeypatch):
+    """A screen can score hundreds; `refresh all` is for the ones the user follows."""
+    _env(monkeypatch, tmp_path)
+    _install_source(
+        monkeypatch,
+        {
+            "MSFT": FetchResult(snapshot=_snap("MSFT"), price_history=_history()),
+            "TINY.TW": FetchResult(snapshot=_snap("TINY.TW"), price_history=_history()),
+        },
+    )
+    engine = Engine.from_env()
+    await engine.refresh_one("MSFT")
+    await engine.refresh_one("TINY.TW", follow=False)
+
+    assert engine.universe() == ["MSFT"]
+    results = await engine.refresh_all(spacing_seconds=0)
+    assert [r.ticker for r in results] == ["MSFT"]
+
+    rows = json.loads((tmp_path / "cache" / "scores.json").read_text())
+    assert (rows["MSFT"]["followed"], rows["TINY.TW"]["followed"]) == (True, False)
+    logged = json.loads((tmp_path / "cache" / "signals.json").read_text())
+    assert {s["ticker"] for s in logged} <= {"MSFT", ""}  # nothing about TINY.TW reached the log

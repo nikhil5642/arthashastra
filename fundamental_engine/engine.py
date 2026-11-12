@@ -77,7 +77,8 @@ class Engine:
     def universe(self) -> list[str]:
         return load_universe(self._cfg.data_cache_dir)
 
-    async def refresh_one(self, ticker: str) -> RefreshResult:
+    async def refresh_one(self, ticker: str, *, follow: bool = True) -> RefreshResult:
+        """Fetch, score and cache one ticker. `follow=False`: scored in passing (see `tracking`)."""
         ticker = canonical(ticker)
         source = FundamentalsSource(sec_user_agent=self._cfg.sec_user_agent)
         try:
@@ -101,7 +102,7 @@ class Engine:
             return RefreshResult(ticker=ticker, status=RefreshStatus.ERROR, detail=str(e))
 
         fx_rate = await conversion_rate(result.snapshot.currency, self._cfg.base_currency)
-        recorded = record_analysis(result, self._cfg, fx_rate_to_base=fx_rate)
+        recorded = record_analysis(result, self._cfg, fx_rate_to_base=fx_rate, follow=follow)
         return RefreshResult(
             ticker=ticker,
             status=RefreshStatus.OK,

@@ -22,9 +22,15 @@ log = logging.getLogger(__name__)
 
 
 def load_universe(cache_dir: Path) -> list[str]:
-    """Return the tickers we hold score data for, sorted alphabetically."""
-    scores = JsonStore(cache_dir / "scores.json").read()
-    return sorted(scores.keys())
+    """The tickers the user follows, sorted alphabetically.
+
+    Every cached row except the ones a screen or a comparison scored in
+    passing: `refresh all` and the backtests work on what was asked about
+    by name, not on everything that ever crossed a screen.
+    """
+    cached = JsonStore(cache_dir / "scores.json").read()
+    in_passing = {t for t, extended in load_scores(cache_dir).items() if not extended.followed}
+    return sorted(ticker for ticker in cached if ticker not in in_passing)
 
 
 def load_scores(cache_dir: Path) -> dict[str, ExtendedScore]:

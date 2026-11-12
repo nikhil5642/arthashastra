@@ -25,6 +25,11 @@ never leaks into the verdict.
 - **Every URGENT early concern is answered by name** in the evidence of
   the pillar it bears on (step 3.2). An unanswered URGENT concern means
   the analysis is not finished.
+- **No size priors.** A company nobody has heard of is judged exactly
+  like one everybody has. A thin public record is not a red flag, and
+  fame is not evidence (step 7.5). What *is* judged is position against
+  the industry's leader — supply, customers, being out-spent — on
+  evidence (step 9, "Position risk").
 
 ## Step 1 — Resolve to a canonical ticker
 
@@ -283,6 +288,44 @@ This hits live Wikipedia and, when `BRAVE_API_KEY` is set, Brave Search.
 - **PROFESSIONAL** — widely held, professional management (Microsoft,
   Infosys, HDFC Bank).
 
+## Step 7.5 — Judge a small company on what exists, not on what is missing
+
+Most listed companies are small, and for most of them step 5 returns a
+handful of stories and step 6 returns no Wikipedia page. That is the
+normal condition of a small company, not information about it.
+
+- **A thin record is neither a red flag nor a clean bill.** Where a
+  sub-score can't be established — no public record of the CEO, no
+  coverage — score that sub-score neutral (50–55), say in the evidence
+  that the record is thin, and lower nothing else because of it. Don't
+  reach for a low number to be safe, and don't reward the absence of
+  bad news.
+- **Judge leadership from what every listed company files**: how long the
+  CEO and the controlling holder have been there, what insiders own and
+  whether that changed, whether the share count grew (dilution) or debt
+  did, what the money earned (the ROCE trend in the report), the
+  related-party notes, and who the auditor is. The annual report and the
+  exchange filings say more than a profile in the press.
+- **Look where the company is covered.** Search in the local language
+  and on the exchange's own announcement site; a company absent from
+  English-language news can be thoroughly covered at home.
+- **No points for fame.** Index membership, analyst coverage, a famous
+  founder and a "blue chip" label are not evidence. Neither is being an
+  overlooked "hidden gem".
+- **Say what size does change.** Smaller companies are riskier on
+  average, and the report measures it for this one: the header's "Risk,
+  measured" line gives the yearly swing of the price, its worst fall in
+  three years, what trades a day and the loss years on record. State
+  those numbers in your answer, with whether one customer or one product
+  carries the business. They are risk notes — a buyer needs them — and
+  they move no pillar score.
+- **Size stays out of the search, not out of the judgment.** A small
+  company's *position* against its industry's leader is real business risk
+  — a small GPU maker without contracted foundry capacity, a small model
+  maker the leader can out-spend — and step 9 weighs it on evidence
+  ("Position risk"). What is not allowed is to mark it down for being
+  small without saying which of those exposures the evidence shows.
+
 ## Step 8 — Score leadership (0–100) with anti-optimism anchors
 
 **Base rubric by mode:**
@@ -344,6 +387,35 @@ This hits live Wikipedia and, when `BRAVE_API_KEY` is set, Brave Search.
    peak" signal, judge the tailwind at the company's normal margin. If
    the cycle shows signs of turning, the structural-disruption cap
    applies.
+6. **Position risk — a challenger is judged against its leader.** Answer
+   each from evidence (filings, the report, the screen), not from size
+   alone:
+   - **Scale against the leader:** `scale_vs_largest_pct` from a screen,
+     or this company's market cap and revenue against the industry's
+     largest peer (`compare <TICKER> <LEADER>`).
+   - **Supply:** does it depend on one supplier or foundry, and does it
+     have contracted or guaranteed capacity? (Annual reports name
+     single-source suppliers in the risk factors.)
+   - **Customers:** what share of revenue the largest customers carry —
+     filings must name any above 10%.
+   - **Out-spending:** the leader's R&D and capex in absolute terms against
+     this company's. A rate of spend is not a moat when the leader spends
+     ten times the amount.
+   - **Bundling:** is its product a feature the leader can add to its own
+     at little cost?
+   - **Runway:** if it loses money, months of cash at the current burn.
+
+   **Anchor:** in a scale-driven industry (chips, models, cloud, telecom
+   equipment, autos, …) a company a small fraction of the leader's size,
+   with no documented niche, captive customer base or contracted supply,
+   gets prospects ≤ **60**. A documented defensible niche lifts the cap —
+   name the evidence that documents it. The mirror holds too: **being the
+   leader is not a moat by itself** — verify it from margins, share and
+   returns (rule 6), not from the name.
+
+   The prospects `evidence` must carry one line that starts with
+   `Position risk:` — what the company is exposed to and the evidence, or
+   why it is the leader and what keeps it there.
 
 ## Step 10 — Score news (0–100) with anti-optimism anchors
 
@@ -379,7 +451,7 @@ full symbol, e.g. `MSFT.json`, `RELIANCE.NS.json`) with this schema:
       "prospects": {
         "score": <int 0-100>,
         "evidence": ["bullet 1", "..."],
-        "anchors_applied": ["tailwind_cap_slow_growth", "jurisdiction_cap", "..."]
+        "anchors_applied": ["tailwind_cap_slow_growth", "jurisdiction_cap", "position_risk_cap", "..."]
       },
       "news": {
         "score": <int 0-100>,

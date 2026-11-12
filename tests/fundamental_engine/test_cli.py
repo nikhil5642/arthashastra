@@ -196,6 +196,7 @@ def test_brief_pick_and_migrate_dispatch(cache):
 def test_screen_flags_become_a_typed_request(cache, capsys, monkeypatch):
     from fundamental_engine.commands import screen as screen_module
     from fundamental_engine.commands.screen import ScreenRequest, ScreenSort
+    from fundamental_engine.scorecard import DEFAULT_REUSE_HOURS, RankBy
 
     seen: list[tuple[ScreenRequest, bool]] = []
 
@@ -205,16 +206,58 @@ def test_screen_flags_become_a_typed_request(cache, capsys, monkeypatch):
 
     monkeypatch.setattr(screen_module, "run_screen_command", fake_run)
     argv = [
-        "screen", "--market", "US", "in", "--sector", "Technology", "--min-mcap", "10B",
+        "screen", "--market", "US", "in", "--sector", "tech", "--min-mcap", "10B",
         "--max-pe", "25", "--min-roe", "15", "--max-de", "0.5", "--min-drawdown", "20",
-        "--sort", "drawdown", "--score", "3", "--json",
+        "--sort", "drawdown", "--score", "3", "--rank", "fundamentals", "--reuse-hours", "0",
+        "--json",
     ]
     assert main(argv) == 0
     request, as_json = seen[0]
-    assert request.markets == ("us", "in") and request.sectors == ("Technology",)
+    # Names arrive as typed; `run_screen_command` puts them in Yahoo's spelling.
+    assert request.markets == ("US", "in") and request.sectors == ("tech",)
     assert (request.min_market_cap, request.max_market_cap) == (1e10, None)
     assert (request.max_pe, request.min_roe_pct, request.max_debt_to_equity) == (25, 15, 0.5)
     assert (request.sort, request.score, as_json) == (ScreenSort.DRAWDOWN, 3, True)
+    assert (request.rank_by, request.reuse_hours) == (RankBy.FUNDAMENTALS, 0.0)
+
+    assert main(["screen"]) == 0
+    defaults, _ = seen[1]
+    assert (defaults.rank_by, defaults.reuse_hours) == (RankBy.RISK_ADJUSTED, DEFAULT_REUSE_HOURS)
 
     assert main(["screen", "--max-mcap", "lots"]) == 2
     assert "Invalid --max-mcap" in capsys.readouterr().out
+
+
+def test_compare_passes_the_tickers_and_how_to_rank_them(cache, monkeypatch):
+    from fundamental_engine.commands import compare as compare_module
+    from fundamental_engine.scorecard import RankBy
+
+    seen: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(tickers: list[str], **options: object) -> int:
+        seen.append((tickers, options))
+        return 0
+
+    monkeypatch.setattr(compare_module, "run_compare_command", fake_run)
+    assert main(["compare", "NVDA", "amd", "--rank", "valuation", "--json"]) == 0
+    assert seen == [
+        (["NVDA", "amd"], {"rank_by": RankBy.VALUATION, "reuse_hours": 12.0, "as_json": True})
+    ]
+
+
+def test_ipo_joins_the_name_and_passes_the_price(cache, monkeypatch):
+    from fundamental_engine.commands import ipo as ipo_module
+
+    seen: list[tuple[str, dict[str, object]]] = []
+
+    def fake_run(name: str, **options: object) -> int:
+        seen.append((name, options))
+        return 0
+
+    monkeypatch.setattr(ipo_module, "run_ipo_command", fake_run)
+    assert main(["ipo", "cerebras", "systems", "--price", "28.5", "--json"]) == 0
+    assert main(["ipo", "anthropic"]) == 0
+    assert seen == [
+        ("cerebras systems", {"offer_price": 28.5, "as_json": True}),
+        ("anthropic", {"offer_price": None, "as_json": False}),
+    ]

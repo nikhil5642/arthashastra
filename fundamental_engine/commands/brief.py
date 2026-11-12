@@ -9,6 +9,10 @@ across a whole watchlist: which names carry urgent concerns, which show
 fresh strengths, and what changed (a verdict, a new concern) since each
 was last looked at.
 
+The brief is about the companies the user follows — the ones asked about
+by name. A screen scores dozens more in passing; they stay in the cache
+for the next screen and are only counted here.
+
 Every piece of data this command touches is loaded as a typed object
 (`ExtendedScore`, `DipCandidateRecord`, `Signal`) — there are no raw
 JSON-dict lookups with fallback defaults anywhere in this file.
@@ -58,9 +62,15 @@ def run_brief_command() -> int:
     console = make_console()
     cache_dir = cfg.data_cache_dir
 
-    scores = load_scores(cache_dir)
+    cached = load_scores(cache_dir)
+    scores = {ticker: extended for ticker, extended in cached.items() if extended.followed}
+    in_passing = len(cached) - len(scores)
     dip_candidates = load_dip_candidates(cache_dir)
-    signals = SignalBus(path=cache_dir / SIGNALS_FILENAME).read_all()
+    signals = [
+        signal
+        for signal in SignalBus(path=cache_dir / SIGNALS_FILENAME).read_all()
+        if not signal.ticker or signal.ticker in scores
+    ]
 
     sector_counter: Counter[str] = Counter(
         extended.sector
@@ -82,9 +92,15 @@ def run_brief_command() -> int:
     console.print(
         Panel(
             f"[bold]Market brief — {datetime.now().strftime('%Y-%m-%d %H:%M')}[/bold]\n"
-            f"Cached universe: {len(scores)} tickers  ·  "
+            f"Following: {len(scores)} tickers  ·  "
             f"Dip candidates: {len(dip_candidates)}  ·  "
-            f"Signals logged: {len(signals)}{stale_note}",
+            f"Signals logged: {len(signals)}{stale_note}"
+            + (
+                f"\n[dim]{in_passing} more were scored by screens in passing and are not "
+                f"shown — `analyse <TICKER>` follows one.[/dim]"
+                if in_passing
+                else ""
+            ),
             title_align="left",
         )
     )
@@ -297,7 +313,7 @@ def _render_markdown(
     lines: list[str] = [
         f"# Market brief — {datetime.now().strftime('%Y-%m-%d %H:%M')}",
         "",
-        f"- Cached universe: {len(scores)} tickers",
+        f"- Following: {len(scores)} tickers",
         f"- Dip candidates: {len(dip_candidates)}",
         f"- Integrity vetoes: {len(vetoes)}",
         f"- Tickers with material early concerns: {len(concerns)}",

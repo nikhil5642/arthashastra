@@ -27,14 +27,13 @@ from datetime import date
 from enum import StrEnum
 from statistics import median
 
-from scorers.base import VERDICT_BANDS, Pillar, Verdict, verdict_for
-from scorers.composite_scorer import PILLAR_WEIGHTS
+from scorers.base import VERDICT_BANDS, Verdict, verdict_for
+from scorers.composite_scorer import NEUTRAL_PRIOR_SCORE, deterministic_composite
 
 # A rank correlation across a handful of names is mostly noise (its standard
 # error is ~1 / √(n − 1): 0.5 for five names), so a date needs this many
 # scored tickers with a complete window before it counts in a ranking claim.
 MIN_CROSS_SECTION = 10
-NEUTRAL_SCORE = 50.0  # what the live composite uses for an unscored pillar
 
 
 class ScoreKind(StrEnum):
@@ -65,10 +64,7 @@ class Observation:
     @property
     def combined(self) -> float:
         """The deterministic half of the live composite, rescaled to 0–100."""
-        f = PILLAR_WEIGHTS[Pillar.FUNDAMENTALS]
-        v = PILLAR_WEIGHTS[Pillar.VALUATION]
-        valuation = self.valuation if self.valuation is not None else NEUTRAL_SCORE
-        return (self.fundamentals * f + valuation * v) / (f + v)
+        return deterministic_composite(self.fundamentals, self.valuation)
 
     def score(self, kind: ScoreKind) -> float | None:
         if kind is ScoreKind.FUNDAMENTALS:
@@ -260,7 +256,7 @@ def _scored(observations: Sequence[Observation], kind: ScoreKind) -> list[Observ
 
 def _score(obs: Observation, kind: ScoreKind) -> float:
     value = obs.score(kind)
-    return value if value is not None else NEUTRAL_SCORE
+    return value if value is not None else NEUTRAL_PRIOR_SCORE
 
 
 def _with_returns(observations: Sequence[Observation]) -> list[Observation]:

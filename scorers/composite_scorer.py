@@ -38,6 +38,20 @@ PENDING_COMPLETENESS_PCT = 0.0
 INTEGRITY_GATE_CEILING = 54.0
 
 
+def deterministic_composite(fundamentals: float, valuation: float | None) -> float:
+    """The half of the composite Python computes, rescaled to 0–100.
+
+    Fundamentals and valuation at their live relative weights (35 : 15),
+    with an unscored valuation at the neutral prior, as in the blend. It is
+    the one number two companies can be compared on before Claude has judged
+    either — and the one the backtests replay, since judgments have no
+    history.
+    """
+    f, v = PILLAR_WEIGHTS[Pillar.FUNDAMENTALS], PILLAR_WEIGHTS[Pillar.VALUATION]
+    priced = valuation if valuation is not None else NEUTRAL_PRIOR_SCORE
+    return (fundamentals * f + priced * v) / (f + v)
+
+
 def blend(
     *,
     ticker: str,
@@ -97,6 +111,7 @@ def blend(
         data_completeness_pct=round(mean_completeness, 1),
         evidence=evidence,
         gates_applied=gates,
+        unscored=[name for name, p in pillars.items() if p.data_completeness_pct == 0],
     )
 
 

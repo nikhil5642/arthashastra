@@ -42,6 +42,11 @@ from data_sources.fundamentals_source.primitives import (
     trailing_twelve_months,
 )
 from data_sources.fundamentals_source.snapshot import SnapshotFields
+from data_sources.price_series import (
+    TRADING_DAYS_PER_YEAR,
+    annualised_volatility_pct,
+    worst_fall_pct,
+)
 
 if TYPE_CHECKING:
     # Forward references — only the type checker sees these. No runtime
@@ -57,7 +62,8 @@ SplitRow = tuple[str, float]  # (ISO date, ratio) — 4.0 for a 4-for-1 split
 
 _T = TypeVar("_T")
 
-TRADING_DAYS_PER_YEAR = 252
+VOLUME_WINDOW_SESSIONS = 63  # three months of trading days
+WORST_FALL_WINDOW_YEARS = 3
 MAX_TREND_YEARS = 10  # fiscal years kept in the multi-year trend series
 # A split inside the comparison year makes two share counts incomparable.
 SPLIT_LOOKBACK_DAYS = 400
@@ -243,6 +249,22 @@ def _fill_price_context(
     out["high_52w"] = float(last_year["High"].max())
     out["low_52w"] = float(last_year["Low"].min())
     price_history.extend(_column_rows(hist, "Close"))
+    _fill_price_risk(out, [close for _, close in price_history], hist)
+
+
+def _fill_price_risk(out: SnapshotFields, closes: list[float], hist: "DataFrame") -> None:
+    """How the price has behaved and how much of it trades — the tape's own account of risk."""
+    out["price_history_years"] = round(len(closes) / TRADING_DAYS_PER_YEAR, 1)
+    volatility = annualised_volatility_pct(closes[-(TRADING_DAYS_PER_YEAR + 1):])
+    if volatility is not None:
+        out["volatility_1y_pct"] = volatility
+    worst_fall = worst_fall_pct(closes[-WORST_FALL_WINDOW_YEARS * TRADING_DAYS_PER_YEAR:])
+    if worst_fall is not None:
+        out["worst_fall_3y_pct"] = worst_fall
+    if "Volume" in hist.columns:
+        recent = hist["Volume"].dropna().iloc[-VOLUME_WINDOW_SESSIONS:]
+        if len(recent) and float(recent.mean()) > 0:
+            out["avg_daily_volume"] = float(recent.mean())
 
 
 def _column_rows(hist: "DataFrame | None", column: str) -> list[PriceRow]:

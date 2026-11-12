@@ -314,3 +314,19 @@ def test_header_hides_a_lenders_cash_flow_yield_and_flags_unrepeatable_earnings(
     unproven = BalanceSheetSnapshot(ticker="RDDT", as_of_date="2026-11-10", pe_ratio=19.4, net_margin=32.0,
                                     net_margin_annual_trend=[-24.0, -11.0, -37.0, 32.0])
     assert valuation_parts_for(unproven) == ["P/E 19.4 (no repeatable earnings)"]
+
+
+def test_the_header_states_measured_risk():
+    from data_sources.fundamentals_source import BalanceSheetSnapshot
+    from reports.stock_report.header import risk_parts_for
+
+    snap = BalanceSheetSnapshot(
+        ticker="TINY.T", as_of_date="2026-11-12", currency="JPY", current_price=2474.0,
+        market_cap=1.4e10, avg_daily_volume=12_000.0, volatility_1y_pct=68.0, worst_fall_3y_pct=57.0,
+        net_margin_annual_trend=[-4.0, 6.0, 9.4, 16.8],
+    )
+    parts = risk_parts_for(snap)
+    assert parts[0] == "1y volatility 68%" and parts[1] == "worst fall in 3y 57%"
+    assert parts[2].startswith("trades ¥29.69M a day") and "0.21% of the company" in parts[2]
+    assert parts[3] == "1 loss year(s) in 4"
+    assert risk_parts_for(BalanceSheetSnapshot(ticker="NEW", as_of_date="2026-11-12")) == []

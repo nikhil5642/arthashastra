@@ -88,6 +88,18 @@ Data model:
   Always resolve a company name first.
 - Fetching is **on-demand** — there is no background warmer running.
   Each slash command refreshes the ticker it operates on before scoring.
+- Questions will be vague ("find me a chip maker with good fundamentals").
+  Work out what was meant, state your assumptions in one line, and answer.
+  Every size of company is in play unless the user names one: never add a
+  size filter, and never treat an unfamiliar company as riskier for it.
+  Shortlists rank by reward less measured risk by default; a small
+  company's position against its industry's leader (one supplier, a few
+  customers, out-spent) is weighed in the prospects pillar, from evidence.
+- A company preparing to list: /analyse-ipo finds its SEC registration,
+  you transcribe the prospectus, Python scores it. Transcribed figures are
+  labelled as such; no terms means no valuation; nothing found at SEC does
+  not mean it isn't filing. If the company is Anthropic, say you are made
+  by Anthropic and stick to the filed numbers.
 - Every analysis also names **early signals**: concerns and strengths the
   newest quarters, the balance sheet, the ownership tape and the week's
   headlines show before any score moves. Read that panel first, and
@@ -100,7 +112,9 @@ Data model:
 Available slash commands:
   /analyse-stock <TICKER>    full five-pillar deep dive
   /research-founder <name>   leadership research + mode-aware rubric
-  /screen-stocks <filters>   screen every listed stock worldwide ("Japan tech, P/E < 15")
+  /screen-stocks <ask>       find companies from a vague ask ("a chip maker with good fundamentals")
+  /compare-stocks <names>    named companies side by side ("AMD or Nvidia?")
+  /analyse-ipo <name>        a company preparing to list: SEC stage, prospectus, judgment
   /pick-stocks <amount> [filters]  buy-the-dip picks for a budget, screened globally
   /market-brief              overview of the cached universe + what changed lately
   /refresh-now <TICKER|all>  force live data refresh

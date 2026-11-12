@@ -49,12 +49,26 @@ Every session Claude works in this repo, the default workflow is:
    "Early signals" panel and the "Changed since …" panel are the first
    things to read: they say what is new since the audited numbers and
    since the last look.
-3. If the user asks to **find / screen / pick stocks** by filters
-   ("US and Japanese tech over $10B, down 20%") → `/screen-stocks` or
-   `/pick-stocks <budget> <filters>`. Both read every listed stock in the
-   chosen markets through Yahoo's screener (`python3 -m fundamental_engine
-   screen …`), not just the cache, then score the best matches.
-4. If the user asks whether the scoring **works** → `/backtest` (or
+3. If the user asks to **find / screen / pick stocks** — and the ask will
+   usually be vague: "find me a chip maker with good fundamentals", "any
+   cheap Japanese industrials?" → `/screen-stocks`, or `/pick-stocks
+   <budget> <filters>` when there is money to place. Work out what was
+   meant, say in one line what you assumed, and answer; don't ask a
+   clarifying question when a sensible default exists. Both read every
+   listed stock that matches through Yahoo's screener (`python3 -m
+   fundamental_engine screen …`), order the matches by a size-blind
+   preview of the fundamentals rubric, score the best in full and rank
+   them. **Every size of company is in play unless the user names one**
+   (rule 12).
+   If the user names the companies ("AMD or Nvidia?", "compare these
+   five") or a theme Yahoo has no industry for → `/compare-stocks`
+   (`python3 -m fundamental_engine compare <TICKERS…>`).
+   Both rank by reward less measured risk unless the ask says otherwise
+   (`--rank risk-adjusted`, rule 12).
+4. If the user asks about a company **preparing to list** ("is Anthropic
+   filing?", "analyse the X IPO") → `/analyse-ipo <name>` (`python3 -m
+   fundamental_engine ipo <NAME> [--price P]`). See rule 14.
+5. If the user asks whether the scoring **works** → `/backtest` (or
    `python3 -m backtests [SUITE …] --tickers <SYMBOLS|all> --years 30
    --step year|quarter`). Each suite in `backtests/suites/` tests one
    claim (fundamentals ranks returns, the growth veto is justified, dip
@@ -62,7 +76,7 @@ Every session Claude works in this repo, the default workflow is:
    / WEAK FAIL / FAIL / NO DATA (FAIL needs |t| ≥ 2 against the claim;
    every estimate is one number per date, with t taken across dates).
    Report the coverage, the t-stats, and every FAIL honestly.
-5. If the user asks you to **change the code** → obey the layer
+6. If the user asks you to **change the code** → obey the layer
    discipline (see "Architecture" below), add a typed interface for
    any new field / shape / value (see "Typed interfaces"), and
    write/update tests that monkeypatch adapters instead of loading
@@ -128,6 +142,19 @@ Every session Claude works in this repo, the default workflow is:
      (never added back), and a margin far above the company's own median
      counts only up to 1.5× that median. A P/E of 15 made of paper gains,
      or 9 at the top of a memory cycle, is not cheap.
+   - **A challenger is judged against its leader.** Size stays out of the
+     search (rule 12) but position goes into the judgment: a small GPU
+     maker without contracted foundry capacity, or a small model maker the
+     leader out-spends tenfold, carries business risk the leader does not.
+     In the prospects pillar, answer from evidence — scale against the
+     leader, single-supplier dependence and contracted capacity, customer
+     concentration, the leader's absolute R&D and capex, whether the
+     product is a feature the leader can bundle, cash runway. In a
+     scale-driven industry, a company a small fraction of the leader's
+     size with no documented niche, captive customers or contracted supply
+     gets prospects ≤ 60; a documented niche lifts the cap. The mirror:
+     being the leader is not a moat by itself (rule 6). Every prospects
+     judgment carries a `Position risk:` evidence line.
    When your verdict feels more optimistic than the tape, check
    whether you've actually applied these anchors or whether you're
    importing brand priors.
@@ -218,6 +245,74 @@ Every session Claude works in this repo, the default workflow is:
     line. An integrity veto never expires. Pillar scores are held to
     0–100 when read.
 
+12. **No company is preferred for its size.** Four listed companies in
+    five are small, and the best business in an industry is as likely to
+    be one of them: of the 113 chip makers with a 15%+ return on equity
+    (November 2026), five of the six that scored best on fundamentals were
+    not large caps, and the largest twelve held three of the ten best.
+    - Nothing is truncated by market cap unless the user asks for a size:
+      a screen reads every match (one query spans all its markets), not
+      each market's largest. "Largest first" is `--sort mcap` and nothing
+      else.
+    - Who gets scored in full is decided by the **rubric preview**
+      (`fundamental_engine/preview.py`): how many of the fundamentals
+      rubric's own marks a company clears, asked of Yahoo for every
+      listing in the screen. No size term; companies level on it take
+      turns across large, mid and small. On two industries scored in full
+      it found 9 of the ten best among the first 25, from every size band.
+    - Unknown is not a miss, and not a pass: a ratio Yahoo has no value
+      for is left out of a preview, and a preview resting on under 60% of
+      the marks is "thin" and ranks after the well-covered ones.
+    - Anything that scales with fame is measured as a share, not a count
+      (the governance radar fires when governance is most of what little
+      is written about a company, not only at eight stories).
+    - In your own judgments: a thin public record is neither a red flag
+      nor a clean bill, and fame is not evidence (`/analyse-stock` step
+      7.5). Never add a size filter the user did not ask for.
+    - When coverage is incomplete the output says so (`read_whole`,
+      `ordered_by`, `unread_markets`, `size_mix`) — and so must you.
+    - **Blind to size is not blind to risk.** Smaller companies are
+      riskier on average, measurably: across 293 cached companies the
+      share price's yearly swing ran 34% above $200B and 70% below $300M,
+      and loss-making years rose from 6% of the record to 32%. Size is a
+      proxy, so risk is measured per company instead of assumed from it
+      (`scorers/risk_profile.py`: yearly price swing, worst fall in three
+      years, what trades a day, loss years on record) and shown beside
+      every score. It moves no pillar and no verdict, but it does discount
+      the default ranking: `RankBy.RISK_ADJUSTED` orders a shortlist by
+      fundamentals + valuation less `risk_discount` (0–30 points for price
+      swings above 30%, loss years, a record under four fiscal years;
+      unknown volatility costs 10). `pick` holds a position to a tenth
+      of a day's trading. State the measured risk for every company you
+      recommend; never treat unfamiliarity as risk or fame as safety. A
+      user who asks for "safe" or "low-risk" is asking about this, and a
+      size floor is then a fair reading of the ask.
+
+13. **Followed, or scored in passing.** A company the user asks about by
+    name (`analyse`, `refresh <TICKER>`) is *followed*. One that a screen
+    or a comparison scores along the way is cached for the next question
+    but not followed: nothing about it goes on the signal bus, and
+    `brief`, `refresh all` and `backtests --tickers all` leave it out.
+    Asking about it by name follows it; once followed, always followed.
+    A vague question can score dozens of companies — they must not flood
+    the watchlist.
+
+14. **IPOs: two halves, and transcribed is not fetched.** A company that
+    has not listed has no Yahoo symbol and no statements feed.
+    `data_sources/ipo_source.py` finds its SEC registration (stage, reserved
+    ticker, newest prospectus); **you** read the prospectus in
+    `/analyse-ipo` and transcribe its statements into
+    `data_cache/ipos/<slug>.json` (`ProspectusStatements`); Python scores
+    those figures on the same rubric (`snapshot_from_prospectus`,
+    `source == "prospectus"`). The report labels them as transcribed, with
+    the source document. No offering terms → no valuation (never a price
+    from the news). Nothing found at SEC ≠ not filing (confidential drafts
+    are invisible; listings outside the US are not covered). An unlisted
+    company never enters `scores.json` or the signal bus. Once it trades,
+    it is an ordinary `analyse` with a `RECENTLY_LISTED` early signal for
+    its first year. When the company is Anthropic, say that you are made
+    by Anthropic and hold yourself to the filed numbers only.
+
 ## Architecture
 
 The project is a strict **layered architecture** — each layer depends
@@ -264,20 +359,29 @@ Read those when you're touching a layer for the first time.
 fundamental_engine/          # orchestrator + CLI commands — see README.md
 ├── __main__.py              # argparse + dispatch (the thin CLI shim)
 ├── commands/                # one file per CLI subcommand that needs orchestration
-│   ├── screen.py            #   screen [--market …] [filters] [--score N] — every listed stock, globally
+│   ├── screen.py            #   screen [--market …] [filters] [--score N] [--rank …] — every listed stock,
+│   │                        #   every size: whole read → rubric preview → score the best → rank
+│   ├── compare.py           #   compare <TICKER…> [--rank …] — named companies side by side
+│   │                        #   + render_shortlist (the scorecard table screen prints too)
+│   ├── ipo.py               #   ipo <NAME> [--price P] — SEC registration stage + transcribed
+│   │                        #   prospectus scored (never written to scores.json)
 │   ├── pick.py              #   pick --amount <BUDGET> [--tickers …]  (FX-converted, sector + country caps)
 │   ├── brief.py             #   brief
 │   └── migrate.py           #   migrate-ids — one-time bare NSE keys → Yahoo symbols
 ├── analyse_pipeline.py      # analyse_ticker / score_snapshot / AnalysisResult + judgment ageing
-├── tracking.py              # record_analysis — persist a run, and what changed since the last look
+├── tracking.py              # record_analysis — persist a run, what changed since the last look,
+│                            # and whether the company is followed or was scored in passing
+├── scorecard.py             # Scorecard + Shortlist + RankBy (default RISK_ADJUSTED) + score_tickers
+│                            # (reuses fresh cache rows; risk_discount / risk_adjusted / scale_vs_largest_pct)
+├── preview.py               # preview(): share of the rubric's marks each listing clears, with coverage
 ├── analysis_context.py      # "Analysis context" + "Changed since …" banners, judgment-age helpers
-├── extended_score.py        # ExtendedScore — typed scores.json row (incl. early signals)
+├── extended_score.py        # ExtendedScore — typed scores.json row (incl. early signals, `followed`)
 ├── dip_candidate.py         # DipCandidateRecord — typed dip_candidates.json row
 ├── engine.py                # refresh_one / refresh_all (fundamentals + news radar → tracking.record_analysis)
 ├── snapshot_store.py        # SnapshotStore — full per-ticker snapshot cache (read by `inspect`)
 ├── resolver.py              # free-text → ticker on any exchange via Yahoo search
 ├── judgments.py             # Judgment + JudgmentStore (Claude writes, Python reads)
-├── universe.py              # load_scores / load_dip_candidates — typed loaders
+├── universe.py              # load_universe (followed tickers) / load_scores / load_dip_candidates
 ├── leader_mode_classifier.py  # LeaderMode StrEnum (4 global modes) + classify_mode(...)
 ├── budget_parser.py         # Magnitude enum (K / M / B / LAKH / CRORE) + parse_budget
 ├── ticker.py                # canonical / slug (path-safe name)
@@ -297,14 +401,21 @@ data_sources/                # live data adapters — see README.md
 │   ├── screener_adapter.py  #   screener.in fetcher + section parsers + appliers
 │   │                        #   (HTMLParser type via TYPE_CHECKING)
 │   ├── sec_adapter.py       #   SEC EDGAR companyfacts → yfinance-shaped annual frames (first-filed)
+│   ├── prospectus.py        #   ProspectusStatements (Claude-transcribed, StatementRow lines, Offering)
+│   │                        #   + snapshot_from_prospectus → an ordinary snapshot, source "prospectus"
 │   ├── valuation.py         #   apply_valuation: P/E, earnings / FCF yield (freshest twelve months),
 │   │                        #   P/B, P/E history, spot FX for cross-currency, quote reconciliation
 │   ├── history.py           #   StatementHistory + snapshot_as_of + rebase_sec_eps (point-in-time)
 │   └── primitives.py        #   parse helpers + period alignment + date-matched YoY
 │                            #   + trailing_twelve_months + cagr_pct (PROFIT_WIPED_OUT_CAGR)
 ├── price_series.py          # PriceSeries — split-adjusted closes + date lookups
-├── universe_source.py       # Yahoo's global screener: Criteria → EquityQuery, Listing rows
+│                            # + annualised_volatility_pct / worst_fall_pct
+├── universe_source.py       # Yahoo's global screener: Criteria → EquityQuery (one query can span
+│                            # every market), Listing rows, Measure / Bound + fetch_symbols ("which
+│                            # of these listings clear X?"), market_of(exchange)
 ├── names.py                 # company-name cleaning shared by resolver, news, and screen
+├── ipo_source.py            # SEC registrations: find_registrants / fetch_registration → IpoRegistration
+│                            # (IpoStage, reserved ticker, latest prospectus URL — never the document)
 ├── fx_source.py             # live FX via Yahoo pairs (bridged through USD) + minor units (GBp, ZAc, ILA, KWF)
 ├── research_source.py       # Wikipedia API + Brave Search (WebHit TypedDict)
 └── news_source.py           # Google News RSS: de-noised, de-duplicated stories (NewsItem) +
@@ -312,14 +423,18 @@ data_sources/                # live data adapters — see README.md
 
 scorers/                     # deterministic scoring — see README.md
 ├── base.py                  # Verdict + Pillar + Gate StrEnums + ScorerResult + StockScore + verdict_for
-├── composite_scorer.py      # blend(...) 35 / 15 / 25 / 15 / 10 + integrity gate
+├── composite_scorer.py      # blend(...) 35 / 15 / 25 / 15 / 10 + integrity gate + deterministic_composite
 ├── valuation_scorer.py      # valuation pillar: earnings yield + FCF yield (or P/B vs ROE) + P/E vs history,
 │                            # on sustainable_earnings (one-offs out, cyclical peaks capped)
 ├── early_signals.py         # detect_early_signals: concerns + strengths beyond the scored ratios
+├── risk_profile.py          # RiskProfile: measured price swings, liquidity, record — facts, no score
+│                            # + risk_discount (ranking aid only)
 └── fundamentals_scorer/     # dispatches to industrial or bank rubric based on is_bank_snapshot
     ├── __init__.py          #   score_fundamentals entry
     ├── industrial.py        #   industrial rubric + 5 sub-scorers + pledge / growth vetoes
     │                        #   (growth_deceleration_cap is shared with valuation + backtests)
+    ├── marks.py             #   the rubrics' own thresholds as screenable questions (INDUSTRIAL_MARKS,
+    │                        #   LENDER_MARKS) — what the screen's size-blind preview asks about
     ├── bank.py              #   bank / NBFC rubric + 5 sub-scorers (incl. asset quality)
     └── ownership.py         #   shared ownership sub-score (pledge, insider change, holding)
 
@@ -346,7 +461,9 @@ signals/                     # append-only file pub/sub + shared file I/O — se
 ├── resolve-ticker/SKILL.md
 ├── analyse-stock/SKILL.md
 ├── research-founder/SKILL.md
-├── screen-stocks/SKILL.md
+├── screen-stocks/SKILL.md   # the entry point for any vague "find me …" ask
+├── compare-stocks/SKILL.md  # named companies, or a hand-built shortlist, side by side
+├── analyse-ipo/SKILL.md     # a company preparing to list: registration → prospectus → judgment
 ├── pick-stocks/SKILL.md
 ├── market-brief/SKILL.md
 ├── refresh-now/SKILL.md
@@ -369,6 +486,7 @@ data_cache/                  # runtime state (gitignored)
 ├── prices.db                # SQLite — real daily closes from yfinance.history()
 ├── judgments/<TICKER>.json  # Claude-written qualitative scores
 ├── snapshots/<TICKER>.json  # full scored snapshot (raw dumps, provenance, conflicts)
+├── ipos/<slug>.json         # Claude-transcribed prospectus statements (ProspectusStatements)
 ├── research/<slug>.json     # cached Wikipedia + Brave bundles
 ├── news/<TICKER>.json       # per-company news: {ticker, company, window_days, radar, stories}
 ├── dip_candidates.json      # last pick run output
@@ -404,7 +522,7 @@ callers get IDE autocomplete and exhaustive iteration.
 | `Gate`                | `scorers/base.py`                                  | INTEGRITY_VETO |
 | `ValuationComponent`  | `scorers/valuation_scorer.py`                      | EARNINGS_YIELD · FCF_YIELD · PRICE_TO_BOOK · VS_HISTORY |
 | `Tone`                | `scorers/early_signals.py`                         | CONCERN · STRENGTH |
-| `EarlySignalKind`     | `scorers/early_signals.py`                         | ONE_OFF_PROFIT · PEAK_MARGIN · FREE_CASH_FLOW_FALLING / _RISING · CAPEX_OUTRUNS_CASH_FLOW · STOCK_PAY_HEAVY · REVENUE_SHRINKING / _DECELERATING / _ACCELERATING · MARGIN_COMPRESSING / _EXPANDING · DEBT_RISING / _FALLING · NEGATIVE_EQUITY · SHARE_DILUTION / _BUYBACK · GOVERNANCE_NEWS · UNRELIABLE_QUOTE · … (one per detector) |
+| `EarlySignalKind`     | `scorers/early_signals.py`                         | ONE_OFF_PROFIT · PEAK_MARGIN · FREE_CASH_FLOW_FALLING / _RISING · CAPEX_OUTRUNS_CASH_FLOW · STOCK_PAY_HEAVY · REVENUE_SHRINKING / _DECELERATING / _ACCELERATING · MARGIN_COMPRESSING / _EXPANDING · DEBT_RISING / _FALLING · NEGATIVE_EQUITY · SHARE_DILUTION / _BUYBACK · GOVERNANCE_NEWS · UNRELIABLE_QUOTE · RECENTLY_LISTED · … (one per detector) |
 | `StatementWindow`     | `data_sources/fundamentals_source/snapshot.py`     | TTM · FISCAL_YEAR (which twelve months a flow figure covers) |
 | `IndustrialComponent` | `scorers/fundamentals_scorer/industrial.py`        | BALANCE_SHEET_HEALTH · PROFITABILITY · GROWTH · EARNINGS_QUALITY · OWNERSHIP |
 | `BankComponent`       | `scorers/fundamentals_scorer/bank.py`              | PROFITABILITY · ASSET_QUALITY · GROWTH · FRANCHISE · GOVERNANCE |
@@ -414,7 +532,13 @@ callers get IDE autocomplete and exhaustive iteration.
 | `NewsCategory`        | `data_sources/news_source.py`                      | GOVERNANCE · RATING · INSIDER · LEADERSHIP · CORPORATE_ACTION · EARNINGS (severity order) |
 | `Severity`            | `signals/signal_bus.py`                            | INFO · ALERT · URGENT |
 | `SignalType`          | `signals/signal_bus.py`                            | UNIVERSE_REFRESHED · SCORE_UPDATED · VERDICT_CHANGED · EARLY_CONCERN · EARLY_STRENGTH · DIP_DETECTED (each has an emitter) |
-| `ScreenSort`          | `fundamental_engine/commands/screen.py`            | MARKET_CAP · DRAWDOWN · EARNINGS_YIELD |
+| `ScreenSort`          | `fundamental_engine/commands/screen.py`            | QUALITY (the rubric preview, the default) · MARKET_CAP (only when size is asked for) · DRAWDOWN · EARNINGS_YIELD |
+| `SizeBand`            | `fundamental_engine/commands/screen.py`            | LARGE · MID · SMALL (thirds of a screen's companies, by market cap) |
+| `Order`               | `fundamental_engine/commands/screen.py`            | PREVIEW · SIZE_SPREAD (too many to preview) · AS_SORTED |
+| `RankBy`              | `fundamental_engine/scorecard.py`                  | FUNDAMENTALS · VALUATION · BOTH · RISK_ADJUSTED (the default: both less `risk_discount`) |
+| `IpoStage`            | `data_sources/ipo_source.py`                       | DRAFT · FILED · PRICED · TRADING (read off the SEC filing list) |
+| `StatementRow`        | `data_sources/fundamentals_source/prospectus.py`   | REVENUE · COST_OF_REVENUE · … · LONG_TERM_DEBT · CURRENT_DEBT (the lines a prospectus file may carry) |
+| `Measure`             | `data_sources/universe_source.py`                  | RETURN_ON_EQUITY · RETURN_ON_CAPITAL · RETURN_ON_ASSETS · DEBT_TO_EQUITY · CURRENT_RATIO · QUICK_RATIO · REVENUE_GROWTH · PROFIT_GROWTH (ratios the screener can be asked about) |
 | `Step`                | `backtests/engine/schedule.py`                     | YEAR · QUARTER |
 | `ScoreKind`           | `backtests/engine/metrics.py`                      | FUNDAMENTALS · VALUATION · COMBINED |
 | `Outcome`             | `backtests/suite.py`                               | PASS · WEAK_PASS · WEAK_FAIL · FAIL · NO_DATA |
@@ -442,7 +566,18 @@ consumer anywhere else does `.get("key", default)` on a raw dict.
 | `BalanceSheetSnapshot` + `DataConflict` | `data_sources/fundamentals_source/snapshot.py` | `snapshots/<TICKER>.json` |
 | `Judgment`, `PillarJudgment` | `fundamental_engine/judgments.py`       | `judgments/<TICKER>.json` |
 | `EarlySignal`         | `scorers/early_signals.py`                     | `scores.json` (the `early_signals` list of each row) |
+| `RiskProfile`         | `scorers/risk_profile.py`                      | `scores.json` (the `risk` object of each row) |
+| `Scorecard`, `Shortlist` | `fundamental_engine/scorecard.py`           | the `scored` / `not_scored` lists of `screen --json` and `compare --json` (built from `ExtendedScore`, never stored) |
 | `NewsItem`, `NewsDigest` | `data_sources/news_source.py`               | `news/<TICKER>.json` |
+| `ProspectusStatements` | `data_sources/fundamentals_source/prospectus.py` | `ipos/<slug>.json` (written by Claude in `/analyse-ipo`) |
+| `IpoRegistration`, `Registrant` | `data_sources/ipo_source.py`         | none — the `registration` object of `ipo --json` |
+
+Two fields on the score row say what a number is *not*: `unscored` (on
+`StockScore`) lists the pillars sitting at the neutral 50 because nothing
+could be scored — a judgment not written or expired, a valuation with no
+usable price ratio — so a placeholder is never mistaken for an opinion;
+`followed` (on `ExtendedScore`) is false for a company scored in passing
+(rule 13).
 
 Each `from_dict(data: dict[str, object])` narrows untyped input with
 dedicated `_as_float`, `_as_str`, `_as_int`, `_parse_evidence`,
@@ -577,8 +712,13 @@ against the fiscal year (free cash flow, capex, stock pay), the latest
 balance sheet against the one a year back (debt, receivables, inventory,
 goodwill, share count), the ownership tape (insiders, foreign
 institutions, retail), bank NPAs, the price against its 52-week high,
-and a week of headlines (`news_source.digest`): a governance burst is
-several governance-tagged stories AND ≥ 15% of the week's coverage.
+how long the price record is (under a year of trading is
+`RECENTLY_LISTED`: every price-based measure covers only that stretch and
+the insiders' lock-up has usually not ended), and a week of headlines (`news_source.digest`): a governance burst is
+several governance-tagged stories AND ≥ 15% of the week's coverage — or,
+for a company few outlets cover, two or more stories that are half of
+everything written about it (story counts scale with fame; the share
+does not).
 
 A strength paid for out of flagged profit is context, not a material
 strength: when the profit is padded by one-offs or sits at a cyclical
@@ -688,6 +828,8 @@ write the real current timestamp.
   one-shot terminal reports
 - Don't ship a company registry, alias list, ticker list, or holiday
   list. Everything dynamic.
+- Don't rank, truncate or sample by market cap, and don't add a size
+  floor "to be safe" — in code, in a skill, or in an answer (rule 12).
 - Don't re-introduce an LLM client in Python
 - Don't commit `.env` or anything from
   `data_cache/`

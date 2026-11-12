@@ -146,3 +146,34 @@ def test_brief_surfaces_early_signals_and_recent_changes(tmp_path: Path, monkeyp
     # Only the last two weeks' verdict moves and new signals count as "what changed".
     assert "BUY → HOLD (composite 71.8 → 66.6)" in content
     assert "an old concern" not in content and "composite 66.6 (HOLD)" not in content
+
+
+def test_brief_is_about_followed_companies_and_only_counts_the_rest(tmp_path: Path, monkeypatch):
+    from datetime import datetime
+
+    monkeypatch.setenv("DATA_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("COLUMNS", "200")
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now().isoformat()
+    urgent = [{"kind": "share_dilution", "tone": "concern", "severity": "URGENT", "message": "Share count grew 19%."}]
+    (cache_dir / "scores.json").write_text(json.dumps({
+        "TSLA": {"composite": 49.4, "verdict": "AVOID", "last_updated": now, "early_signals": urgent},
+        # Met in a screen an hour ago: a better composite and its own urgent concern.
+        "TINYCHIP.TW": {"composite": 71.0, "verdict": "BUY", "last_updated": now, "followed": False,
+                        "early_signals": urgent},
+    }))
+    (cache_dir / "signals.json").write_text(json.dumps([
+        {"signal_type": "EARLY_CONCERN", "severity": "URGENT", "ticker": "TSLA",
+         "message": "Share count grew 19%.", "timestamp": now},
+        {"signal_type": "EARLY_CONCERN", "severity": "URGENT", "ticker": "TINYCHIP.TW",
+         "message": "left over from before it was scored in passing", "timestamp": now},
+    ]))
+
+    from fundamental_engine.commands.brief import run_brief_command
+
+    assert run_brief_command() == 0
+    content = next((cache_dir / "reports").glob("brief_*.md")).read_text()
+    assert "- Following: 1 tickers" in content
+    assert "TSLA" in content and "TINYCHIP.TW" not in content
+    assert "left over from before" not in content

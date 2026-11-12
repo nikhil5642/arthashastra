@@ -207,6 +207,26 @@ def test_a_fresh_judgment_counts_in_full(tmp_path: Path):
     assert not any(line.startswith(("STALE", "EXPIRED")) for lines in score.evidence.values() for line in lines)
 
 
+def test_the_cached_row_remembers_which_pillars_were_never_scored(tmp_path: Path):
+    from fundamental_engine.extended_score import ExtendedScore
+    from scorers.base import Pillar
+
+    unjudged = score_snapshot(_fresh_snap(), data_cache_dir=tmp_path)
+    assert {Pillar.LEADERSHIP, Pillar.PROSPECTS, Pillar.NEWS} <= set(unjudged.score.unscored)
+    row = ExtendedScore.from_analysis(unjudged).to_dict()
+    reloaded = ExtendedScore.from_dict(row)
+    assert reloaded is not None and reloaded.score.unscored == unjudged.score.unscored
+    # A row written before the field existed, or one carrying a pillar from the future, still loads.
+    legacy = ExtendedScore.from_dict({k: v for k, v in row.items() if k != "unscored"})
+    assert legacy is not None and legacy.score.unscored == []
+    odd = ExtendedScore.from_dict(row | {"unscored": ["news", "a_pillar_from_the_future", 7]})
+    assert odd is not None and odd.score.unscored == [Pillar.NEWS]
+
+    # An expired news judgment is a placeholder again; fresh leadership and prospects are not.
+    expired = _judged(tmp_path, days_old=45).score
+    assert Pillar.NEWS in expired.unscored and Pillar.LEADERSHIP not in expired.unscored
+
+
 def test_a_news_judgment_expires_with_its_thirty_day_window(tmp_path: Path):
     score = _judged(tmp_path, days_old=45).score
     # The probe it judged is outside the window: the pillar is neutral again, not still 20.

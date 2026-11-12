@@ -4,10 +4,13 @@ Subcommands:
     --hello                          Print resolved config and exit.
     resolve <NAME>                   Name → ticker candidates on any exchange.
     refresh <TICKER>                 Fetch live data + cache score (no report).
-    refresh all                      Refresh every cached ticker.
+    refresh all                      Refresh every followed ticker (asked about by name).
     analyse <TICKER>                 Render report for one ticker.
     inspect <TICKER> [--section X]   Cached score + judgment + full snapshot as JSON.
     screen [--market …] [filters]    Screen every listing in the chosen markets (Yahoo).
+    compare <TICKER> <TICKER> …      Named companies side by side, ranked.
+    ipo <NAME> [--price P]           A company preparing to list: SEC filing stage, and its
+                                     prospectus figures scored once Claude has transcribed them.
     pick --amount <BUDGET>           Buy-the-dip candidates (budget in BASE_CURRENCY).
     brief                            Market overview from cached state.
     research <NAME>                  Fetch Wikipedia + web research for a person.
@@ -74,7 +77,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     p_refresh = sub.add_parser(
-        "refresh", help="Fetch live data and cache score for a ticker or all cached tickers."
+        "refresh", help="Fetch live data and cache the score for a ticker, or for all followed tickers."
     )
     p_refresh.add_argument("target", help="Ticker symbol or 'all'.")
     p_refresh.add_argument(
@@ -101,6 +104,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     _add_screen_parser(sub)
+    _add_compare_parser(sub)
+    _add_ipo_parser(sub)
 
     p_pick = sub.add_parser(
         "pick", help="Buy-the-dip candidates from cached scores."
@@ -166,6 +171,53 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_scoring_options(parser: argparse.ArgumentParser) -> None:
+    """How scored companies are ordered, and how fresh a cached row must be to be reused."""
+    from fundamental_engine.scorecard import DEFAULT_REUSE_HOURS, RankBy
+
+    parser.add_argument(
+        "--rank",
+        choices=[r.value for r in RankBy],
+        default=RankBy.RISK_ADJUSTED.value,
+        help="Order the scored companies by reward less risk (default: fundamentals and "
+        "valuation, discounted for measured risk), by fundamentals (the business), "
+        "valuation (the price), or both without the risk discount.",
+    )
+    parser.add_argument(
+        "--reuse-hours",
+        type=float,
+        default=DEFAULT_REUSE_HOURS,
+        help=f"Reuse a cached score fetched within this many hours (default "
+        f"{DEFAULT_REUSE_HOURS:g}); 0 fetches everything live.",
+    )
+
+
+def _add_compare_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "compare",
+        help="Score named companies and rank them side by side.",
+    )
+    p.add_argument("tickers", nargs="+", help="Yahoo symbols, e.g. NVDA AMD 2330.TW.")
+    _add_scoring_options(p)
+    p.add_argument("--json", action="store_true", help="Emit JSON (for skill consumption).")
+
+
+def _add_ipo_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "ipo",
+        help="A company preparing to list: its SEC registration, and its prospectus figures "
+        "scored once /analyse-ipo has transcribed them.",
+    )
+    p.add_argument("name", nargs="+", help="Company name, e.g. anthropic or 'cerebras systems'.")
+    p.add_argument(
+        "--price",
+        type=float,
+        default=None,
+        help="Value the offering at this price per share instead of the prospectus range.",
+    )
+    p.add_argument("--json", action="store_true", help="Emit JSON (for skill consumption).")
+
+
 def _add_screen_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     from fundamental_engine.commands.screen import DEFAULT_LIMIT, DEFAULT_SCAN, ScreenSort
 
@@ -179,8 +231,14 @@ def _add_screen_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser])
         default=[],
         help="Yahoo market codes: us in jp gb hk cn kr de … (default: all 59).",
     )
-    p.add_argument("--sector", nargs="+", default=[], help="e.g. Technology 'Financial Services'.")
-    p.add_argument("--industry", nargs="+", default=[], help="e.g. Semiconductors.")
+    p.add_argument(
+        "--sector", nargs="+", default=[],
+        help="Yahoo's sector, or part of its name: Technology, 'financial', health.",
+    )
+    p.add_argument(
+        "--industry", nargs="+", default=[],
+        help="Yahoo's industry, or part of its name: Semiconductors, bank, 'software infrastructure'.",
+    )
     p.add_argument("--min-mcap", help="Minimum market cap in BASE_CURRENCY (e.g. 10B, 500cr).")
     p.add_argument("--max-mcap", help="Maximum market cap in BASE_CURRENCY.")
     p.add_argument("--max-pe", type=float, help="Maximum trailing P/E (loss-makers never pass).")
@@ -191,20 +249,29 @@ def _add_screen_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser])
     p.add_argument(
         "--min-drawdown", type=float, help="Minimum %% below the 52-week high (20 = a 20%% dip)."
     )
-    p.add_argument("--sort", choices=[s.value for s in ScreenSort], default=ScreenSort.MARKET_CAP.value)
+    p.add_argument(
+        "--sort",
+        choices=[s.value for s in ScreenSort],
+        default=ScreenSort.QUALITY.value,
+        help="Order of the list, and of who --score takes first. quality (default): the "
+        "rubric preview, blind to company size. mcap: largest first — only when size is "
+        "what you are asking for.",
+    )
     p.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Rows to show.")
     p.add_argument(
         "--scan",
         type=int,
         default=DEFAULT_SCAN,
-        help="Largest matching listings read per market (250 per request).",
+        help="Largest matching listings read per market, when the screen is too broad "
+        "to read whole.",
     )
     p.add_argument(
         "--score",
         type=int,
         default=0,
-        help="Fully fetch and score the top N, adding them to the cache.",
+        help="Score the top N and rank them (see --rank); they join the cache.",
     )
+    _add_scoring_options(p)
     p.add_argument("--json", action="store_true", help="Emit JSON (for skill consumption).")
 
 
@@ -289,8 +356,8 @@ def _run_refresh(target: str, *, rejudge: bool = False) -> int:
                 )
         if not results:
             print(
-                "No tickers in cache yet — run `refresh <TICKER>` on a few "
-                "first, then `refresh all` to warm them on a schedule."
+                "No followed tickers yet — run `refresh <TICKER>` or `analyse <TICKER>` on a "
+                "few first. (Companies a screen scored in passing are not refreshed here.)"
             )
     else:
         result = asyncio.run(engine.refresh_one(canonical(target)))
@@ -425,9 +492,28 @@ def _run_inspect(ticker: str, sections: list[str]) -> int:
     return 0
 
 
+def _run_compare(args: argparse.Namespace) -> int:
+    from fundamental_engine.commands.compare import run_compare_command
+    from fundamental_engine.scorecard import RankBy
+
+    return run_compare_command(
+        args.tickers,
+        rank_by=RankBy(args.rank),
+        reuse_hours=args.reuse_hours,
+        as_json=args.json,
+    )
+
+
+def _run_ipo(args: argparse.Namespace) -> int:
+    from fundamental_engine.commands.ipo import run_ipo_command
+
+    return run_ipo_command(" ".join(args.name), offer_price=args.price, as_json=args.json)
+
+
 def _run_screen(args: argparse.Namespace) -> int:
     from fundamental_engine.budget_parser import parse_budget
     from fundamental_engine.commands.screen import ScreenRequest, ScreenSort, run_screen_command
+    from fundamental_engine.scorecard import RankBy
 
     bounds: list[float | None] = []
     for flag, raw in (("--min-mcap", args.min_mcap), ("--max-mcap", args.max_mcap)):
@@ -438,7 +524,7 @@ def _run_screen(args: argparse.Namespace) -> int:
         bounds.append(amount)
 
     request = ScreenRequest(
-        markets=tuple(m.lower() for m in args.market),
+        markets=tuple(args.market),
         sectors=tuple(args.sector),
         industries=tuple(args.industry),
         max_pe=args.max_pe,
@@ -453,6 +539,8 @@ def _run_screen(args: argparse.Namespace) -> int:
         limit=args.limit,
         scan=args.scan,
         score=args.score,
+        rank_by=RankBy(args.rank),
+        reuse_hours=args.reuse_hours,
     )
     return run_screen_command(request, as_json=args.json)
 
@@ -656,6 +744,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_inspect(args.ticker, args.section)
     if args.command == "screen":
         return _run_screen(args)
+    if args.command == "compare":
+        return _run_compare(args)
+    if args.command == "ipo":
+        return _run_ipo(args)
     if args.command == "pick":
         return _run_pick(args.amount, args.min_composite, args.min_verdict, args.tickers)
     if args.command == "brief":

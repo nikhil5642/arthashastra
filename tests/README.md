@@ -7,7 +7,7 @@ keys**. Every live adapter is monkeypatched at the module level.
 pytest
 ```
 
-~596 tests, ~97% line coverage, runs in a few seconds.
+~650 tests, ~97% line coverage, runs in a few seconds.
 
 ## Layout
 
@@ -30,7 +30,8 @@ tests/
 │   ├── test_valuation.py                # P/E, yields, P/B, P/E history; ADRs with spot FX, pence,
 │   │                                    #   as-of pricing, quotes that don't reconcile
 │   ├── test_fx_source.py                # mocks _fetch_major_rate_sync; minor units, USD bridge
-│   ├── test_universe_source.py          # real EquityQuery building; mocks _fetch_screen_sync
+│   ├── test_universe_source.py          # real EquityQuery building; mocks _fetch_screen_sync;
+│   │                                    #   multi-market queries, Bound conditions, a failure ≠ empty
 │   ├── test_names.py                    # pure logic
 │   ├── test_research_source.py          # mocks _fetch_wikipedia_sync + _fetch_brave_search
 │   └── test_news_source.py              # mocks _fetch_feed_sync; noise, syndication, digest
@@ -50,7 +51,11 @@ tests/
 │   ├── test_engine.py                   # mocks FundamentalsSource + verifies prices.db
 │   ├── test_migrate_command.py          # legacy cache → Yahoo symbols, once
 │   ├── test_pick_command.py             # seed scores.json + prices.db, run command
-│   ├── test_screen_command.py           # fake Yahoo screener per market + fake FX
+│   ├── test_screen_command.py           # a fake Yahoo screener that answers reads AND the preview's
+│   │                                    #   questions; whole reads, size bands, failures named
+│   ├── test_preview.py                  # the arithmetic of "how many marks does it clear", coverage
+│   ├── test_scorecard.py                # cards, ranking, reuse of fresh cache rows, fetch concurrency
+│   ├── test_compare_command.py          # primed cache, the real table and JSON
 │   ├── test_resolver.py                 # mocks yfinance.Search
 │   ├── test_judgments.py                # pure I/O, tmp_path
 │   ├── test_snapshot_store.py           # pure I/O, tmp_path
@@ -61,6 +66,7 @@ tests/
 ├── scorers/
 │   ├── test_fundamentals_scorer.py      # inline BalanceSheetSnapshot; global scenarios
 │   ├── test_scoring_curves.py           # every band of every curve
+│   ├── test_marks.py                    # the screening marks sit where the scoring curves say
 │   ├── test_valuation_scorer.py         # hand-computed blends, bank P/B, value-trap guard,
 │   │                                    #   one-offs removed, cyclical peaks capped
 │   ├── test_early_signals.py            # every detector: fires past its threshold, silent below

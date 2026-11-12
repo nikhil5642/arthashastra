@@ -63,6 +63,13 @@ Things to read out when they appear:
 - **Early signals** — list the concerns and strengths, most severe
   first. They state what the newest data shows; they did not move the
   score.
+- **`unscored`** on the score — the pillars sitting at the neutral 50
+  because nothing could be scored (no Claude judgment yet, an expired
+  news judgment, a valuation with no usable price ratio). Say which: a 50
+  there is a placeholder, not an opinion.
+- **`followed: false`** — the company was scored in passing by a screen
+  or a comparison, not asked about by name; `brief` and `refresh all`
+  leave it out until it is analysed.
 
 Mention any data conflicts or missing fields that limit confidence.
 

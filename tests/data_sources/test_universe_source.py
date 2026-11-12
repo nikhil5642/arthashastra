@@ -34,7 +34,7 @@ def _quote(**overrides: object) -> dict[str, object]:
 def test_query_maps_every_filter_to_yahoos_fields_and_units():
     conditions = _conditions(
         Criteria(
-            market="in", sectors=("Technology", "Healthcare"), max_pe=20, min_roe_pct=15,
+            markets=("in",), sectors=("Technology", "Healthcare"), max_pe=20, min_roe_pct=15,
             max_debt_to_equity=0.5, min_revenue_growth_pct=10, min_dividend_yield_pct=2,
             min_market_cap=1e11, max_market_cap=1e12,
         )
@@ -53,15 +53,32 @@ def test_query_maps_every_filter_to_yahoos_fields_and_units():
 
 
 def test_bare_query_is_one_market_with_a_market_cap():
-    assert _conditions(Criteria(market="jp")) == {
+    assert _conditions(Criteria(markets=("jp",))) == {
         ("EQ", "region", "jp"),
         ("GTE", "intradaymarketcap", 0),
     }
 
 
+def test_one_query_can_span_several_markets():
+    assert _conditions(Criteria(markets=("us", "tw", "kr"), industries=("Semiconductors",))) == {
+        ("IS-IN", "region", "kr", "tw", "us"),
+        ("GTE", "intradaymarketcap", 0),
+        ("EQ", "industry", "Semiconductors"),
+    }
+    with pytest.raises(ValueError):
+        build_query(Criteria(markets=()))
+
+
+def test_an_exchange_code_names_its_market():
+    assert universe_source.market_of("NMS") == "us"
+    assert universe_source.market_of("TAI") == "tw"
+    assert universe_source.market_of("NSI") == "in"
+    assert universe_source.market_of("") == "" and universe_source.market_of("XXX") == ""
+
+
 def test_values_outside_yahoos_lists_are_rejected():
     with pytest.raises(ValueError):
-        build_query(Criteria(market="atlantis"))
+        build_query(Criteria(markets=("atlantis",)))
     assert "us" in universe_source.markets() and "in" in universe_source.markets()
     assert "Technology" in universe_source.sectors()
     assert "Semiconductors" in universe_source.industries()
@@ -83,24 +100,28 @@ async def test_page_keeps_listings_that_can_be_priced_and_sized(monkeypatch):
         }
 
     monkeypatch.setattr(universe_source, "_fetch_screen_sync", fake_screen)
-    page = await fetch_page(Criteria(market="in"), offset=250)
+    page = await fetch_page(Criteria(markets=("in",)), offset=250)
     assert seen == [(250, 250)]
-    assert page.total == 812
+    assert page is not None and page.total == 812
     assert [listing.symbol for listing in page.listings] == ["TCS.NS"]
     tcs = page.listings[0]
     assert (tcs.name, tcs.exchange, tcs.currency) == ("Tata Consultancy Services Limited", "NSE", "INR")
     assert tcs.drawdown_pct == 26.1
 
 
-async def test_failed_request_is_an_empty_page(monkeypatch):
+async def test_a_failed_request_is_not_an_empty_page(monkeypatch):
+    """'Yahoo did not answer' and 'nothing matched' must stay two different things."""
     import yfinance
 
     def boom(*args: object, **kwargs: object) -> None:
         raise RuntimeError("Yahoo down")
 
     monkeypatch.setattr(yfinance, "screen", boom)
-    page = await fetch_page(Criteria(market="us"))
-    assert (page.total, page.listings) == (0, ())
+    assert await fetch_page(Criteria(markets=("us",))) is None
+
+    monkeypatch.setattr(yfinance, "screen", lambda *args, **kwargs: {"total": 0, "quotes": []})
+    empty = await fetch_page(Criteria(markets=("us",)))
+    assert empty is not None and (empty.total, empty.listings) == (0, ())
 
 
 def test_turnover_is_currency_free_and_reads_pence():
@@ -128,3 +149,47 @@ def test_listing_knows_when_it_trades_in_another_currency_than_it_reports():
     assert pence is not None and not pence.cross_currency  # pence are pounds
     assert cedear is not None and cedear.cross_currency
     assert unknown is not None and not unknown.cross_currency  # unknown is not "foreign"
+
+
+def test_a_bound_becomes_a_condition_in_yahoos_units():
+    from data_sources.universe_source import Bound, Measure
+
+    conditions = _conditions(
+        Criteria(
+            markets=("us",),
+            bounds=(
+                Bound(Measure.RETURN_ON_ASSETS, at_least=8.0),
+                Bound(Measure.DEBT_TO_EQUITY, at_most=0.5),  # 0.5× is 50 in Yahoo's percent
+                Bound(Measure.QUICK_RATIO),  # neither bound: any listing Yahoo has a value for
+            ),
+        )
+    )
+    assert ("GTE", "returnonassets.lasttwelvemonths", 8.0) in conditions
+    assert ("BTWN", "totaldebtequity.lasttwelvemonths", 0.0, 50.0) in conditions
+    assert ("GTE", "quickratio.lasttwelvemonths", -1e12) in conditions
+
+
+async def test_fetch_symbols_reads_every_page_and_reports_a_failure(monkeypatch):
+    from data_sources.universe_source import fetch_symbols
+
+    def paged(query, offset: int, size: int) -> dict[str, object] | None:
+        quotes = [_quote(symbol=f"S{i}.NS") for i in range(offset, min(offset + size, 600))]
+        return {"total": 600, "quotes": quotes}
+
+    monkeypatch.setattr(universe_source, "_fetch_screen_sync", paged)
+    symbols = await fetch_symbols(Criteria(markets=("in",)))
+    assert symbols is not None and len(symbols) == 600 and "S599.NS" in symbols
+
+    monkeypatch.setattr(universe_source, "_fetch_screen_sync", lambda *args: None)
+    assert await fetch_symbols(Criteria(markets=("in",))) is None
+
+
+def test_implied_return_on_equity_needs_one_currency_and_a_profit():
+    listing = Listing.from_quote(_quote(epsTrailingTwelveMonths=142.6, bookValue=290.0, financialCurrency="INR"))
+    assert listing is not None and listing.implied_roe_pct == 49.2
+    loss = Listing.from_quote(_quote(epsTrailingTwelveMonths=-5.0, bookValue=290.0))
+    assert loss is not None and loss.implied_roe_pct is None
+    # Yahoo quotes an ADR's earnings and its book value in different currencies.
+    adr = Listing.from_quote(_quote(currency="USD", financialCurrency="INR",
+                                    epsTrailingTwelveMonths=1.7, bookValue=290.0))
+    assert adr is not None and adr.implied_roe_pct is None

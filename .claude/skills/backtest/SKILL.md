@@ -104,6 +104,9 @@ Always name them:
   weak scores come before weak returns, and flatters dip-buying. A
   loss-making cyclical that survived its trough will look like a great
   "RED_FLAG" buy; the ones that didn't are not in the data.
+- **Who is in it** — `all` is the companies the user follows, which lean
+  large and well known. A result on them says little about small
+  companies; pass `--tickers` with a screen's scored names to test those.
 - Restated screener / Yahoo history (SEC is first-filed).
 - Only the deterministic pillars are replayed; Claude's judgments have no
   point-in-time history. Early signals are only partly replayed.

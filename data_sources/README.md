@@ -24,13 +24,16 @@ data_sources/
 │   │                        #   trailing twelve months, year-on-year balance sheet, long trends
 │   ├── screener_adapter.py  #   screener.in — Indian (.NS / .BO) listings only
 │   ├── sec_adapter.py       #   SEC EDGAR — US filers, ~18 years of first-filed 10-K values
+│   ├── prospectus.py        #   ProspectusStatements (Claude-transcribed) → snapshot_from_prospectus
 │   ├── valuation.py         #   P/E, earnings / FCF yield, P/B, P/E history (live + backtest),
 │   │                        #   spot FX for cross-currency listings, quote reconciliation
 │   ├── history.py           #   point-in-time snapshots for backtests + SEC EPS rebasing
 │   └── primitives.py        #   parse helpers + period alignment + date-matched YoY
 │                            #   + trailing_twelve_months + cagr_pct
 ├── price_series.py          # PriceSeries — split-adjusted closes + date lookups
-├── universe_source.py       # Yahoo's global screener: every listing in 59 markets, filtered server-side
+├── universe_source.py       # Yahoo's global screener: every listing in 59 markets, filtered server-side;
+│                            # one query can span all of them; Measure / Bound + fetch_symbols
+├── ipo_source.py            # SEC registrations: who filed to list, IpoStage, newest prospectus URL
 ├── fx_source.py             # live FX via Yahoo pairs, bridged through USD + minor units (GBp, ZAc, ILA, KWF)
 ├── names.py                 # company-name cleaning for search-style queries
 ├── research_source.py       # Wikipedia API + Brave Search + WebHit TypedDict
@@ -140,10 +143,33 @@ what the stories mean is Claude's job in `/analyse-stock`.
 `universe_source` reads whole markets shallowly where
 `fundamentals_source` reads one company deeply. Yahoo's equity screener
 covers ~80,000 listings in 59 markets; `fetch_page(Criteria(...))`
-returns up to 250 of a market's largest listings that pass the filters,
-which Yahoo applies server-side to every listing in that market. Markets,
-sectors and industries come from yfinance's own lists (`markets()`,
-`sectors()`, `industries()`), never from a table here.
+returns up to 250 listings that pass the filters, which Yahoo applies
+server-side to every listing. Markets, sectors and industries come from
+yfinance's own lists (`markets()`, `sectors()`, `industries()`), never
+from a table here.
+
+Three things make a screen complete rather than a view of the largest:
+
+- **One query spans many markets.** `Criteria.markets` takes one market
+  or all 59; the result is exactly what the same query returns market by
+  market (verified live: 250 of 250 for one industry worldwide), paged
+  250 at a time as deep as needed. A narrow screen is a request or two,
+  and it holds every match of every size. `market_of(exchange_code)`
+  says which market a listing came from, from yfinance's own table.
+- **A failed request is `None`, never an empty page.** "Yahoo did not
+  answer" and "nothing matched" must stay different, or a screen silently
+  loses a market and still looks complete.
+- **Yahoo filters on more than it returns.** `Measure` names eight
+  ratios (returns on equity, capital and assets; debt / equity; current
+  and quick ratios; revenue and profit growth); a `Bound` puts one into a
+  query — a floor, a ceiling, or neither, which selects every listing
+  Yahoo has a value for; and `fetch_symbols(criteria)` answers "which of
+  this screen's listings pass?" That set-membership question is what the
+  size-blind rubric preview is built from (`fundamental_engine/preview.py`).
+
+`Listing.implied_roe_pct` (earnings per share ÷ book value per share) is
+the one quality figure a quote carries by itself; it is None for a
+listing that trades in another currency than it reports in.
 
 Yahoo's conventions, verified live: ratios are currency-free and in
 percent (ROE 15 = 15%, debt / equity 50 = 0.5×); a loss-maker carries a
@@ -157,6 +183,28 @@ copy that carries another instrument's market cap.
 FX: a cross Yahoo doesn't quote (MXN→INR, TRY→INR) is bridged through
 the dollar, and Kuwait's fils (`KWF`, 1/1000 of a dinar) join pence,
 cents and agorot as minor units.
+
+## Companies that have not listed
+
+`ipo_source` answers "has this company filed to list, and how far along
+is it?" from SEC EDGAR: `find_registrants(name)` searches S-1 / F-1
+filers, `fetch_registration(cik)` reads the filing list into an
+`IpoRegistration` — `stage` (`IpoStage`: DRAFT / FILED / PRICED /
+TRADING), reserved ticker, `latest_prospectus`, `first_public_filing`,
+`amendments`. It never fetches the prospectus document (SEC's archive
+refuses generic clients); Claude reads it in `/analyse-ipo`. Nothing
+found means nothing *public* at SEC — confidential drafts and listings
+outside the US are invisible here.
+
+`fundamentals_source/prospectus.py` takes what Claude transcribed —
+`ProspectusStatements`, one value per `StatementRow` per fiscal year,
+`amounts_in` the tables' multiplier, the `Offering` terms — and builds
+an ordinary `BalanceSheetSnapshot` through the same SEC-shaped frames and
+`snapshot_as_of` fillers, so it is scored by the same formulas.
+`snap.source` is `"prospectus"`. Valuation exists only when a price (the
+range midpoint, or an override) and the shares after the offering are
+known; per-share figures use that post-offering count. No price history,
+no quarters: those measures stay None.
 
 ## Point-in-time history (backtests)
 
@@ -218,8 +266,8 @@ this live in the root `backtests/` folder.
 - **Every public async method is mockable at the submodule level.**
   Tests monkeypatch `yfinance_adapter._fetch_yfinance_sync`,
   `screener_adapter._fetch_screener_in`,
-  `universe_source._fetch_screen_sync`, and
-  `fx_source._fetch_major_rate_sync`. `source.py` imports the adapter
+  `universe_source._fetch_screen_sync` (return `None` to play a request
+  Yahoo did not answer), and `fx_source._fetch_major_rate_sync`. `source.py` imports the adapter
   *modules* so attribute lookups happen at call time.
 - **Screener is authoritative where it has coverage** — D/E (from
   `Borrowings`, not yfinance's lease-inflated "Total Debt"), ROE / ROCE,

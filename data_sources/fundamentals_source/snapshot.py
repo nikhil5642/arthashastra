@@ -70,6 +70,12 @@ _FINANCIAL_SECTOR_KEYWORDS: tuple[str, ...] = (
 )
 
 
+def is_financial_label(text: str) -> bool:
+    """Does this sector / industry name mark *some kind* of financial company?"""
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in _FINANCIAL_SECTOR_KEYWORDS)
+
+
 def is_bank_snapshot(snap: "BalanceSheetSnapshot") -> bool:
     """Should this snapshot be scored on the bank rubric?
 
@@ -88,8 +94,7 @@ def is_bank_snapshot(snap: "BalanceSheetSnapshot") -> bool:
     """
     if snap.is_bank:
         return True
-    haystack = f"{snap.sector or ''} {snap.industry or ''}".lower()
-    if not any(kw in haystack for kw in _FINANCIAL_SECTOR_KEYWORDS):
+    if not is_financial_label(f"{snap.sector or ''} {snap.industry or ''}"):
         return False
     return snap.current_ratio is None
 
@@ -175,6 +180,14 @@ class BalanceSheetSnapshot:
     pe_ratio: float | None = None
     book_value_per_share: float | None = None
     dividend_yield: float | None = None
+
+    # ── Price risk and liquidity: measured from the daily tape ───────────────
+    # How risky a share is to hold is measured per company, never assumed from
+    # its size. None when the listing has under about six months of history.
+    volatility_1y_pct: float | None = None  # annualised swing of the last year's daily returns
+    worst_fall_3y_pct: float | None = None  # deepest high-to-low fall within the last three years
+    avg_daily_volume: float | None = None  # shares a day, three-month average
+    price_history_years: float | None = None  # how long a record those measures rest on
 
     # ── Valuation inputs (reporting currency) ───────────────────────────────
     eps_history: dict[str, float] = field(default_factory=dict)  # FY end (ISO) → diluted EPS
@@ -374,6 +387,13 @@ class BalanceSheetSnapshot:
         return round(100.0 * present / len(SCORED_FIELDS), 1)
 
     @property
+    def avg_daily_traded_value(self) -> float | None:
+        """What changes hands on an average day, in the trading currency's major unit."""
+        if self.avg_daily_volume is None or not self.current_price:
+            return None
+        return self.current_price / major_unit(self.currency)[1] * self.avg_daily_volume
+
+    @property
     def ttm_is_current(self) -> bool:
         """A trailing-twelve-month window exists and is no older than the fiscal year."""
         return bool(self.ttm_period_end) and self.ttm_period_end >= self.latest_annual_period
@@ -515,6 +535,10 @@ class SnapshotFields(TypedDict, total=False):
     current_price: float | None
     high_52w: float | None
     low_52w: float | None
+    volatility_1y_pct: float | None
+    worst_fall_3y_pct: float | None
+    avg_daily_volume: float | None
+    price_history_years: float | None
     market_cap: float | None
     pe_ratio: float | None
     book_value_per_share: float | None

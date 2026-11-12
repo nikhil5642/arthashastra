@@ -14,11 +14,16 @@ INR) and any filters (markets, sectors, size, valuation).
 world for dips (map words to flags as in `/screen-stocks`):
 
 ```bash
-python3 -m fundamental_engine screen <filters> --min-drawdown 20 --score 15 --json
+python3 -m fundamental_engine screen <filters> --min-drawdown 20 --score 25 --rank both --json
 ```
 
-The scored tickers join the cache — keep their list for Step 3. Without
-filters, a dip screen of all 59 markets takes about 1½ minutes.
+The screen reads every company in a dip — of every size, not the largest
+few — orders them by a size-blind preview of the fundamentals rubric and
+scores the first 25. Don't add a size filter the user didn't ask for.
+The scored tickers are cached — keep their list for Step 3. Check
+`unread_markets`, `read_whole` and `next_in_line` as `/screen-stocks`
+Step 3 says: a dip screen of every market and sector can be too broad to
+preview — add a sector or a market if it says so.
 
 **No filters and a warm cache** → go to Step 3 without `--tickers`.
 
@@ -27,7 +32,7 @@ filters, a dip screen of all 59 markets takes about 1½ minutes.
 `pick`'s default bar (composite ≥ 75 and BUY) needs Claude's leadership,
 prospects and news judgments: a deterministic-only composite rarely
 clears 70. Run the `/analyse-stock` recipe on the 3 strongest scored
-names (fundamentals + valuation, deepest credible dip). Judge at most 5
+names (the `both` score, deepest credible dip) — whatever their size. Judge at most 5
 in one pass and tell the user which ones you judged.
 
 ## Step 3 — Run pick
@@ -43,6 +48,11 @@ capped at 2 per sector and 4 per country. Share counts are indicative:
 check each exchange's lot size (e.g. 100-share units in Japan) before
 ordering. The command also writes `data_cache/dip_candidates.json`, and
 names any chosen ticker that isn't cached.
+
+No position is sized above a tenth of what the stock trades on an average
+day, so a thinly traded company gets a smaller position or none ("too
+thinly traded"). Each pick shows its volatility and daily trading —
+mention both for anything small.
 
 Each pick shows its early-signal tally, and an "Urgent concerns among
 the picks" panel spells out every URGENT one. Early signals never block

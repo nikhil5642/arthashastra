@@ -249,3 +249,28 @@ def test_pick_sizes_usd_krw_and_jpy_listings_from_one_inr_budget(tmp_path, monke
     picks = json.loads((cache_dir / "dip_candidates.json").read_text())
     assert set(picks) == {"MSFT", "005930.KS", "7203.T"}
     assert {picks[t]["severity"] for t in picks} == {"ALERT"}
+
+
+def test_a_position_is_held_to_a_tenth_of_a_days_trading():
+    """A thinly traded stock gets a smaller position, or none — whatever its score."""
+    from fundamental_engine.commands.pick import Candidate, _allocate, _unallocated_reason
+    from scorers.base import Verdict
+    from screener.dip_detector import DipSignal
+    from signals.signal_bus import Severity
+
+    def candidate(ticker: str, traded: float | None) -> Candidate:
+        dip = DipSignal(ticker=ticker, current_price=100.0, high_52w=143.0, drawdown_pct=30.0,
+                        below_50dma=True, rsi14=35.0, composite_score=80.0, divergence_bonus=0,
+                        reason="dip", severity=Severity.ALERT, triggered_at="2026-11-12T10:00:00")
+        return Candidate(ticker=ticker, name=ticker, sector="Technology", country="Japan", currency="INR",
+                         current_price=100.0, price_in_base=100.0, composite=80.0, verdict=Verdict.BUY,
+                         dip=dip, traded_per_day_base=traded)
+
+    picks = [candidate("LIQUID", 5e8), candidate("THIN", 4e5), candidate("DUST", 2e4),
+             candidate("UNKNOWN", None)]
+    allocations = _allocate(picks, budget=400_000.0)
+    assert allocations["LIQUID"] == (1000, 100_000.0)  # an equal quarter of the budget
+    assert allocations["THIN"] == (400, 40_000.0)  # a tenth of the ₹4 lakh it trades a day
+    assert "DUST" not in allocations  # a tenth of ₹20,000 is not a position
+    assert _unallocated_reason(picks[2], 400_000.0) == "(too thinly traded)"
+    assert allocations["UNKNOWN"] == (1000, 100_000.0)  # nothing measured: not capped, and shown as unknown
