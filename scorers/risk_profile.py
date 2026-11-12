@@ -100,6 +100,19 @@ MAX_LOSS_YEAR_DISCOUNT = 10.0
 MIN_FISCAL_YEARS = 4
 SHORT_RECORD_DISCOUNT = 5.0
 MAX_RISK_DISCOUNT = 30.0
+# The swing an unmeasured price is assumed to have when sizing a position:
+# the volatility that costs the same ten points as "unknown" does above.
+ASSUMED_VOLATILITY_PCT = CALM_VOLATILITY_PCT + UNKNOWN_VOLATILITY_DISCOUNT / VOLATILITY_POINTS_PER_PCT
+
+
+def position_scale(volatility_1y_pct: float | None) -> float:
+    """Share of a full position to hold, 0–1: a price that swings twice as much gets half.
+
+    A calm price (30% a year or less) gets the full slice, so every position
+    carries about the same swing in money. Unknown is sized as 50%, not as calm.
+    """
+    volatility = ASSUMED_VOLATILITY_PCT if volatility_1y_pct is None else volatility_1y_pct
+    return round(CALM_VOLATILITY_PCT / max(volatility, CALM_VOLATILITY_PCT), 3)
 
 
 def risk_discount(profile: RiskProfile) -> float:

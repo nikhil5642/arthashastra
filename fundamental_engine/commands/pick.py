@@ -51,6 +51,7 @@ from reports.formatting import (
 )
 from scorers.base import Gate, Verdict
 from scorers.early_signals import EarlySignal, Tone, of_tone, tally
+from scorers.risk_profile import position_scale
 from screener.dip_detector import (
     DEFAULT_MIN_COMPOSITE,
     DipSignal,
@@ -196,7 +197,12 @@ def _diversify(ranked: list[Candidate]) -> list[Candidate]:
 def _allocate(
     picks: list[Candidate], budget: float
 ) -> dict[str, tuple[int, float]]:
-    """Equal-weight whole-share allocation in the base currency, capped per position.
+    """Risk-weighted whole-share allocation in the base currency, capped per position.
+
+    Each pick starts from an equal slice, scaled down by how much its price
+    swings (`position_scale`): a stock twice as volatile as a calm one gets
+    half the money, so the positions carry a similar swing. What that frees
+    is left uninvested, not pushed into the calmer names.
 
     A position is also held to a tenth of an average day's trading in the
     stock, when that is known. A pick is dropped only when it has no
@@ -212,7 +218,8 @@ def _allocate(
         if c.price_in_base is None or c.price_in_base <= 0:
             continue
         ceiling = c.liquidity_ceiling()
-        slice_ = per_position if ceiling is None else min(per_position, ceiling)
+        sized = per_position * position_scale(c.volatility_1y_pct)
+        slice_ = sized if ceiling is None else min(sized, ceiling)
         shares = int(slice_ // c.price_in_base)
         if shares < 1:
             continue

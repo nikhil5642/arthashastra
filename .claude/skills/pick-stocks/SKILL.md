@@ -98,3 +98,11 @@ Tell the user:
 
 If most `last_updated` timestamps are more than 2 days old (`brief` lists
 stale rows), tell the user to run `/refresh-now all` before acting.
+
+## Position sizes follow risk
+
+Each pick starts from an equal slice of the budget, then shrinks with how
+much its price swings: a stock at twice a calm 30% yearly volatility gets
+half the money, and one with no measured volatility is sized as if it
+swung 50%. The money that frees is left uninvested — say how much, and
+why, rather than presenting the smaller total as a shortfall.

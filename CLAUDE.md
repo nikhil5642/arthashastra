@@ -283,7 +283,9 @@ Every session Claude works in this repo, the default workflow is:
       fundamentals + valuation less `risk_discount` (0–30 points for price
       swings above 30%, loss years, a record under four fiscal years;
       unknown volatility costs 10). `pick` holds a position to a tenth
-      of a day's trading. State the measured risk for every company you
+      of a day's trading and sizes it down as the price swings more
+      (`position_scale`: twice the volatility of a calm stock, half the money;
+      unmeasured is sized as 50%, not as calm). State the measured risk for every company you
       recommend; never treat unfamiliarity as risk or fame as safety. A
       user who asks for "safe" or "low-risk" is asking about this, and a
       size floor is then a fair reading of the ask.

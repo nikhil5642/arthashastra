@@ -215,6 +215,7 @@ def test_allocate_sizes_a_foreign_listing_in_the_base_currency():
         ticker="MSFT", name="Microsoft", sector="Technology", country="United States",
         currency="USD", current_price=100.0, price_in_base=8800.0,
         composite=80.0, verdict="BUY", dip=dip,  # type: ignore[arg-type]
+        volatility_1y_pct=25.0,
     )
     assert _allocate([pick], budget=100000.0) == {"MSFT": (2, 17600.0)}
 
@@ -264,7 +265,7 @@ def test_a_position_is_held_to_a_tenth_of_a_days_trading():
                         reason="dip", severity=Severity.ALERT, triggered_at="2026-11-12T10:00:00")
         return Candidate(ticker=ticker, name=ticker, sector="Technology", country="Japan", currency="INR",
                          current_price=100.0, price_in_base=100.0, composite=80.0, verdict=Verdict.BUY,
-                         dip=dip, traded_per_day_base=traded)
+                         dip=dip, traded_per_day_base=traded, volatility_1y_pct=25.0)
 
     picks = [candidate("LIQUID", 5e8), candidate("THIN", 4e5), candidate("DUST", 2e4),
              candidate("UNKNOWN", None)]
@@ -274,3 +275,28 @@ def test_a_position_is_held_to_a_tenth_of_a_days_trading():
     assert "DUST" not in allocations  # a tenth of ₹20,000 is not a position
     assert _unallocated_reason(picks[2], 400_000.0) == "(too thinly traded)"
     assert allocations["UNKNOWN"] == (1000, 100_000.0)  # nothing measured: not capped, and shown as unknown
+
+
+def test_a_position_shrinks_with_how_much_the_price_swings():
+    """Twice the swing, half the money; an unmeasured price is not sized as a calm one."""
+    from fundamental_engine.commands.pick import Candidate, _allocate
+    from scorers.base import Verdict
+    from scorers.risk_profile import position_scale
+    from screener.dip_detector import DipSignal
+    from signals.signal_bus import Severity
+
+    def candidate(ticker: str, volatility: float | None) -> Candidate:
+        dip = DipSignal(ticker=ticker, current_price=100.0, high_52w=143.0, drawdown_pct=30.0,
+                        below_50dma=True, rsi14=35.0, composite_score=80.0, divergence_bonus=0,
+                        reason="dip", severity=Severity.ALERT, triggered_at="2026-11-12T10:00:00")
+        return Candidate(ticker=ticker, name=ticker, sector="Technology", country="Japan",
+                         currency="INR", current_price=100.0, price_in_base=100.0, composite=80.0,
+                         verdict=Verdict.BUY, dip=dip, volatility_1y_pct=volatility)
+
+    assert (position_scale(25.0), position_scale(60.0), position_scale(None)) == (1.0, 0.5, 0.6)
+    picks = [candidate("CALM", 25.0), candidate("WILD", 60.0), candidate("NEW", None),
+             candidate("OTHER", 30.0)]
+    amounts = {ticker: amount for ticker, (_, amount) in _allocate(picks, 1_000_000).items()}
+    assert amounts["WILD"] == amounts["CALM"] / 2
+    assert amounts["NEW"] == amounts["CALM"] * 0.6
+    assert sum(amounts.values()) < 1_000_000  # what risk frees is left uninvested
