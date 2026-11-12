@@ -91,9 +91,11 @@ MAX_PAGES_PER_MARKET = 4  # 1,000 raw listings: Brazil's and Germany's top pages
 # for all its markets: 60 requests at most, no more than one per market would
 # take — and every match of every size, not each market's largest.
 WHOLE_READ_LIMIT = 15_000
-# Up to this many listings the rubric preview is affordable (it asks about the
-# whole screen two dozen times); beyond it the order is an even spread by size.
-PREVIEW_LIMIT = 4_000
+# Every screen read whole is previewed, however broad. The preview asks about
+# the whole field two dozen times, so its cost grows with the listings read:
+# 4,050 small-cap tech companies (10,693 listings) took 129 s and 587 requests
+# in November 2026. A capped preview was faster and ordered the broadest asks
+# — "small-cap tech", "energy" — by an even size spread instead of quality.
 DEFAULT_LIMIT = 25  # rows shown
 NEXT_IN_LINE_SHOWN = 10  # unscored companies listed in the JSON, best first
 PROBE_SIZE = 100  # listings sampled to learn a market's currency
@@ -123,7 +125,7 @@ class Order(StrEnum):
     """How a screen's companies ended up ordered."""
 
     PREVIEW = "preview"  # by the rubric preview
-    SIZE_SPREAD = "size_spread"  # evenly across the size bands: too many to preview
+    SIZE_SPREAD = "size_spread"  # evenly across the size bands: the field could not be previewed
     AS_SORTED = "as_sorted"  # by the --sort that was asked for
 
 
@@ -269,7 +271,7 @@ async def screen(request: ScreenRequest, *, base_currency: str) -> ScreenResult:
     order = Order.AS_SORTED
     if request.sort is ScreenSort.QUALITY and companies:
         order = Order.SIZE_SPREAD
-        if read_whole and listings_read <= PREVIEW_LIMIT:
+        if read_whole:
             previews = await _previews(request, markets, companies)
             if previews is not None:
                 companies = [replace(m, preview=previews.get(m.listing.symbol)) for m in companies]
@@ -823,8 +825,9 @@ _ORDER_NOTES: dict[Order, str] = {
         "company clears on Yahoo's trailing numbers. Size plays no part.[/dim]"
     ),
     Order.SIZE_SPREAD: (
-        "[yellow]Too many listings to preview ({listings:,}): shown as an even spread "
-        "across sizes, not a quality order. Narrow by industry or add a filter.[/yellow]"
+        "[yellow]Not in quality order: the rubric preview could not run (Yahoo did not "
+        "answer every question, or the field was too broad to read whole). Shown as an "
+        "even spread across sizes. Run it again, or narrow it.[/yellow]"
     ),
     Order.AS_SORTED: "",
 }

@@ -536,7 +536,7 @@ callers get IDE autocomplete and exhaustive iteration.
 | `SignalType`          | `signals/signal_bus.py`                            | UNIVERSE_REFRESHED · SCORE_UPDATED · VERDICT_CHANGED · EARLY_CONCERN · EARLY_STRENGTH · DIP_DETECTED (each has an emitter) |
 | `ScreenSort`          | `fundamental_engine/commands/screen.py`            | QUALITY (the rubric preview, the default) · MARKET_CAP (only when size is asked for) · DRAWDOWN · EARNINGS_YIELD |
 | `SizeBand`            | `fundamental_engine/commands/screen.py`            | LARGE · MID · SMALL (thirds of a screen's companies, by market cap) |
-| `Order`               | `fundamental_engine/commands/screen.py`            | PREVIEW · SIZE_SPREAD (too many to preview) · AS_SORTED |
+| `Order`               | `fundamental_engine/commands/screen.py`            | PREVIEW · SIZE_SPREAD (could not be previewed) · AS_SORTED |
 | `RankBy`              | `fundamental_engine/scorecard.py`                  | FUNDAMENTALS · VALUATION · BOTH · RISK_ADJUSTED (the default: both less `risk_discount`) |
 | `IpoStage`            | `data_sources/ipo_source.py`                       | DRAFT · FILED · PRICED · TRADING · WITHDRAWN (read off the SEC filing list) |
 | `StatementRow`        | `data_sources/fundamentals_source/prospectus.py`   | REVENUE · COST_OF_REVENUE · … · LONG_TERM_DEBT · CURRENT_DEBT (the lines a prospectus file may carry) |

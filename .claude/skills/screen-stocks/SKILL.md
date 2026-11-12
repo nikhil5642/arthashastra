@@ -85,9 +85,12 @@ What it does:
 3. **Scores the first 25 in full** — live statements, the real rubric —
    and ranks them by what you asked for.
 
-It takes about half a minute to a minute the first time. Scores are
-reused for 12 hours, so a follow-up ("what about cheaper ones?", "only
-Japan") is fast.
+An industry takes half a minute to a minute the first time. A broad ask —
+a whole sector, every market, thousands of companies ("small-cap tech")
+— takes two to three minutes, because every match is previewed: give the
+command a 10-minute timeout rather than narrowing the ask to save time.
+Scores are reused for 12 hours, so a follow-up ("what about cheaper
+ones?", "only Japan") is fast.
 
 ## Step 3 — Check the run before you trust it
 
@@ -98,8 +101,10 @@ Read these fields first:
 - `read_whole: false` → the ask was too broad to read whole and only each
   market's largest listings were read. **Small companies are missing.**
   Add an industry, a sector or a market and run again.
-- `ordered_by: "size_spread"` → too many listings to preview; the order is
-  an even spread across sizes, not a quality order. Narrow it the same way.
+- `ordered_by: "size_spread"` → the rubric preview could not run (Yahoo did
+  not answer every question, or the read was not whole); the order is an
+  even spread across sizes, not a quality order. Run it again; if it
+  persists, narrow it and say so.
 - `companies_matched` against the number scored, and `next_in_line` (the
   best unscored companies, with their previews): if the next in line
   preview as well as the ones you scored, go deeper — `--score 40`, or

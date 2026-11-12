@@ -387,14 +387,23 @@ async def test_asking_for_the_largest_is_the_only_way_to_get_them_first(yahoo):
     assert result.order is Order.AS_SORTED and yahoo.questions == []  # no preview was needed
 
 
-async def test_too_many_listings_to_preview_are_spread_evenly_across_sizes(yahoo, monkeypatch):
-    monkeypatch.setattr(screen_module, "PREVIEW_LIMIT", 5)
+async def test_an_unpreviewed_field_is_spread_evenly_across_sizes(yahoo):
     caps = [9e11, 8e11, 7e9, 6e9, 5e7, 4e7]
     yahoo.markets["us"] = [_chip(f"C{i}", cap, **STELLAR) for i, cap in enumerate(caps)]
+    yahoo.questions_unanswered = True
     result = await screen(ScreenRequest(markets=("us",)), base_currency="INR")
-    assert result.order is Order.SIZE_SPREAD and yahoo.questions == []
+    assert result.order is Order.SIZE_SPREAD
     assert [m.listing.symbol for m in result.matches] == ["C0", "C2", "C4", "C1", "C3", "C5"]
     assert all(m.preview is None for m in result.matches)
+
+
+async def test_every_screen_read_whole_is_previewed_however_broad(yahoo):
+    """No listing count switches the quality order off: a broad ask is where it matters most."""
+    caps = [9e11 / (i + 1) for i in range(300)]
+    yahoo.markets["us"] = [_chip(f"C{i}", cap, **STELLAR) for i, cap in enumerate(caps)]
+    result = await screen(ScreenRequest(markets=("us",)), base_currency="INR")
+    assert result.order is Order.PREVIEW and len(result.matches) == 300
+    assert not hasattr(screen_module, "PREVIEW_LIMIT")
 
 
 async def test_a_preview_yahoo_does_not_answer_falls_back_to_an_even_spread(yahoo):
