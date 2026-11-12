@@ -300,3 +300,18 @@ def test_a_position_shrinks_with_how_much_the_price_swings():
     assert amounts["WILD"] == amounts["CALM"] / 2
     assert amounts["NEW"] == amounts["CALM"] * 0.6
     assert sum(amounts.values()) < 1_000_000  # what risk frees is left uninvested
+
+
+def test_an_empty_list_names_the_gate_that_emptied_it():
+    """Nothing in a dip is an answer; nothing good enough is a different one."""
+    from fundamental_engine.commands.pick import _why_nothing
+
+    on_sale = _why_nothing(universe_size=397, cleared_quality=3, unjudged=300)
+    assert "3 of 397" in on_sale and "none of them is in a dip" in on_sale
+    assert "placeholder" not in on_sale  # the quality gate was not the problem
+
+    unjudged = _why_nothing(universe_size=40, cleared_quality=0, unjudged=35)
+    assert "None of the 40" in unjudged and "35 of them have no leadership" in unjudged
+
+    plain = _why_nothing(universe_size=40, cleared_quality=0, unjudged=0)
+    assert "None of the 40" in plain and "placeholder" not in plain

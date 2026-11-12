@@ -24,7 +24,7 @@ no unread markets.
 | 3 | `size_spread` under the limit | **Done.** The limit counted listings read (duplicates included), not companies; `PREVIEW_LIMIT` raised 2,000 → 4,000 (energy: 2,825 listings, previewed in 64 s). **Open:** tech under $500M reads 10,693 listings to match 444, because the size filter is applied after FX conversion — the preview still falls back there. |
 | 4 | High fundamentals, mostly loss years | **Done as a signal.** `UNPROVEN_PROFIT` (ALERT): profitable now, loss in half or more of 4+ fiscal years on record. The rubric is unchanged, so `--rank fundamentals` still lists them high — now with the alert beside them. |
 | 5 | Exactly 50.0 | **Verified, nothing to fix.** XOM, 2222.SR, MC.PA, 6101.T are all the growth veto, with the evidence line saying so. |
-| 6 | Negative risk-adjusted | **Done** (floored at 0). The other small items are open. |
+| 6 | Negative risk-adjusted; `pick` empty | **Done.** Risk-adjusted floored at 0. `pick` with no candidates now says which gate emptied the list: on 2026-11-13, 3 of 397 cached companies cleared the quality gate and none was in a dip — an answer, not a fault (the old message blamed a cold cache). The other small items are open. |
 
 Each issue below gives the evidence, where to look, and what "fixed" means.
 They are ordered by how much they can mislead a user. **Verify each from the

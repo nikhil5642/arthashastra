@@ -49,7 +49,7 @@ from reports.formatting import (
     format_price,
     make_console,
 )
-from scorers.base import Gate, Verdict
+from scorers.base import Gate, Pillar, Verdict
 from scorers.early_signals import EarlySignal, Tone, of_tone, tally
 from scorers.risk_profile import position_scale
 from screener.dip_detector import (
@@ -230,6 +230,27 @@ def _allocate(
     return allocations
 
 
+def _why_nothing(universe_size: int, cleared_quality: int, unjudged: int) -> str:
+    """Which gate left the list empty: quality, or the dip — they call for different next steps."""
+    if cleared_quality:
+        return (
+            f"{cleared_quality} of {universe_size} cached companies clear the quality gate, and "
+            f"none of them is in a dip right now. That is an answer, not a fault: nothing good "
+            f"is on sale. Lowering --min-composite / --min-verdict widens the quality gate only."
+        )
+    reason = (
+        f"None of the {universe_size} cached companies clears the quality gate "
+        f"(lower --min-composite / --min-verdict to widen it)."
+    )
+    if unjudged:
+        reason += (
+            f" {unjudged} of them have no leadership / prospects / news judgment yet, so half "
+            f"their composite is a neutral placeholder and few can reach the bar — run "
+            f"/analyse-stock on the ones you care about."
+        )
+    return reason
+
+
 def _render(
     picks: list[Candidate],
     allocations: dict[str, tuple[int, float]],
@@ -243,6 +264,8 @@ def _render(
     missing_history: int,
     chosen: bool = False,
     not_cached: tuple[str, ...] = (),
+    cleared_quality: int = 0,
+    unjudged: int = 0,
 ) -> None:
     console.print(
         Panel(
@@ -276,11 +299,7 @@ def _render(
         )
 
     if not picks:
-        console.print(
-            "[yellow]No candidates matched the quality + dip gate. "
-            "Lower --min-composite / --min-verdict to widen, or wait for "
-            "more tickers to warm up in the cache.[/yellow]"
-        )
+        console.print(f"[yellow]{_why_nothing(universe_size, cleared_quality, unjudged)}[/yellow]")
         return
 
     table = Table(title="Ranked picks", title_style="bold")
@@ -412,12 +431,13 @@ def run_pick_command(
         not_cached = tuple(t for t in chosen if t not in scores)
         scores = {t: scores[t] for t in chosen if t in scores}
 
+    blocked = _blocked_tickers(scores)
     candidates, missing_history = _gather_candidates(
         scores,
         cfg.data_cache_dir,
         min_composite=min_composite,
         allowed_verdicts=allowed_verdicts,
-        blocked=_blocked_tickers(scores),
+        blocked=blocked,
     )
 
     ranked = sorted(candidates, key=lambda c: dip_rank_key(c.dip), reverse=True)
@@ -436,6 +456,14 @@ def run_pick_command(
         missing_history=missing_history,
         chosen=tickers is not None,
         not_cached=not_cached,
+        cleared_quality=sum(
+            1
+            for ticker, row in scores.items()
+            if ticker not in blocked
+            and row.score.composite >= min_composite
+            and row.score.verdict in allowed_verdicts
+        ),
+        unjudged=sum(1 for row in scores.values() if Pillar.LEADERSHIP in row.score.unscored),
     )
 
     # Persist dip candidates as typed DipCandidateRecord rows. `brief`
