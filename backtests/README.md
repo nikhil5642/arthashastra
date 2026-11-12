@@ -70,6 +70,7 @@ money on a lottery ticket, and the two columns say so.
 | `growth_veto` | Industrials in growth-veto territory return less than the rest | mean per-date difference |
 | `value_trap_guard` | Among the cheapest third by earnings yield, slow growers lag growers | mean per-date difference |
 | `peak_margin_guard` | Among the cheapest third by earnings yield, companies earning above 1.5× their own median margin return less | mean per-date difference |
+| `priced_for_doubt` | Profitable companies under 5× repeatable earnings return no more than those at 5–10× | mean per-date difference |
 | `early_concerns` | A company carrying a material early concern returns less than one carrying none | mean per-date difference |
 | `early_strengths` | A company showing a material early strength returns more than one showing none | mean per-date difference |
 | `dip_signals` | A quality-dip signal beats everything else | mean per-date difference |

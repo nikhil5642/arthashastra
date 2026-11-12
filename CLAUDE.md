@@ -656,7 +656,12 @@ bank quarterly table), growth 20% (PAT 3y CAGR only — merger
 step-changes distort revenue CAGR), franchise 15% (non-interest
 income ratio + Credit-Deposit ratio), governance 10% (the shared
 ownership sub-score). CASA / CRAR are not exposed by screener and
-must be verified in the Claude judgment.
+must be verified in the Claude judgment. Insurers land here too (no
+current-assets split): asset quality and franchise do not apply to them
+and the evidence says so; their score rests on profitability, growth and
+governance, and the judgment must check combined ratio, reserves and
+solvency (`/analyse-stock`). There is no insurer rubric — Yahoo carries
+none of those three.
 
 **Composite gate:** a judgment with `integrity_veto: true` caps the
 composite at 54.0 (top of AVOID) after the weighted blend, and `pick`
@@ -697,7 +702,10 @@ cheap because shrinking is not a bargain. The **priced-for-doubt cap** does the
 same for a price under 5× repeatable earnings (`DOUBT_PE`): a market that
 pays that little for a real profit doubts the profit, the accounts, or that
 the money can reach shareholders, so cheaper stops scoring better until the
-reason is known. Cross-currency listings are
+reason is known. It rests on that judgment, not on data: its backtest
+(`priced_for_doubt`) had too few observations on the survivor-only cache
+(NO DATA, November 2026), and the few there were leaned against it.
+Cross-currency listings are
 valued with spot FX once the quote reconciles (rule 9); P/E history is
 same-currency only. Per-share numbers are all on today's share basis
 (split-adjusted closes; SEC's first-filed EPS is rebased by Yahoo's split
@@ -739,7 +747,8 @@ INFO with a note. (On history, deleveraging at a margin peak came before
 *lower* returns — it is what cyclicals do at the top.)
 
 They do not change the fundamentals or valuation score. The backtest
-suites `early_concerns` / `early_strengths` / `peak_margin_guard` test
+suites `early_concerns` / `early_strengths` / `peak_margin_guard` /
+`priced_for_doubt` test
 the part that can be replayed on fiscal-year history; report their
 outcomes as honestly as any other suite.
 
