@@ -129,8 +129,6 @@ to fix; if any is the neutral prior, that is a data bug.
   6/2/0, gold 4/2/0 large/mid/small). At the default `--score 25` this was
   balanced on two industries; re-check on these three before concluding
   anything.
-- **`analyse 3640.T` took far longer than the others** (see `seconds` in the
-  raw file; every other analyse took ~6 s). Find the slow call.
 - **Cached Anthropic IPO judgment** (`data_cache/judgments/ANT.json`) still
   carries an integrity veto set under the old "any auditor change" wording.
   The skill is corrected; re-running `/analyse-ipo anthropic` rewrites it.
