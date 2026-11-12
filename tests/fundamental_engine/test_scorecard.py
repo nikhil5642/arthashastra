@@ -206,3 +206,15 @@ def test_scale_is_each_company_against_the_largest_beside_it():
     scaled = scorecard._with_scale([big, small, unknown])
     assert [card.scale_vs_largest_pct for card in scaled] == [100.0, 2.5, None]
     assert scorecard._with_scale([unknown]) == [unknown]  # no size known, nothing claimed
+
+
+async def test_a_score_resting_on_a_sliver_of_the_rubric_ranks_after_the_rest(tmp_path: Path):
+    thin = _extended("THIN", 99.0, 90.0)
+    thin.score.fundamentals_coverage_pct = 15.0
+    _store(tmp_path, thin)
+    _store(tmp_path, _extended("FULL", 70.0, 60.0))
+    shortlist = await score_tickers(["THIN", "FULL"], _FakeEngine(tmp_path, {}), tmp_path)
+    assert [card.ticker for card in shortlist.cards] == ["FULL", "THIN"]
+    card = shortlist.cards[1]
+    assert card.thin and card.fundamentals == 99.0  # kept, not zeroed
+    assert card.to_dict()["fundamentals_coverage_pct"] == 15.0

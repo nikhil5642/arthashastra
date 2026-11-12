@@ -113,7 +113,8 @@ def _table(shortlist: Shortlist, base_currency: str) -> Table:
             (format_money(card.market_cap_base, base_currency) if card.market_cap_base else "—") + size,
             f"{card.risk.volatility_1y_pct:.0f}%" if card.risk.volatility_1y_pct is not None else "—",
             format_money(card.traded_per_day_base, base_currency) if card.traded_per_day_base else "—",
-            f"{card.fundamentals:.1f}",
+            f"{card.fundamentals:.1f}"
+            + (f" [yellow]thin ({card.fundamentals_coverage_pct:.0f}%)[/yellow]" if card.thin else ""),
             f"{card.valuation:.1f}" if card.valuation is not None else "[dim]unscored[/dim]",
             f"{card.both:.1f}",
             f"{card.risk_adjusted:.1f}",

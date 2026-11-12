@@ -472,3 +472,17 @@ def test_signal_round_trips_through_json_and_rejects_rows_that_do_not_fit():
 )
 def test_months_since(iso, expected):
     assert months_since(iso, today=TODAY) == expected
+
+
+def test_a_profit_priced_at_a_few_times_earnings_is_a_question_not_a_bargain():
+    from data_sources.fundamentals_source import BalanceSheetSnapshot
+    from scorers.early_signals import EarlySignalKind, detect_early_signals
+
+    def kinds(pe: float | None) -> set[EarlySignalKind]:
+        snap = BalanceSheetSnapshot(ticker="CHEAP", as_of_date="2026-11-13", pe_ratio=pe)
+        return {signal.kind for signal in detect_early_signals(snap)}
+
+    assert EarlySignalKind.PRICED_FOR_DOUBT in kinds(2.6)
+    assert EarlySignalKind.PRICED_FOR_DOUBT not in kinds(12.0)
+    assert EarlySignalKind.PRICED_FOR_DOUBT not in kinds(None)  # unknown says nothing
+    assert EarlySignalKind.PRICED_FOR_DOUBT not in kinds(-4.0)  # a loss is flagged elsewhere

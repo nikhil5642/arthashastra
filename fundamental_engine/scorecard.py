@@ -40,6 +40,9 @@ from scorers.composite_scorer import deterministic_composite
 from scorers.early_signals import EarlySignal
 from scorers.risk_profile import RiskProfile, risk_discount
 
+# Fundamentals resting on less of the rubric than this are "thin": shown, but
+# ranked after every well-covered company (the same bar the screen preview uses).
+MIN_FUNDAMENTALS_COVERAGE_PCT = 60.0
 DEFAULT_REUSE_HOURS = 12.0  # a cached row this fresh is not fetched again
 MAX_CONCURRENT_FETCHES = 3
 FETCH_START_SPACING_SECONDS = 1.0  # one new fetch a second: polite to screener.in and SEC
@@ -86,6 +89,12 @@ class Scorecard:
     # Market cap as a share of the largest company the screen matched: how far
     # the company stands from its field's leader in scale.
     scale_vs_largest_pct: float | None = None
+    fundamentals_coverage_pct: float = 100.0  # share of the rubric with data behind it
+
+    @property
+    def thin(self) -> bool:
+        """Too little of the rubric was scored for this card to rank beside full ones."""
+        return self.fundamentals_coverage_pct < MIN_FUNDAMENTALS_COVERAGE_PCT
 
     @classmethod
     def of(cls, extended: ExtendedScore, *, reused: bool) -> Scorecard:
@@ -94,6 +103,7 @@ class Scorecard:
             market_cap_base=in_base_currency(extended, extended.market_cap),
             risk=extended.risk,
             traded_per_day_base=in_base_currency(extended, extended.risk.avg_daily_traded_value),
+            fundamentals_coverage_pct=score.fundamentals_coverage_pct,
             ticker=score.ticker,
             company_name=extended.company_name,
             country=extended.country,
@@ -124,7 +134,7 @@ class Scorecard:
     @property
     def risk_adjusted(self) -> float:
         """Reward less risk: `both`, discounted for how risky the company is to hold."""
-        return round(self.both - self.risk_discount, 1)
+        return round(max(0.0, self.both - self.risk_discount), 1)
 
     @property
     def judged(self) -> bool:
@@ -148,6 +158,8 @@ class Scorecard:
             "country": self.country,
             "industry": self.industry,
             "fundamentals": self.fundamentals,
+            "fundamentals_coverage_pct": self.fundamentals_coverage_pct,
+            "thin": self.thin,
             "valuation": self.valuation,
             "both": self.both,
             "risk_discount": self.risk_discount,
@@ -227,7 +239,8 @@ async def score_tickers(
             continue
         shortlist.cards.append(Scorecard.of(extended, reused=result is None))
     shortlist.cards = _with_scale(shortlist.cards)
-    shortlist.cards.sort(key=lambda card: card.rank_value(rank_by), reverse=True)
+    # Unknown is not good, and not bad: a thin card keeps its score and ranks after the rest.
+    shortlist.cards.sort(key=lambda card: (not card.thin, card.rank_value(rank_by)), reverse=True)
     return shortlist
 
 

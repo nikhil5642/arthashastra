@@ -112,6 +112,7 @@ def blend(
         evidence=evidence,
         gates_applied=gates,
         unscored=[name for name, p in pillars.items() if p.data_completeness_pct == 0],
+        fundamentals_coverage_pct=round(fundamentals.data_completeness_pct, 1),
     )
 
 

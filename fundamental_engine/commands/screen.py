@@ -93,7 +93,7 @@ MAX_PAGES_PER_MARKET = 4  # 1,000 raw listings: Brazil's and Germany's top pages
 WHOLE_READ_LIMIT = 15_000
 # Up to this many listings the rubric preview is affordable (it asks about the
 # whole screen two dozen times); beyond it the order is an even spread by size.
-PREVIEW_LIMIT = 2_000
+PREVIEW_LIMIT = 4_000
 DEFAULT_LIMIT = 25  # rows shown
 NEXT_IN_LINE_SHOWN = 10  # unscored companies listed in the JSON, best first
 PROBE_SIZE = 100  # listings sampled to learn a market's currency

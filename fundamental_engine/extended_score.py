@@ -135,6 +135,9 @@ class ExtendedScore:
                 last_updated=_as_str(data.get("last_updated"), default=""),
                 gates_applied=_parse_gates(data.get("gates_applied")),
                 unscored=_parse_pillars(data.get("unscored")),
+                fundamentals_coverage_pct=_as_float(
+                    data.get("fundamentals_coverage_pct"), default=100.0
+                ),
             )
         except (KeyError, ValueError, TypeError):
             return None

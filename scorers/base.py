@@ -108,6 +108,9 @@ class StockScore:
     # a Claude judgment not written yet (or expired), a valuation with no
     # usable price ratio. Their 50 is a placeholder, not a verdict.
     unscored: list[Pillar] = field(default_factory=list)
+    # Share of the fundamentals rubric that had data behind it. A score built
+    # on a sliver of the rubric is not comparable with one built on all of it.
+    fundamentals_coverage_pct: float = 100.0
 
     def __post_init__(self) -> None:
         if not self.last_updated:

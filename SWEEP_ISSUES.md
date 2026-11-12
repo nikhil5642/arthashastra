@@ -15,6 +15,17 @@ no unread markets.
 - Raw results of this run: `data_cache/reports/sweep_2026-11-13.json`
   (per company: F = fundamentals, V = valuation, adj = risk-adjusted, flags).
 
+## Status (updated 2026-11-13, after a first round of fixes)
+
+| # | Issue | Status |
+|---|---|---|
+| 1 | Implausibly low P/E | **Partly done.** Checked YB, 3640.T, AWJ.AX, 300750.SZ: Yahoo's market cap agrees with price × shares within 7% and the currencies reconcile, so the P/E is what the data says — no data bug found. Added the `PRICED_FOR_DOUBT` early signal (ALERT when 0 < P/E < 5). The valuation score still takes the figure at face value and these still rank first. **Open, needs the user's yes:** whether a P/E under 5 should cap valuation (a scoring change). |
+| 2 | Thin rubric coverage | **Done for ranking.** `StockScore.fundamentals_coverage_pct`; a card under 60% is `thin`, marked in the table and ranked after the rest. Rows cached before this default to 100% until refreshed. **Open:** insurers (40% unscored each) and the Indian banks' missing components — find which inputs are missing and why. |
+| 3 | `size_spread` under the limit | **Done.** The limit counted listings read (duplicates included), not companies; `PREVIEW_LIMIT` raised 2,000 → 4,000 (energy: 2,825 listings, previewed in 64 s). **Open:** tech under $500M reads 10,693 listings to match 444, because the size filter is applied after FX conversion — the preview still falls back there. |
+| 4 | High fundamentals, mostly loss years | Open (needs a signal; no rubric change without the user). |
+| 5 | Exactly 50.0 | **Verified, nothing to fix.** XOM, 2222.SR, MC.PA, 6101.T are all the growth veto, with the evidence line saying so. |
+| 6 | Negative risk-adjusted | **Done** (floored at 0). The other small items are open. |
+
 Each issue below gives the evidence, where to look, and what "fixed" means.
 They are ordered by how much they can mislead a user. **Verify each from the
 live numbers before changing code** (`python3 -m fundamental_engine analyse

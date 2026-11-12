@@ -140,6 +140,7 @@ WIDE_COVERAGE_URGENT_OUTLETS = 10
 
 # Tape and data.
 DRAWDOWN_INFO_PCT = 30.0
+DOUBT_PE = 5.0  # below this, a positive P/E is a question, not a bargain
 DRAWDOWN_ALERT_PCT = 50.0
 # A fiscal year's audited numbers normally land within ~3 months of
 # year-end, so anything older than 12 + 3 months means a missed filing,
@@ -198,6 +199,7 @@ class EarlySignalKind(StrEnum):
     CREDIT_RATING_NEWS = "credit_rating_news"
     # Tape and data
     PRICE_DRAWDOWN = "price_drawdown"
+    PRICED_FOR_DOUBT = "priced_for_doubt"
     STALE_STATEMENTS = "stale_statements"
     UNRELIABLE_QUOTE = "unreliable_quote"
     RECENTLY_LISTED = "recently_listed"
@@ -794,6 +796,20 @@ def _credit_rating_news(facts: _Facts) -> EarlySignal | None:
 # ── Tape and data ────────────────────────────────────────────────────────────
 
 
+def _priced_for_doubt(facts: _Facts) -> EarlySignal | None:
+    """A profitable company at a handful of times earnings: the market doubts something."""
+    pe = facts.snap.pe_ratio
+    if pe is None or pe <= 0 or pe >= DOUBT_PE:
+        return None
+    return _concern(
+        EarlySignalKind.PRICED_FOR_DOUBT,
+        Severity.ALERT,
+        f"The price is {pe:.1f}× earnings. A profit this cheap usually means the market doubts "
+        f"it will last, doubts the accounts, or cannot get its money out — or the data is "
+        f"wrong. The valuation score takes the figure at face value: find the reason first.",
+    )
+
+
 def _price_drawdown(facts: _Facts) -> EarlySignal | None:
     price, high = facts.snap.current_price, facts.snap.high_52w
     if price is None or not high or high <= 0:
@@ -870,6 +886,7 @@ _DETECTORS: tuple[_Detector, ...] = (
     _asset_quality_shift,
     _governance_news,
     _credit_rating_news,
+    _priced_for_doubt,
     _price_drawdown,
     _stale_statements,
     _recently_listed,
