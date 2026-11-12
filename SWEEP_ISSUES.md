@@ -140,10 +140,14 @@ to fix; if any is the neutral prior, that is a data bug.
   month of trading on record for this listing") and both readings. The
   screen's one-listing-per-company rule already prefers the most traded
   listing; GOKEX.NS was simply not among that screen's matches.
-- **Scored size mix leans large** at `--score 8` (software 5/3/0, pharma
-  6/2/0, gold 4/2/0 large/mid/small). At the default `--score 25` this was
-  balanced on two industries; re-check on these three before concluding
-  anything.
+- ~~**Scored size mix leans large**~~ **Verified, nothing to fix
+  (2026-11-13).** On the full small-cap tech field (4,050 companies under
+  ₹40B) the top 100 by preview were 55 / 35 / 10 large / mid / small —
+  exactly the best 100 well-covered previews. Thin coverage is a little
+  higher for the smallest third (11% vs 5–6%) but none of the top 100 is
+  thin; the smallest genuinely clear fewer marks (6% / 3% / 1% of
+  well-covered previews score ≥ 80; medians 39 / 38 / 32). The order is
+  the quality order, not a size bias.
 - **Cached Anthropic IPO judgment** (`data_cache/judgments/ANT.json`) still
   carries an integrity veto set under the old "any auditor change" wording.
   The skill is corrected; re-running `/analyse-ipo anthropic` rewrites it.
