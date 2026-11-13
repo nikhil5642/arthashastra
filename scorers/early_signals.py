@@ -57,7 +57,12 @@ from data_sources.fundamentals_source import (
 from data_sources.news_source import NewsCategory, NewsDigest
 from scorers.fundamentals_scorer.industrial import has_negative_equity
 from scorers.risk_profile import risk_profile
-from scorers.valuation_scorer import DOUBT_PE, SustainableEarnings, sustainable_earnings
+from scorers.valuation_scorer import (
+    DOUBT_PE,
+    SustainableEarnings,
+    repeatable_pe,
+    sustainable_earnings,
+)
 from signals.signal_bus import Severity
 
 # ── Thresholds ───────────────────────────────────────────────────────────────
@@ -820,16 +825,17 @@ def _unproven_profit(facts: _Facts) -> EarlySignal | None:
 
 
 def _priced_for_doubt(facts: _Facts) -> EarlySignal | None:
-    """A profitable company at a handful of times earnings: the market doubts something."""
-    pe = facts.snap.pe_ratio
-    if pe is None or pe <= 0 or pe >= DOUBT_PE:
+    """A price under `DOUBT_PE` × repeatable earnings — the same test as the valuation cap."""
+    pe = repeatable_pe(facts.snap)
+    if pe is None or pe >= DOUBT_PE:
         return None
     return _concern(
         EarlySignalKind.PRICED_FOR_DOUBT,
         Severity.ALERT,
-        f"The price is {pe:.1f}× earnings. A profit this cheap usually means the market doubts "
-        f"it will last, doubts the accounts, or cannot get its money out — or the data is "
-        f"wrong. The valuation score is capped until the reason is known: find it first.",
+        f"The price is {pe:.1f}× repeatable earnings. A profit this cheap usually means the "
+        f"market doubts it will last, doubts the accounts, or cannot get its money out — or "
+        f"the data is wrong. The valuation score is held at 70 at most until the reason is "
+        f"known: find it first.",
     )
 
 

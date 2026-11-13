@@ -505,3 +505,14 @@ def test_a_profit_after_mostly_loss_years_is_flagged_as_unproven():
     assert not flagged([-30.0, -12.0, 16.0])  # too short a record to call
     assert not flagged([-30.0, -12.0, -4.0, 2.0, -6.0], profit=-1e8)  # still losing: said elsewhere
     assert not flagged([-30.0, -12.0, -4.0, 2.0, 16.0], profit=None)  # unknown says nothing
+
+
+
+def test_the_doubt_alert_uses_the_caps_own_test_not_the_raw_pe():
+    """4× reported, but 60% of it one-off: 10× repeatable — no cap, so no alert claiming one."""
+    from data_sources.fundamentals_source import BalanceSheetSnapshot
+    from scorers.early_signals import EarlySignalKind, detect_early_signals
+
+    padded = BalanceSheetSnapshot(ticker="PAD", as_of_date="2026-11-13", pe_ratio=4.0,
+                                  earnings_yield=25.0, core_earnings_ratio_fy=0.4)
+    assert EarlySignalKind.PRICED_FOR_DOUBT not in {s.kind for s in detect_early_signals(padded)}
